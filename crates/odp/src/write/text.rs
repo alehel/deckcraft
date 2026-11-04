@@ -219,11 +219,11 @@ fn list_level(w: &mut Writer, ctx: &Ctx, level: usize, pp: &ParaProps, bullet: &
                 esc(&c)
             )
         }
-        Bullet::AutoNum { scheme, start_at } => {
-            // The start is also the list item's; LibreOffice keeps only this one when it saves.
+        // The start is the list item's (LibreOffice adds a level style's start to it).
+        Bullet::AutoNum { scheme, .. } => {
             let (fmt, prefix, suffix) = num_format(scheme);
             format!(
-                r#"<text:list-level-style-number text:level="{level}" style:num-format="{fmt}" style:num-prefix="{prefix}" style:num-suffix="{suffix}" text:start-value="{start_at}">{props}<style:text-properties{tp}/></text:list-level-style-number>"#
+                r#"<text:list-level-style-number text:level="{level}" style:num-format="{fmt}" style:num-prefix="{prefix}" style:num-suffix="{suffix}">{props}<style:text-properties{tp}/></text:list-level-style-number>"#
             )
         }
         Bullet::Picture { .. } => match picture {
@@ -441,14 +441,24 @@ pub fn text_attrs(w: &mut Writer, ctx: &Ctx, r: &RunProps) -> String {
         Some(Strike::None) => a.push_str(r#" style:text-line-through-style="none""#),
         None => {}
     }
+    // Outlined text LibreOffice can show only as hollow letters in the text's colour: unfilled,
+    // or filled near-white (WordArt's white-with-outline, which filled would vanish on white).
+    let outline_rgb = match r.outline.as_ref().and_then(|o| o.fill.as_ref()) {
+        Some(Fill::Solid { color }) => Some(ctx.color(color, None)),
+        _ => None,
+    };
+    let near_white = |c: Rgba| c.r > 230 && c.g > 230 && c.b > 230;
+    let hollow = outline_rgb.is_some()
+        && match &r.fill {
+            Some(Fill::None) => true,
+            Some(Fill::Solid { color }) => near_white(ctx.color(color, None)),
+            _ => false,
+        };
     let color = match &r.fill {
+        _ if hollow => outline_rgb.map(|c| (c, 1.0)),
         Some(Fill::Solid { color }) => Some((ctx.color(color, None), color.alpha())),
         Some(Fill::Gradient(g)) => g.stops.first().map(|s| (ctx.color(&s.color, None), s.color.alpha())),
-        // Unfilled: an outline shows in the outline's colour, else nothing shows.
-        Some(Fill::None) => match r.outline.as_ref().and_then(|o| o.fill.as_ref()) {
-            Some(Fill::Solid { color }) => Some((ctx.color(color, None), 1.0)),
-            _ => Some((Rgba::BLACK, 0.0)),
-        },
+        Some(Fill::None) => Some((Rgba::BLACK, 0.0)),
         _ => Some((resolve::text_color(ctx, r), 1.0)),
     };
     if let Some((c, alpha)) = color {
@@ -475,9 +485,7 @@ pub fn text_attrs(w: &mut Writer, ctx: &Ctx, r: &RunProps) -> String {
         let (dx, dy) = (sh.dist * sh.dir.to_radians().cos(), sh.dist * sh.dir.to_radians().sin());
         let _ = write!(a, r#" fo:text-shadow="{} {} {} {}""#, pt(dx), pt(dy), pt(sh.blur.max(0.0)), hex(ctx.color(&sh.color, None)));
     }
-    // ODF outlines text hollow, in the text's colour: only unfilled outlined text is that (filled
-    // text keeps its fill, and loses its outline).
-    if r.outline.is_some() && matches!(r.fill, Some(Fill::None)) {
+    if hollow {
         a.push_str(r#" style:text-outline="true""#);
     }
     if let Some(lang) = r.lang.as_deref().filter(|l| !l.is_empty()) {

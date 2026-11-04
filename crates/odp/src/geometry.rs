@@ -101,6 +101,10 @@ const EDGE_MIDDLES: [(f64, f64); 4] = [(0.5, 0.0), (1.0, 0.5), (0.5, 1.0), (0.0,
 /// A shape's connection sites as fractions of its box (none for custom outlines, or no shape).
 fn site_fractions(target: Option<&deckcraft_model::Shape>) -> Vec<(f64, f64)> {
     let Some((t, x)) = target.and_then(|t| Some((t, t.xfrm?))) else { return vec![] };
+    // A custom outline has no sites (and its path can be long: don't build it to learn that).
+    if matches!(t.geom, deckcraft_model::Geom::Custom { .. }) {
+        return vec![];
+    }
     let (w, h) = (x.w.max(1e-6), x.h.max(1e-6));
     shape_geometry(&t.geom, w, h).sites.iter().map(|p| (p.x / w, p.y / h)).collect()
 }

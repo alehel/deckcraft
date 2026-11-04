@@ -12,6 +12,9 @@ use crate::dom::{El, attr, kids};
 use crate::styles::Props;
 use crate::{units, vocab};
 
+/// Most hatch tiles one document draws (each a picture of its own).
+const MAX_HATCH_TILES: usize = 64;
+
 impl Reader<'_> {
     pub(super) fn background(&mut self, page: &Props) -> Option<Background> {
         let fill = page.get("draw:fill")?;
@@ -78,10 +81,12 @@ impl Reader<'_> {
                     ha("draw:rotation").and_then(|a| units::angle(a, true)).unwrap_or(0.0),
                     solid.then_some(color),
                 );
-                // Drawn once per hatch, however many shapes use it.
+                // Drawn once per hatch, however many shapes use it; past the document's tiles, a
+                // hatch is the nearest pattern.
                 let key = hatch.media_name();
                 let tile = match self.hatch_tiles.get(&key) {
                     Some(t) => *t,
+                    None if self.hatch_tiles.len() >= MAX_HATCH_TILES => None,
                     None => {
                         let t = hatch.tile().and_then(|tile| {
                             let px = f64::from(tile.px);

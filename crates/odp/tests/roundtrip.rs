@@ -173,6 +173,8 @@ fn tables_and_pictures_round_trip() {
     t.rows[1].cells[2] = Cell::new("19");
     t.rows[0].cells[1].fill = Some(Fill::solid(ColorRef::rgb(Rgba::rgb(0x2a, 0x60, 0x99))));
     t.merge(1, 0, 1, 1);
+    t.first_row = true;
+    t.band_row = true;
     let table = Shape { xfrm: Some(Xfrm::new(20.0, 20.0, 300.0, 80.0)), kind: ShapeKind::Table(t), ..Default::default() };
     let mut p = deck_with(vec![table]);
     // A 1×1 PNG.
@@ -193,7 +195,7 @@ fn tables_and_pictures_round_trip() {
     let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
     let s = shapes_of(&back);
     let ShapeKind::Table(t) = &s[0].kind else { panic!("{:?}", s[0].kind) };
-    assert_eq!((t.n_rows(), t.n_cols()), (2, 3));
+    assert_eq!((t.n_rows(), t.n_cols(), t.first_row, t.band_row), (2, 3, true, true));
     assert_eq!(t.rows[0].cells[0].text.text(), "Region");
     assert_eq!(t.rows[1].cells[2].text.text(), "19");
     assert_eq!(t.rows[1].cells[0].grid_span, 2);
@@ -817,7 +819,7 @@ fn media_picture_bullets_columns_and_embedded_fonts_round_trip() {
     let video = Shape {
         id: ShapeId(p.alloc_id().unwrap()),
         xfrm: Some(Xfrm::new(10.0, 10.0, 320.0, 180.0)),
-        kind: ShapeKind::Media(deckcraft_model::MediaClip { media: clip, video: true, loop_play: true, volume: 1.0, ..Default::default() }),
+        kind: ShapeKind::Media(deckcraft_model::MediaClip { media: clip, video: true, loop_play: true, volume: 0.5, ..Default::default() }),
         ..Default::default()
     };
     let mut para = Paragraph::new("Picture bullet");
@@ -841,7 +843,7 @@ fn media_picture_bullets_columns_and_embedded_fonts_round_trip() {
     let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
     let s = shapes_of(&back);
     let ShapeKind::Media(m) = &s[0].kind else { panic!("{:?}", s[0].kind) };
-    assert!(m.video && m.loop_play);
+    assert!(m.video && m.loop_play && (m.volume - 0.5).abs() < 0.01, "{m:?}");
     assert_eq!(back.media(m.media).map(|i| i.data.to_vec()), Some(b"\0\0\0\x18ftypmp42not-really-a-video".to_vec()));
     let t = s[1].text.as_ref().unwrap();
     let Some(Bullet::Picture { media }) = t.paragraphs[0].props.bullet else { panic!("{:?}", t.paragraphs[0].props.bullet) };
@@ -973,7 +975,7 @@ fn links_notes_numbering_and_vertical_text_survive_libreoffice() {
     assert!(xml.contains("#action?jump=nextslide"));
     assert!(xml.contains(r#"xmlns:dom="http://www.w3.org/2001/xml-events""#));
     assert!(xml.contains(r#"-notes" presentation:class="notes""#));
-    assert!(xml.contains(r#"text:start-value="3">"#) && xml.contains(r#"loext:writing-mode="bt-lr""#));
+    assert!(xml.contains(r#"text:start-value="3""#) && xml.contains(r#"loext:writing-mode="bt-lr""#));
     let back = deckcraft_odp::import(&bytes).unwrap();
     let s = shapes_of(&back);
     let runs = &s[0].text.as_ref().unwrap().paragraphs[0].runs;
@@ -1245,4 +1247,53 @@ fn round_three_fixes_hold() {
     assert!(matches!(children[0].fill, None | Some(Fill::None)), "{:?}", children[0].fill);
     let a = &back.slides[0].animations;
     assert_eq!((a.len(), a[0].paragraph), (1, None));
+}
+
+/// Review round 3, re-test: builds share the page's effect budget when expanded; glue to a long
+/// custom path doesn't build the path per connector; hatches over many colours draw a bounded
+/// number of tiles; table flags round-trip.
+#[test]
+fn round_three_retest_fixes_hold() {
+    use deckcraft_model::anim::{Animation, TextBuild};
+    // 300 paragraphs, 300 by-paragraph builds on them.
+    let lines: Vec<String> = (0..300).map(|i| format!("line {i}")).collect();
+    let text = Shape {
+        xfrm: Some(Xfrm::new(50.0, 50.0, 300.0, 300.0)),
+        text_box: true,
+        text: Some(TextBody::from_text(&lines.join("\n"))),
+        ..Default::default()
+    };
+    let mut p = deck_with(vec![text]);
+    let id = shapes_of(&p)[0].id;
+    Arc::make_mut(&mut p.slides[0]).animations =
+        (0..300).map(|_| Animation { shape: id, text_build: TextBuild::ByParagraph, ..Default::default() }).collect();
+    let started = std::time::Instant::now();
+    let xml = part(&deckcraft_odp::export(&p).unwrap(), "content.xml");
+    assert!(xml.matches("presentation:preset-class=").count() <= 2_000 + 300, "{}", xml.matches("presentation:preset-class=").count());
+    assert!(started.elapsed().as_secs() < 20);
+
+    let flat = |body: String| {
+        format!(
+            r#"<office:document {NS} office:mimetype="application/vnd.oasis.opendocument.presentation"><office:styles><draw:hatch draw:name="h" draw:style="triple" draw:distance="150pt"/></office:styles><office:body><office:presentation><draw:page>{body}</draw:page></office:presentation></office:body></office:document>"#
+        )
+    };
+    // 2000 connectors glued to one long custom path.
+    let d: String = (0..50_000).map(|i| format!(" L{} {}", i % 1000, i % 777)).collect();
+    let glue = format!(
+        r#"<draw:path xml:id="t" svg:width="10cm" svg:height="10cm" svg:viewBox="0 0 1000 1000" svg:d="M0 0{d}"/>{}"#,
+        r#"<draw:connector draw:start-shape="t" draw:end-shape="t"/>"#.repeat(2000)
+    );
+    let started = std::time::Instant::now();
+    deckcraft_odp::import(flat(glue).as_bytes()).unwrap();
+    assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
+    // One hatch over 500 background colours.
+    let styles: String = (0..500)
+        .map(|i| format!(r##"<style:style style:name="g{i}" style:family="graphic"><style:graphic-properties draw:fill="hatch" draw:fill-hatch-name="h" draw:fill-hatch-solid="true" draw:fill-color="#{:06x}"/></style:style>"##, i * 97))
+        .collect();
+    let rects: String = (0..500).map(|i| format!(r#"<draw:rect draw:style-name="g{i}" svg:width="1cm" svg:height="1cm"/>"#)).collect();
+    let doc = flat(rects).replace("</office:styles>", &format!("{styles}</office:styles>"));
+    let started = std::time::Instant::now();
+    let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+    assert!(p.media.len() <= 64, "{}", p.media.len());
+    assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
 }

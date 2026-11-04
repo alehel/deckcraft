@@ -450,14 +450,18 @@ fn join_builds(read: Vec<(Animation, Option<&str>)>) -> Vec<Animation> {
 pub fn expand_builds(animations: &[Animation], shapes: &[deckcraft_model::Shape]) -> Vec<Effect> {
     let mut out = vec![];
     for (n, a) in animations.iter().enumerate() {
-        let text = deckcraft_model::find_shape(shapes, a.shape).and_then(|s| s.text.as_ref()).filter(|_| a.text_build == TextBuild::ByParagraph);
+        // Expanded effects share the page's effect budget; past it, a build plays as one block.
+        let room = out.len() < MAX_EFFECTS;
+        let text =
+            deckcraft_model::find_shape(shapes, a.shape).and_then(|s| s.text.as_ref()).filter(|_| room && a.text_build == TextBuild::ByParagraph);
         let Some(text) = text else {
             out.push(Effect { a: a.clone(), build: None });
             continue;
         };
         let roles = deckcraft_model::anim::paragraph_build_roles(text);
         let mut tops = 0;
-        for (i, role) in roles.iter().enumerate().take(deckcraft_model::anim::MAX_BUILD_PARAGRAPHS) {
+        let limit = deckcraft_model::anim::MAX_BUILD_PARAGRAPHS.min(MAX_EFFECTS - out.len());
+        for (i, role) in roles.iter().enumerate().take(limit) {
             let start = match role {
                 BuildRole::Top => {
                     tops += 1;

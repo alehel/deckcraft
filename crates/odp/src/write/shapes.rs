@@ -124,10 +124,13 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
             let mime = w.p.media(m.media).map(|i| i.content_type.clone()).unwrap_or_default();
             let poster = m.poster.and_then(|p| w.media_path(p)).map(|p| format!("<draw:image {}/>", embed(&p))).unwrap_or_default();
             let plugin = format!(
-                r#"<draw:plugin {} draw:mime-type="{}"><draw:param draw:name="Loop" draw:value="{}"/><draw:param draw:name="Mute" draw:value="false"/><draw:param draw:name="VolumeDB" draw:value="0"/><draw:param draw:name="Zoom" draw:value="fit"/></draw:plugin>{poster}"#,
+                r#"<draw:plugin {} draw:mime-type="{}"><draw:param draw:name="Loop" draw:value="{}"/><draw:param draw:name="Mute" draw:value="{}"/><draw:param draw:name="VolumeDB" draw:value="{}"/><draw:param draw:name="Zoom" draw:value="fit"/></draw:plugin>{poster}"#,
                 embed(&href),
                 esc(&mime),
-                m.loop_play
+                m.loop_play,
+                m.volume <= 0.0,
+                // Loudness in decibels of the full volume.
+                trim(if m.volume > 0.0 { (20.0 * m.volume.min(1.0).log10()).max(-100.0) } else { 0.0 }, 1)
             );
             frame(&no_paint(auto), &common, &x, &plugin, &desc, &events)
         }
@@ -358,14 +361,27 @@ fn enhanced_geometry(s: &Shape, x: &Xfrm) -> String {
         path.push_str(" N ");
     }
     let tr = geo.text_rect;
-    let ta = format!("{} {} {} {}", trim(tr.x0 * vw / w, 0), trim(tr.y0 * vh / h, 0), trim(tr.x1 * vw / w, 0), trim(tr.y1 * vh / h, 0));
+    // The text area, unless it is the whole box (the default; LibreOffice can't grow a shape to
+    // fit its text with a fixed one).
+    let whole = tr.x0.abs() < 1e-6 && tr.y0.abs() < 1e-6 && (tr.x1 - w).abs() < 1e-6 && (tr.y1 - h).abs() < 1e-6;
+    let ta = if whole {
+        String::new()
+    } else {
+        format!(
+            r#" draw:text-areas="{} {} {} {}""#,
+            trim(tr.x0 * vw / w, 0),
+            trim(tr.y0 * vh / h, 0),
+            trim(tr.x1 * vw / w, 0),
+            trim(tr.y1 * vh / h, 0)
+        )
+    };
     let (kind, modifiers) = match &s.geom {
         Geom::Preset { name, adj } => (format!("ooxml-{name}"), adj.iter().map(|a| trim(*a, 3)).collect::<Vec<_>>().join(" ")),
         Geom::Custom { .. } => ("non-primitive".to_string(), String::new()),
     };
     let mods = if modifiers.is_empty() { String::new() } else { format!(r#" draw:modifiers="{modifiers}""#) };
     format!(
-        r#"<draw:enhanced-geometry svg:viewBox="0 0 {} {}" draw:text-areas="{ta}" draw:type="{}"{mods} draw:mirror-horizontal="{}" draw:mirror-vertical="{}" draw:enhanced-path="{}"/>"#,
+        r#"<draw:enhanced-geometry svg:viewBox="0 0 {} {}"{ta} draw:type="{}"{mods} draw:mirror-horizontal="{}" draw:mirror-vertical="{}" draw:enhanced-path="{}"/>"#,
         trim(vw, 0),
         trim(vh, 0),
         esc(&kind),
@@ -751,7 +767,21 @@ fn event_listener(w: &Writer, a: &Action) -> String {
 // Tables
 
 fn table(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, t: &Table) -> String {
-    let mut out = String::from("<table:table>");
+    // Which of the table style's parts apply.
+    let mut out = String::from("<table:table");
+    for (k, on) in [
+        ("table:use-first-row-styles", t.first_row),
+        ("table:use-last-row-styles", t.last_row),
+        ("table:use-first-column-styles", t.first_col),
+        ("table:use-last-column-styles", t.last_col),
+        ("table:use-banding-rows-styles", t.band_row),
+        ("table:use-banding-columns-styles", t.band_col),
+    ] {
+        if on {
+            let _ = write!(out, r#" {k}="true""#);
+        }
+    }
+    out.push('>');
     for cw in &t.cols {
         let st = auto.style("table-column", "co", None, &format!(r#"<style:table-column-properties style:column-width="{}"/>"#, cm(*cw)));
         let _ = write!(out, r#"<table:table-column table:style-name="{st}"/>"#);
