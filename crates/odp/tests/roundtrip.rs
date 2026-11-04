@@ -412,3 +412,48 @@ fn comments_round_trip() {
     assert!((cs[0].x - 100.0).abs() < 0.01 && (cs[0].y - 50.0).abs() < 0.01);
     assert_eq!(cs[1].text, "Done");
 }
+
+#[test]
+fn media_picture_bullets_columns_and_embedded_fonts_round_trip() {
+    let mut p = deck_with(vec![]);
+    let clip = p.add_media("talk.mp4", "video/mp4", b"\0\0\0\x18ftypmp42not-really-a-video".to_vec()).unwrap();
+    let dot = p.add_media("dot.png", "image/png", vec![0x89, b'P', b'N', b'G', 1, 2, 3]).unwrap();
+    let video = Shape {
+        id: ShapeId(p.alloc_id().unwrap()),
+        xfrm: Some(Xfrm::new(10.0, 10.0, 320.0, 180.0)),
+        kind: ShapeKind::Media(deckcraft_model::MediaClip { media: clip, video: true, loop_play: true, volume: 1.0, ..Default::default() }),
+        ..Default::default()
+    };
+    let mut para = Paragraph::new("Picture bullet");
+    para.props.bullet = Some(Bullet::Picture { media: dot });
+    let mut body = TextBody { paragraphs: vec![para], ..Default::default() };
+    body.body.columns = Some(2);
+    body.body.col_spacing = Some(18.0);
+    let tb = Shape {
+        id: ShapeId(p.alloc_id().unwrap()),
+        xfrm: Some(Xfrm::new(10.0, 200.0, 400.0, 100.0)),
+        text_box: true,
+        text: Some(body),
+        ..Default::default()
+    };
+    let font = deckcraft_fonts::bundled().into_iter().next().map(<[u8]>::to_vec);
+    if let Some(f) = &font {
+        let id = p.add_media("face.ttf", "application/x-font-ttf", f.clone()).unwrap();
+        p.embedded_fonts.push(deckcraft_model::EmbeddedFont { typeface: "Deck Face".into(), regular: Some(id), ..Default::default() });
+    }
+    Arc::make_mut(&mut p.slides[0]).shapes.extend([video, tb]);
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    let s = shapes_of(&back);
+    let ShapeKind::Media(m) = &s[0].kind else { panic!("{:?}", s[0].kind) };
+    assert!(m.video && m.loop_play);
+    assert_eq!(back.media(m.media).map(|i| i.data.to_vec()), Some(b"\0\0\0\x18ftypmp42not-really-a-video".to_vec()));
+    let t = s[1].text.as_ref().unwrap();
+    let Some(Bullet::Picture { media }) = t.paragraphs[0].props.bullet else { panic!("{:?}", t.paragraphs[0].props.bullet) };
+    assert_eq!(back.media(media).map(|i| i.data.to_vec()), Some(vec![0x89, b'P', b'N', b'G', 1, 2, 3]));
+    assert_eq!(t.body.columns, Some(2));
+    assert!((t.body.col_spacing.unwrap() - 18.0).abs() < 0.01);
+    if let Some(f) = font {
+        let ef = back.embedded_fonts.iter().find(|e| e.typeface == "Deck Face").unwrap();
+        assert_eq!(back.media(ef.regular.unwrap()).map(|i| i.data.to_vec()), Some(f));
+    }
+}

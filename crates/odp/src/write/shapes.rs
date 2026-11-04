@@ -160,6 +160,11 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, x: &Xfrm, co
     g.push_str(&line_attrs(w, ctx, &line, ph_line));
     g.push_str(&shadow_attrs_ph(ctx, effects.as_ref(), ph_fx));
     g.push_str(&body_attrs(&body));
+    // Text columns.
+    let columns = match body.columns.filter(|n| *n > 1) {
+        Some(n) => format!(r#"<style:columns fo:column-count="{n}" fo:column-gap="{}"/>"#, cm(body.col_spacing.unwrap_or(0.0))),
+        None => String::new(),
+    };
     let ph = s.ph.as_ref().map(|p| p.kind);
     let class = ph.and_then(class_of);
     let outline = matches!(ph, Some(PhType::Body | PhType::Obj));
@@ -169,11 +174,11 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, x: &Xfrm, co
     let (style_attr, class_attr) = match class {
         Some(c) => {
             let parent = format!("{}-{}", w.page, parent_style_of(c));
-            let st = auto.style("presentation", "pr", Some(&parent), &format!("<style:graphic-properties{g}/>"));
+            let st = auto.style("presentation", "pr", Some(&parent), &format!("<style:graphic-properties{g}>{columns}</style:graphic-properties>"));
             (format!(r#" presentation:style-name="{st}""#), format!(r#" presentation:class="{c}""#))
         }
         None => {
-            let st = auto.style("graphic", "gr", Some("standard"), &format!("<style:graphic-properties{g}/>"));
+            let st = auto.style("graphic", "gr", Some("standard"), &format!("<style:graphic-properties{g}>{columns}</style:graphic-properties>"));
             (format!(r#" draw:style-name="{st}""#), String::new())
         }
     };

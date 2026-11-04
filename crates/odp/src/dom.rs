@@ -99,6 +99,25 @@ pub fn kid<'a>(el: &'a El, name: &str) -> Option<&'a El> {
     el.elements().find(|e| e.name == name)
 }
 
+/// Depth-first search for the first descendant with this name (bounded).
+pub fn find<'a>(el: &'a El, name: &str) -> Option<&'a El> {
+    fn rec<'a>(el: &'a El, name: &str, depth: usize) -> Option<&'a El> {
+        if depth > crate::read::MAX_DEPTH {
+            return None;
+        }
+        for e in el.elements() {
+            if e.name == name {
+                return Some(e);
+            }
+            if let Some(f) = rec(e, name, depth + 1) {
+                return Some(f);
+            }
+        }
+        None
+    }
+    rec(el, name, 0)
+}
+
 /// XML text escaping for writing.
 pub fn esc(s: &str) -> String {
     let mut o = String::with_capacity(s.len());

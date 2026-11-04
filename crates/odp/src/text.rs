@@ -458,8 +458,11 @@ fn apply_list_level(store: &Store, pp: &mut ParaProps, level: Option<&El>, para:
             let c: String = c.chars().take(1).collect();
             if c.is_empty() { Bullet::None } else { Bullet::Char { char: c } }
         }
-        // Picture bullets: a plain bullet until the reader resolves the image.
-        _ => Bullet::Char { char: "•".into() },
+        // Picture bullets: the image the reader loaded for them.
+        _ => match attr(l, "xlink:href").and_then(|h| store.image_bullets.get(h)) {
+            Some(m) => Bullet::Picture { media: *m },
+            None => Bullet::Char { char: "•".into() },
+        },
     });
 }
 

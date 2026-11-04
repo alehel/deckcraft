@@ -115,6 +115,10 @@ pub struct Store {
     pub dashes: HashMap<String, El>,
     pub opacities: HashMap<String, El>,
     fonts: HashMap<String, String>,
+    /// Font faces with embedded font files (`svg:font-face-uri`).
+    pub font_faces: Vec<El>,
+    /// Picture bullets: `xlink:href` → the media read from the package.
+    pub image_bullets: HashMap<String, deckcraft_model::MediaId>,
     pub page_layouts: HashMap<String, Props>,
     /// Display names, for writing styles back (`Default-title` etc. are plain already).
     pub common_names: Vec<(String, String)>,
@@ -141,6 +145,14 @@ fn read_style(el: &El) -> Style {
                 }
                 if let Some(l) = kid(p, "text:list-style") {
                     s.list = Some(l.clone());
+                }
+                // Text columns (`style:columns`), kept with the graphic properties.
+                if let Some(c) = kid(p, "style:columns") {
+                    for k in ["fo:column-count", "fo:column-gap"] {
+                        if let Some(v) = attr(c, k) {
+                            s.graphic.insert(k.to_string(), v.to_string());
+                        }
+                    }
                 }
             }
             "style:paragraph-properties" => {
@@ -170,6 +182,9 @@ impl Store {
                 if let Some(name) = attr(f, "style:name") {
                     let fam = attr(f, "svg:font-family").map(unquote).unwrap_or_else(|| name.to_string());
                     self.fonts.entry(name.to_string()).or_insert(fam);
+                }
+                if crate::dom::find(f, "svg:font-face-uri").is_some() && self.font_faces.len() < 256 {
+                    self.font_faces.push(f.clone());
                 }
             }
         }
@@ -302,6 +317,17 @@ impl Store {
         let mut out = self.default_of(family);
         if let Some(n) = name {
             out.merge(&self.chain(scope, family, n));
+        }
+        out
+    }
+
+    /// Every list style, standalone or inside a style, for collecting picture bullets.
+    pub fn all_lists(&self) -> Vec<&El> {
+        let mut out: Vec<&El> = self.lists_common.values().chain(self.lists_auto_styles.values()).chain(self.lists_auto_content.values()).collect();
+        for s in self.common.values().chain(self.auto_styles.values()).chain(self.auto_content.values()) {
+            if let Some(l) = &s.list {
+                out.push(l);
+            }
         }
         out
     }

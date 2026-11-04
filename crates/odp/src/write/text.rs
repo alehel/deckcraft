@@ -159,7 +159,6 @@ fn list_level(w: &mut Writer, ctx: Option<&Ctx>, level: usize, pp: &ParaProps, b
         }
         _ => tp.push_str(r#" style:use-window-font-color="true""#),
     }
-    let _ = w;
     match bullet {
         Bullet::Char { char } => {
             let c: String = char.chars().take(1).collect();
@@ -174,9 +173,19 @@ fn list_level(w: &mut Writer, ctx: Option<&Ctx>, level: usize, pp: &ParaProps, b
                 r#"<text:list-level-style-number text:level="{level}" style:num-format="{fmt}" style:num-prefix="{prefix}" style:num-suffix="{suffix}">{props}<style:text-properties{tp}/></text:list-level-style-number>"#
             )
         }
-        Bullet::Picture { .. } => format!(
-            r#"<text:list-level-style-bullet text:level="{level}" text:bullet-char="•">{props}<style:text-properties{tp}/></text:list-level-style-bullet>"#
-        ),
+        Bullet::Picture { media } => match w.media_path(*media) {
+            Some(href) => {
+                let edge = cm(size * rel.clamp(0.25, 4.0));
+                let props = props.replace("/>", &format!(r#" fo:width="{edge}" fo:height="{edge}"/>"#));
+                format!(
+                    r#"<text:list-level-style-image text:level="{level}" xlink:href="{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad">{props}</text:list-level-style-image>"#,
+                    esc(&href)
+                )
+            }
+            None => format!(
+                r#"<text:list-level-style-bullet text:level="{level}" text:bullet-char="•">{props}<style:text-properties{tp}/></text:list-level-style-bullet>"#
+            ),
+        },
         Bullet::None => format!(r#"<text:list-level-style-number text:level="{level}" style:num-format="">{props}</text:list-level-style-number>"#),
     }
 }

@@ -66,15 +66,27 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         .filter(|s| s.width >= 1.0 && s.height >= 1.0 && s.width < 1.0e5 && s.height < 1.0e5)
         .unwrap_or(Size::new(28.0 * 72.0 / 2.54, 15.75 * 72.0 / 2.54));
 
-    let mut r = Reader {
-        pkg: &pkg,
-        store: std::rc::Rc::new(store),
-        p: defaults::blank_presentation(size, Default::default(), false),
-        shapes: 0,
-        master_index: HashMap::new(),
-        page_names: vec![],
-        targets: HashMap::new(),
-    };
+    let mut p = defaults::blank_presentation(size, Default::default(), false);
+    // Picture bullets and embedded fonts: loaded into the presentation before the styles are
+    // shared with the text reader.
+    let hrefs: Vec<String> = store
+        .all_lists()
+        .iter()
+        .flat_map(|l| kids(l, "text:list-level-style-image"))
+        .filter_map(|i| attr(i, "xlink:href"))
+        .map(str::to_string)
+        .collect();
+    for h in hrefs.into_iter().take(256) {
+        if let Some(data) = pkg.get(&h) {
+            let name = h.rsplit('/').next().unwrap_or(&h).to_string();
+            if let Some(id) = p.add_media(&name, mime_for(&name), data.to_vec()) {
+                store.image_bullets.insert(h, id);
+            }
+        }
+    }
+    embedded_fonts(&pkg, &store, &mut p);
+    let mut r =
+        Reader { pkg: &pkg, store: std::rc::Rc::new(store), p, shapes: 0, master_index: HashMap::new(), page_names: vec![], targets: HashMap::new() };
     r.p.masters.clear();
     if let Some(m) = meta.as_ref().and_then(|m| kid(m, "office:meta")) {
         r.meta(m);
@@ -725,6 +737,9 @@ impl Reader<'_> {
                 }
             };
             s.ph = None;
+        } else if let Some(clip) = kid(e, "draw:plugin").and_then(|pl| self.media_clip(e, pl)) {
+            s.kind = ShapeKind::Media(clip);
+            s.ph = None;
         } else if is_object || kid(e, "draw:plugin").is_some() {
             s.kind = ShapeKind::Opaque { xml: String::new(), preview: None, label: "Embedded object".into(), parts: vec![] };
         } else if s.ph.is_none() {
@@ -733,6 +748,37 @@ impl Reader<'_> {
             s.text = Some(self.text_body(tcx, e, g));
         }
         Some(())
+    }
+
+    /// Audio or video (`draw:plugin`), its poster picture and play settings.
+    fn media_clip(&mut self, frame: &El, pl: &El) -> Option<deckcraft_model::MediaClip> {
+        let href = attr(pl, "xlink:href")?;
+        let mime = attr(pl, "draw:mime-type").map(str::to_string).unwrap_or_else(|| media_mime(href).to_string());
+        let name = href.rsplit('/').next().unwrap_or(href).to_string();
+        let media = match self.pkg.get(href) {
+            Some(data) => self.p.add_media(&name, &mime, data.to_vec())?,
+            None => {
+                // A linked file: kept as a link.
+                let id = self.p.add_media(&name, &mime, vec![])?;
+                if let Some(m) = self.p.media.iter_mut().find(|m| m.id == id) {
+                    m.link = Some(href.to_string());
+                }
+                id
+            }
+        };
+        let param = |n: &str| kids(pl, "draw:param").find(|p| attr(p, "draw:name") == Some(n)).and_then(|p| attr(p, "draw:value"));
+        let video = mime.starts_with("video/")
+            || !mime.starts_with("audio/") && !matches!(name.rsplit('.').next(), Some("mp3" | "wav" | "ogg" | "m4a" | "flac" | "wma" | "aac"));
+        let poster = self.frame_image(frame);
+        let db = param("VolumeDB").and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(0.0);
+        Some(deckcraft_model::MediaClip {
+            media,
+            video,
+            poster,
+            volume: if param("Mute") == Some("true") { 0.0 } else { 10f64.powf(db / 20.0).clamp(0.0, 1.0) },
+            loop_play: param("Loop") == Some("true"),
+            ..Default::default()
+        })
     }
 
     /// The chart an embedded object holds (`Object 1/content.xml`), if it is a chart.
@@ -1257,6 +1303,41 @@ fn complete_para(p: &mut deckcraft_model::text::ParaProps) {
     p.bullet.get_or_insert(deckcraft_model::text::Bullet::None);
 }
 
+/// Fonts embedded in the package (`svg:font-face-uri` in the font face declarations).
+fn embedded_fonts(pkg: &Package, store: &Store, p: &mut Presentation) {
+    for f in &store.font_faces {
+        let family = attr(f, "svg:font-family").map(crate::styles::unquote).or_else(|| attr(f, "style:name").map(str::to_string)).unwrap_or_default();
+        if family.is_empty() {
+            continue;
+        }
+        let bold = attr(f, "svg:font-weight").is_some_and(|w| w == "bold" || w.parse::<u32>().is_ok_and(|n| n >= 600));
+        let italic = attr(f, "svg:font-style").is_some_and(|s| s == "italic" || s == "oblique");
+        let Some(uri) = crate::dom::find(f, "svg:font-face-uri").and_then(|u| attr(u, "xlink:href")) else { continue };
+        let Some(data) = pkg.get(uri) else { continue };
+        if deckcraft_fonts::embedded_sfnt(data).is_none() {
+            continue;
+        }
+        let name = uri.rsplit('/').next().unwrap_or(uri).to_string();
+        let Some(id) = p.add_media(&name, "application/x-font-ttf", data.to_vec()) else { continue };
+        let i = match p.embedded_fonts.iter().position(|e| e.typeface == family) {
+            Some(i) => i,
+            None => {
+                p.embedded_fonts.push(deckcraft_model::EmbeddedFont { typeface: family.clone(), ..Default::default() });
+                p.embedded_fonts.len() - 1
+            }
+        };
+        if let Some(ef) = p.embedded_fonts.get_mut(i) {
+            let slot = match (bold, italic) {
+                (true, true) => &mut ef.bold_italic,
+                (true, false) => &mut ef.bold,
+                (false, true) => &mut ef.italic,
+                (false, false) => &mut ef.regular,
+            };
+            slot.get_or_insert(id);
+        }
+    }
+}
+
 /// A comment (`officeooo:annotation`): author, initials, date, text and where it is pinned.
 fn comment(e: &El) -> deckcraft_model::Comment {
     let t = |n: &str| kid(e, n).map(|c| c.text()).unwrap_or_default();
@@ -1340,6 +1421,10 @@ fn body_props(g: &Props, custom_shape: bool) -> BodyProps {
     };
     if g.get("draw:auto-grow-height").map(String::as_str) == Some("true") {
         b.autofit = Some(AutoFit::Shape);
+    }
+    if let Some(n) = g.get("fo:column-count").and_then(|v| v.parse::<u32>().ok()).filter(|n| *n > 1) {
+        b.columns = Some(n.min(16));
+        b.col_spacing = g.get("fo:column-gap").and_then(|v| units::length(v));
     }
     if g.get("style:shrink-to-fit").map(String::as_str) == Some("true") || g.get("draw:fit-to-size").is_some_and(|v| v == "shrink-to-fit") {
         b.autofit = Some(AutoFit::Shrink { font_scale: None, line_reduction: 0.0 });
@@ -1735,6 +1820,24 @@ fn duration_iso(s: &str) -> Option<u32> {
         num.clear();
     }
     (total.is_finite() && total >= 0.0).then(|| total.min(f64::from(u32::MAX)) as u32)
+}
+
+fn media_mime(name: &str) -> &'static str {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        "avi" => "video/x-msvideo",
+        "wmv" => "video/x-ms-wmv",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" | "oga" => "audio/ogg",
+        "m4a" => "audio/mp4",
+        "flac" => "audio/flac",
+        _ => "application/octet-stream",
+    }
 }
 
 pub fn mime_for(name: &str) -> &'static str {

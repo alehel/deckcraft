@@ -1191,6 +1191,7 @@ version = "0.15.0"
 dependencies = [
  "deckcraft-color",
  "deckcraft-engine",
+ "deckcraft-fonts",
  "deckcraft-geom",
  "deckcraft-model",
  "deckcraft-pptx",

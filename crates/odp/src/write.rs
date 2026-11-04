@@ -275,7 +275,8 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         }
     }
     let settings = show_settings(p);
-    let fonts = font_decls(&w.fonts);
+    let embedded = embedded_fonts(&mut w);
+    let fonts = font_decls(&w.fonts, &embedded);
     let content = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?><office:document-content {NS}>{fonts}<office:automatic-styles>{}<number:date-style style:name="D1" number:automatic-order="true"><number:month number:style="long"/><number:text>/</number:text><number:day number:style="long"/><number:text>/</number:text><number:year/></number:date-style></office:automatic-styles><office:body><office:presentation>{decls}{body}{settings}</office:presentation></office:body></office:document-content>"#,
         cauto.out
@@ -288,7 +289,7 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         cm(p.notes_size.width.max(1.0)),
         cm(p.notes_size.height.max(1.0)),
     );
-    let fonts = font_decls(&w.fonts);
+    let fonts = font_decls(&w.fonts, &embedded);
     let styles = format!(
         r##"<?xml version="1.0" encoding="UTF-8"?><office:document-styles {NS}>{fonts}<office:styles>{}<style:default-style style:family="graphic"><style:graphic-properties svg:stroke-color="#3465a4" draw:fill-color="#729fcf" fo:wrap-option="no-wrap"/><style:paragraph-properties style:writing-mode="lr-tb"/><style:text-properties fo:font-size="18pt" fo:language="en" fo:country="US"/></style:default-style><style:style style:name="standard" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0cm" svg:stroke-color="#3465a4" draw:fill="solid" draw:fill-color="#729fcf" fo:padding-top="0.125cm" fo:padding-bottom="0.125cm" fo:padding-left="0.25cm" fo:padding-right="0.25cm" draw:shadow="hidden"/></style:style>{common}</office:styles><office:automatic-styles>{page_layouts}{}</office:automatic-styles><office:master-styles>{masters}</office:master-styles></office:document-styles>"##,
         w.named.out, sauto.out
@@ -361,13 +362,52 @@ pub(crate) fn style_name(s: &str) -> String {
     o
 }
 
-fn font_decls(fonts: &std::collections::BTreeSet<String>) -> String {
+fn font_decls(fonts: &std::collections::BTreeSet<String>, embedded: &[(String, &'static str, &'static str, String)]) -> String {
     let mut s = String::from("<office:font-face-decls>");
     for f in fonts {
-        let _ = write!(s, r#"<style:font-face style:name="{}" svg:font-family="'{}'"/>"#, esc(f), esc(&f.replace('\'', "")));
+        let faces: Vec<_> = embedded.iter().filter(|e| e.0 == *f).collect();
+        if faces.is_empty() {
+            let _ = write!(s, r#"<style:font-face style:name="{}" svg:font-family="'{}'"/>"#, esc(f), esc(&f.replace('\'', "")));
+            continue;
+        }
+        // An embedded font: one face per file, pointing at it.
+        for (k, (_, weight, style, path)) in faces.iter().enumerate() {
+            let name = if k == 0 { f.clone() } else { format!("{f}{k}") };
+            let _ = write!(
+                s,
+                r#"<style:font-face style:name="{}" svg:font-family="'{}'" svg:font-weight="{weight}" svg:font-style="{style}"><svg:font-face-src><svg:font-face-uri xlink:href="{}" xlink:type="simple"><svg:font-face-format svg:string="truetype"/></svg:font-face-uri></svg:font-face-src></style:font-face>"#,
+                esc(&name),
+                esc(&f.replace('\'', "")),
+                esc(path)
+            );
+        }
     }
     s.push_str("</office:font-face-decls>");
     s
+}
+
+/// The embedded font files to write: (family, weight, style, package path).
+fn embedded_fonts(w: &mut Writer) -> Vec<(String, &'static str, &'static str, String)> {
+    let mut out = vec![];
+    for (fi, ef) in w.p.embedded_fonts.iter().enumerate().take(64) {
+        for (slot, id) in ef.faces().into_iter().enumerate() {
+            let Some(id) = id else { continue };
+            let Some(m) = w.p.media(id) else { continue };
+            // An obfuscated or EOT font is written as the plain font inside it.
+            let Some(sfnt) = deckcraft_fonts::embedded_sfnt(&m.data) else { continue };
+            let path = format!("Fonts/f{fi}-{slot}.ttf");
+            w.files.push((path.clone(), "application/x-font-ttf".into(), std::sync::Arc::new(sfnt.to_vec())));
+            w.fonts.insert(ef.typeface.clone());
+            let (weight, style) = match slot {
+                1 => ("bold", "normal"),
+                2 => ("normal", "italic"),
+                3 => ("bold", "italic"),
+                _ => ("normal", "normal"),
+            };
+            out.push((ef.typeface.clone(), weight, style, path));
+        }
+    }
+    out
 }
 
 fn meta_xml(p: &Presentation) -> String {
