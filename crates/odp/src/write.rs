@@ -59,33 +59,32 @@ impl Auto {
         Auto { prefix, ..Default::default() }
     }
 
-    /// A `style:style` of `family` with these property elements; `tag` names it (`gr`, `P`…).
-    pub fn style(&mut self, family: &str, tag: &'static str, parent: Option<&str>, body: &str) -> String {
-        let key = (format!("{family}|{}", parent.unwrap_or("")), body.to_string());
+    /// The name of the style `key` describes: the one written before, or a new one numbered by
+    /// `tag` whose XML `xml` writes.
+    fn intern(&mut self, key: (String, String), tag: &'static str, xml: impl FnOnce(&str) -> String) -> String {
         if let Some(n) = self.map.get(&key) {
             return n.clone();
         }
         let c = self.n.entry(tag).or_insert(0);
         *c += 1;
         let name = format!("{}{tag}{c}", self.prefix);
-        let parent = parent.map(|p| format!(r#" style:parent-style-name="{}""#, esc(p))).unwrap_or_default();
-        let _ = write!(self.out, r#"<style:style style:name="{name}" style:family="{family}"{parent}>{body}</style:style>"#);
+        self.out.push_str(&xml(&name));
         self.map.insert(key, name.clone());
         name
     }
 
+    /// A `style:style` of `family` with these property elements; `tag` names it (`gr`, `P`…).
+    pub fn style(&mut self, family: &str, tag: &'static str, parent: Option<&str>, body: &str) -> String {
+        let key = (format!("{family}|{}", parent.unwrap_or("")), body.to_string());
+        let parent = parent.map(|p| format!(r#" style:parent-style-name="{}""#, esc(p))).unwrap_or_default();
+        self.intern(key, tag, |name| format!(r#"<style:style style:name="{name}" style:family="{family}"{parent}>{body}</style:style>"#))
+    }
+
     /// A `text:list-style` with these level elements.
     pub fn list(&mut self, levels: &str) -> String {
-        let key = ("list".to_string(), levels.to_string());
-        if let Some(n) = self.map.get(&key) {
-            return n.clone();
-        }
-        let c = self.n.entry("L").or_insert(0);
-        *c += 1;
-        let name = format!("{}L{c}", self.prefix);
-        let _ = write!(self.out, r#"<text:list-style style:name="{name}">{levels}</text:list-style>"#);
-        self.map.insert(key, name.clone());
-        name
+        self.intern(("list".to_string(), levels.to_string()), "L", |name| {
+            format!(r#"<text:list-style style:name="{name}">{levels}</text:list-style>"#)
+        })
     }
 }
 

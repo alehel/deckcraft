@@ -91,15 +91,13 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         .filter_map(|i| attr(i, "xlink:href"))
         .map(str::to_string)
         .collect();
+    let mut parts = PartMedia::default();
     for h in hrefs.into_iter().take(256) {
-        if let Some(data) = pkg.get(&h) {
-            let name = h.rsplit('/').next().unwrap_or(&h).to_string();
-            if let Some(id) = p.add_media(&name, vocab::mime_for(&name), data.to_vec()) {
-                store.image_bullets.insert(h, id);
-            }
+        if let Some(id) = parts.add(&pkg, &mut p, &h, vocab::mime_for(&h)) {
+            store.image_bullets.insert(h, id);
         }
     }
-    embedded_fonts(&pkg, &store, &mut p);
+    embedded_fonts(&pkg, &store, &mut p, &mut parts);
     let mut r = Reader {
         pkg: &pkg,
         store: std::rc::Rc::new(store),
@@ -108,7 +106,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         master_index: HashMap::new(),
         page_names: HashMap::new(),
         para_ids: vec![],
-        package_media: HashMap::new(),
+        package_media: parts,
         targets: HashMap::new(),
         glue: vec![],
     };
@@ -178,8 +176,7 @@ struct Reader<'a> {
     page_names: HashMap<String, SlideId>,
     /// The ids of the paragraphs of the text body read last.
     para_ids: Vec<Option<String>>,
-    /// Package parts already added as media, by reference: each part is copied once.
-    package_media: HashMap<String, MediaId>,
+    package_media: PartMedia,
     /// Element ids on the page being read (shapes and paragraphs), for its animations.
     targets: crate::anim::Targets,
     /// Connectors on the page being read and the (element id, glue point) of each end.
@@ -811,7 +808,7 @@ impl Reader<'_> {
     fn media_clip(&mut self, frame: &El, pl: &El) -> Option<deckcraft_model::MediaClip> {
         let href = attr(pl, "xlink:href")?;
         let mime = attr(pl, "draw:mime-type").map(str::to_string).unwrap_or_else(|| vocab::mime_for(href).to_string());
-        let name = href.rsplit('/').next().unwrap_or(href).to_string();
+        let name = part_name(href).to_string();
         let media = match self.package_media(href, &mime) {
             Some(id) => id,
             None => {
@@ -964,14 +961,7 @@ impl Reader<'_> {
 
     /// A package part as media, added once however many shapes refer to it.
     fn package_media(&mut self, href: &str, mime: &str) -> Option<MediaId> {
-        if let Some(id) = self.package_media.get(href) {
-            return Some(*id);
-        }
-        let data = self.pkg.get(href)?;
-        let name = href.rsplit('/').next().unwrap_or(href);
-        let id = self.p.add_media(name, mime, data.to_vec())?;
-        self.package_media.insert(href.to_string(), id);
-        Some(id)
+        self.package_media.add(self.pkg, &mut self.p, href, mime)
     }
 
     fn image_media(&mut self, img: &El) -> Option<MediaId> {
@@ -1290,8 +1280,30 @@ impl Reader<'_> {
     }
 }
 
+/// Package parts already added as media, by reference: each part is copied once, whether it's
+/// a picture, a bullet, a clip or a font.
+#[derive(Default)]
+struct PartMedia(HashMap<String, MediaId>);
+
+impl PartMedia {
+    fn add(&mut self, pkg: &Package, p: &mut Presentation, href: &str, mime: &str) -> Option<MediaId> {
+        if let Some(id) = self.0.get(href) {
+            return Some(*id);
+        }
+        let data = pkg.get(href)?;
+        let id = p.add_media(part_name(href), mime, data.to_vec())?;
+        self.0.insert(href.to_string(), id);
+        Some(id)
+    }
+}
+
+/// A part's file name (`Pictures/a.png` → `a.png`).
+fn part_name(href: &str) -> &str {
+    href.rsplit('/').next().unwrap_or(href)
+}
+
 /// Fonts embedded in the package (`svg:font-face-uri` in the font face declarations).
-fn embedded_fonts(pkg: &Package, store: &Store, p: &mut Presentation) {
+fn embedded_fonts(pkg: &Package, store: &Store, p: &mut Presentation, parts: &mut PartMedia) {
     for f in &store.font_faces {
         let family = attr(f, "svg:font-family").map(crate::styles::unquote).or_else(|| attr(f, "style:name").map(str::to_string)).unwrap_or_default();
         if family.is_empty() {
@@ -1300,12 +1312,10 @@ fn embedded_fonts(pkg: &Package, store: &Store, p: &mut Presentation) {
         let bold = attr(f, "svg:font-weight").is_some_and(|w| w == "bold" || w.parse::<u32>().is_ok_and(|n| n >= 600));
         let italic = attr(f, "svg:font-style").is_some_and(|s| s == "italic" || s == "oblique");
         let Some(uri) = crate::dom::find(f, "svg:font-face-uri").and_then(|u| attr(u, "xlink:href")) else { continue };
-        let Some(data) = pkg.get(uri) else { continue };
-        if deckcraft_fonts::embedded_sfnt(data).is_none() {
+        if pkg.get(uri).and_then(deckcraft_fonts::embedded_sfnt).is_none() {
             continue;
         }
-        let name = uri.rsplit('/').next().unwrap_or(uri).to_string();
-        let Some(id) = p.add_media(&name, "application/x-font-ttf", data.to_vec()) else { continue };
+        let Some(id) = parts.add(pkg, p, uri, "application/x-font-ttf") else { continue };
         let i = match p.embedded_fonts.iter().position(|e| e.typeface == family) {
             Some(i) => i,
             None => {

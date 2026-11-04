@@ -101,15 +101,21 @@ pub enum Scope {
     Styles,
 }
 
+/// Styles and list styles of one kind: common, or one file's automatic ones.
+#[derive(Debug, Default)]
+struct Layer {
+    /// By (family, name).
+    styles: HashMap<(String, String), Style>,
+    lists: HashMap<String, El>,
+}
+
 #[derive(Debug, Default)]
 pub struct Store {
-    common: HashMap<(String, String), Style>,
-    auto_styles: HashMap<(String, String), Style>,
-    auto_content: HashMap<(String, String), Style>,
+    /// Common styles (`office:styles`), and each file's automatic styles.
+    common: Layer,
+    auto_styles: Layer,
+    auto_content: Layer,
     defaults: HashMap<String, Style>,
-    lists_common: HashMap<String, El>,
-    lists_auto_styles: HashMap<String, El>,
-    lists_auto_content: HashMap<String, El>,
     pub gradients: HashMap<String, El>,
     pub hatches: HashMap<String, El>,
     pub fill_images: HashMap<String, El>,
@@ -211,32 +217,19 @@ impl Store {
                 "style:style" => {
                     let s = read_style(el);
                     let key = (s.family.clone(), name.clone());
-                    match auto {
-                        None => {
-                            if let Some(d) = attr(el, "style:display-name") {
-                                self.common_names.push((name, d.to_string()));
-                            }
-                            self.common.insert(key, s);
-                        }
-                        Some(Scope::Styles) => {
-                            self.auto_styles.insert(key, s);
-                        }
-                        Some(Scope::Content) => {
-                            self.auto_content.insert(key, s);
-                        }
+                    if auto.is_none()
+                        && let Some(d) = attr(el, "style:display-name")
+                    {
+                        self.common_names.push((name, d.to_string()));
                     }
+                    self.layer_mut(auto).styles.insert(key, s);
                 }
                 "style:default-style" => {
                     let s = read_style(el);
                     self.defaults.insert(s.family.clone(), s);
                 }
                 "text:list-style" => {
-                    let map = match auto {
-                        None => &mut self.lists_common,
-                        Some(Scope::Styles) => &mut self.lists_auto_styles,
-                        Some(Scope::Content) => &mut self.lists_auto_content,
-                    };
-                    map.insert(name, el.clone());
+                    self.layer_mut(auto).lists.insert(name, el.clone());
                 }
                 "draw:gradient" | "svg:linearGradient" | "svg:radialGradient" => {
                     self.gradients.insert(name, el.clone());
@@ -269,13 +262,27 @@ impl Store {
         self.fonts.get(font_name).cloned().unwrap_or_else(|| font_name.to_string())
     }
 
+    /// Common styles (`None`) or one file's automatic styles.
+    fn layer(&self, auto: Option<Scope>) -> &Layer {
+        match auto {
+            None => &self.common,
+            Some(Scope::Styles) => &self.auto_styles,
+            Some(Scope::Content) => &self.auto_content,
+        }
+    }
+
+    fn layer_mut(&mut self, auto: Option<Scope>) -> &mut Layer {
+        match auto {
+            None => &mut self.common,
+            Some(Scope::Styles) => &mut self.auto_styles,
+            Some(Scope::Content) => &mut self.auto_content,
+        }
+    }
+
+    /// A style by name: the element's file's automatic styles first, then the common ones.
     fn lookup(&self, scope: Scope, family: &str, name: &str) -> Option<&Style> {
         let key = (family.to_string(), name.to_string());
-        let auto = match scope {
-            Scope::Content => self.auto_content.get(&key),
-            Scope::Styles => self.auto_styles.get(&key),
-        };
-        auto.or_else(|| self.common.get(&key))
+        self.layer(Some(scope)).styles.get(&key).or_else(|| self.common.styles.get(&key))
     }
 
     pub fn exists(&self, scope: Scope, family: &str, name: &str) -> bool {
@@ -298,7 +305,7 @@ impl Store {
             }
             chain.push(s);
             // Parents are common styles (an automatic style can't be a parent).
-            cur = s.parent.as_deref().filter(|p| !stop(p)).and_then(|p| self.common.get(&(family.to_string(), p.to_string())));
+            cur = s.parent.as_deref().filter(|p| !stop(p)).and_then(|p| self.common.styles.get(&(family.to_string(), p.to_string())));
         }
         let mut out = Style { family: family.to_string(), ..Default::default() };
         for s in chain.iter().rev() {
@@ -362,21 +369,14 @@ impl Store {
 
     /// Every list style, standalone or inside a style, for collecting picture bullets.
     pub fn all_lists(&self) -> Vec<&El> {
-        let mut out: Vec<&El> = self.lists_common.values().chain(self.lists_auto_styles.values()).chain(self.lists_auto_content.values()).collect();
-        for s in self.common.values().chain(self.auto_styles.values()).chain(self.auto_content.values()) {
-            if let Some(l) = &s.list {
-                out.push(l);
-            }
-        }
-        out
+        let layers = [&self.common, &self.auto_styles, &self.auto_content];
+        let standalone = layers.iter().flat_map(|l| l.lists.values());
+        let in_styles = layers.iter().flat_map(|l| l.styles.values()).filter_map(|s| s.list.as_ref());
+        standalone.chain(in_styles).collect()
     }
 
     pub fn list_style(&self, scope: Scope, name: &str) -> Option<&El> {
-        let auto = match scope {
-            Scope::Content => self.lists_auto_content.get(name),
-            Scope::Styles => self.lists_auto_styles.get(name),
-        };
-        auto.or_else(|| self.lists_common.get(name))
+        self.layer(Some(scope)).lists.get(name).or_else(|| self.common.lists.get(name))
     }
 }
 
