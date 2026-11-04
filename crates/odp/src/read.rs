@@ -1068,9 +1068,9 @@ impl Reader<'_> {
                 }
             }
             // Repeated rows cost the full width, and their text the budget.
-            let room = MAX_TABLE_CELLS.saturating_sub(table.rows.len() * width) / width;
+            let room = MAX_TABLE_CELLS.saturating_sub(table.rows.len() * width).checked_div(width).unwrap_or(0);
             let row_text: usize = cells.iter().map(|c| c.text.text().len()).sum();
-            let text_room = if row_text == 0 { usize::MAX } else { 1 + text_budget / row_text };
+            let text_room = text_budget.checked_div(row_text).map_or(usize::MAX, |r| r + 1);
             let n = repeat(row, "table:number-rows-repeated").min(MAX_TABLE_SIDE - table.rows.len()).min(room).min(text_room);
             text_budget = text_budget.saturating_sub(row_text.saturating_mul(n.saturating_sub(1)));
             if n == 0 {
@@ -1078,70 +1078,8 @@ impl Reader<'_> {
             }
             table.rows.extend(std::iter::repeat_n(Row { height: h, cells }, n));
         }
-        let ncols = table.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0).max(table.cols.len()).max(1);
-        // Columns without a width share what's left of the frame.
-        table.cols.resize(ncols, 0.0);
-        let known: f64 = table.cols.iter().sum();
-        let unknown = table.cols.iter().filter(|w| **w <= 0.0).count();
-        if unknown > 0 {
-            let each = ((x.w - known).max(0.0) / unknown as f64).max(x.w / ncols as f64 * 0.25).max(10.0);
-            for w in &mut table.cols {
-                if *w <= 0.0 {
-                    *w = each;
-                }
-            }
-        }
-        let nrows = table.rows.len().max(1);
-        let known: f64 = table.rows.iter().map(|r| r.height).sum();
-        let unknown = table.rows.iter().filter(|r| r.height <= 0.0).count();
-        if unknown > 0 {
-            let each = ((x.h - known).max(0.0) / unknown as f64).max(x.h / nrows as f64 * 0.25).max(12.0);
-            for r in &mut table.rows {
-                if r.height <= 0.0 {
-                    r.height = each;
-                }
-            }
-        }
-        for r in &mut table.rows {
-            while r.cells.len() < ncols {
-                r.cells.push(Cell::new(""));
-            }
-        }
-        // Spans: the anchor cell spans (no further than the table), covered cells are merged into it.
-        let nrows = table.rows.len();
-        for (ri, r) in table.rows.iter_mut().enumerate() {
-            for (ci, c) in r.cells.iter_mut().enumerate() {
-                c.grid_span = c.grid_span.min((ncols - ci) as u32).max(1);
-                c.row_span = c.row_span.min((nrows - ri) as u32).max(1);
-            }
-        }
-        // In reading order, so a cell an earlier span covers spans nothing itself. Overlapping
-        // spans share a budget of visits.
-        let mut budget = 4 * MAX_TABLE_CELLS;
-        for ri in 0..nrows {
-            for ci in 0..ncols {
-                let Some(c) = table.cell_mut(ri, ci) else { continue };
-                if c.h_merge || c.v_merge {
-                    (c.grid_span, c.row_span) = (1, 1);
-                    continue;
-                }
-                let (gs, rs) = (c.grid_span as usize, c.row_span as usize);
-                if gs * rs > budget {
-                    (c.grid_span, c.row_span) = (1, 1);
-                    continue;
-                }
-                budget -= gs * rs;
-                for dr in 0..rs {
-                    for dc in 0..gs {
-                        if let Some(c) = table.cell_mut(ri + dr, ci + dc).filter(|_| (dr, dc) != (0, 0))
-                            && !(c.h_merge || c.v_merge)
-                        {
-                            (c.h_merge, c.v_merge) = (dc > 0, dr > 0);
-                        }
-                    }
-                }
-            }
-        }
+        fit_table(&mut table, x);
+        merge_spans(&mut table);
         table
     }
 
@@ -1464,6 +1402,81 @@ fn line_xfrm(e: &El) -> Xfrm {
     x.flip_h = b.x < a.x;
     x.flip_v = b.y < a.y;
     x
+}
+
+/// Every row padded to the table's width; columns and rows without a size share what's left of
+/// the frame.
+fn fit_table(table: &mut Table, x: Xfrm) {
+    let ncols = table.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0).max(table.cols.len()).max(1);
+    // Columns without a width share what's left of the frame.
+    table.cols.resize(ncols, 0.0);
+    let known: f64 = table.cols.iter().sum();
+    let unknown = table.cols.iter().filter(|w| **w <= 0.0).count();
+    if unknown > 0 {
+        let each = ((x.w - known).max(0.0) / unknown as f64).max(x.w / ncols as f64 * 0.25).max(10.0);
+        for w in &mut table.cols {
+            if *w <= 0.0 {
+                *w = each;
+            }
+        }
+    }
+    let nrows = table.rows.len().max(1);
+    let known: f64 = table.rows.iter().map(|r| r.height).sum();
+    let unknown = table.rows.iter().filter(|r| r.height <= 0.0).count();
+    if unknown > 0 {
+        let each = ((x.h - known).max(0.0) / unknown as f64).max(x.h / nrows as f64 * 0.25).max(12.0);
+        for r in &mut table.rows {
+            if r.height <= 0.0 {
+                r.height = each;
+            }
+        }
+    }
+    for r in &mut table.rows {
+        while r.cells.len() < ncols {
+            r.cells.push(Cell::new(""));
+        }
+    }
+}
+
+/// Spans: each anchor cell spans no further than the table, and the cells it covers are merged
+/// into it.
+fn merge_spans(table: &mut Table) {
+    let ncols = table.cols.len();
+    // Spans: the anchor cell spans (no further than the table), covered cells are merged into it.
+    let nrows = table.rows.len();
+    for (ri, r) in table.rows.iter_mut().enumerate() {
+        for (ci, c) in r.cells.iter_mut().enumerate() {
+            c.grid_span = c.grid_span.min((ncols - ci) as u32).max(1);
+            c.row_span = c.row_span.min((nrows - ri) as u32).max(1);
+        }
+    }
+    // In reading order, so a cell an earlier span covers spans nothing itself. Overlapping
+    // spans share a budget of visits.
+    let mut budget = 4 * MAX_TABLE_CELLS;
+    for ri in 0..nrows {
+        for ci in 0..ncols {
+            let Some(c) = table.cell_mut(ri, ci) else { continue };
+            if c.h_merge || c.v_merge {
+                (c.grid_span, c.row_span) = (1, 1);
+                continue;
+            }
+            let (gs, rs) = (c.grid_span as usize, c.row_span as usize);
+            if gs * rs > budget {
+                (c.grid_span, c.row_span) = (1, 1);
+                continue;
+            }
+            budget -= gs * rs;
+            for dr in 0..rs {
+                for dc in 0..gs {
+                    if let Some(c) = table.cell_mut(ri + dr, ci + dc).filter(|_| (dr, dc) != (0, 0))
+                        && !(c.h_merge || c.v_merge)
+                    {
+                        (c.h_merge, c.v_merge) = (dc > 0, dr > 0);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn ph_kind(class: &str) -> Option<PhType> {
