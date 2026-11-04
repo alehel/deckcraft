@@ -95,7 +95,7 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
                 let _ = write!(g, r#" style:mirror="{m}""#);
             }
             let (effects, ph_fx) = resolve::effects(ctx, s);
-            g.push_str(&shadow_attrs(ctx, effects.as_ref(), ph_fx));
+            g.push_str(&effect_attrs(ctx, effects.as_ref(), ph_fx));
             let st = auto.style("graphic", "gr", Some("standard"), &format!("<style:graphic-properties{g}/>"));
             let mime = w.p.media(fill.media).map(|m| m.content_type.clone()).unwrap_or_default();
             let image = format!(r#"<draw:image {} draw:mime-type="{}"><text:p/></draw:image>"#, embed(&href), esc(&mime));
@@ -177,7 +177,7 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
     let fill = fill.unwrap_or(Fill::None);
     let mut g = fill_attrs(w, ctx, &fill, ph_fill);
     g.push_str(&line_attrs(w, ctx, &line, ph_line));
-    g.push_str(&shadow_attrs(ctx, effects.as_ref(), ph_fx));
+    g.push_str(&effect_attrs(ctx, effects.as_ref(), ph_fx));
     g.push_str(&body_attrs(&body));
     // Text columns.
     let columns = match body.columns.filter(|n| *n > 1) {
@@ -583,7 +583,20 @@ pub(crate) fn embed(href: &str) -> String {
     format!(r#"xlink:href="{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad""#, esc(href))
 }
 
-fn shadow_attrs(ctx: &Ctx, e: Option<&Effects>, ph: Option<Rgba>) -> String {
+/// Shadow, glow and soft edges (the last two as LibreOffice's extensions).
+fn effect_attrs(ctx: &Ctx, e: Option<&Effects>, ph: Option<Rgba>) -> String {
+    let mut s = shadow_only(ctx, e, ph);
+    if let Some(g) = e.and_then(|e| e.glow.as_ref()) {
+        let (c, a) = color_alpha(ctx, &g.color, ph);
+        let _ = write!(s, r#" loext:glow-radius="{}" loext:glow-color="{}" loext:glow-transparency="{}""#, cm(g.radius), hex(c), pct(1.0 - a));
+    }
+    if let Some(r) = e.and_then(|e| e.soft_edge).filter(|r| *r > 0.0) {
+        let _ = write!(s, r#" loext:softedge-radius="{}""#, cm(r));
+    }
+    s
+}
+
+fn shadow_only(ctx: &Ctx, e: Option<&Effects>, ph: Option<Rgba>) -> String {
     let Some(sh) = e.and_then(|e| e.outer_shadow.as_ref()) else { return r#" draw:shadow="hidden""#.into() };
     let (c, a) = color_alpha(ctx, &sh.color, ph);
     let dx = sh.dist * sh.dir.to_radians().cos();

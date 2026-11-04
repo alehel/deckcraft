@@ -1064,3 +1064,46 @@ fn shared_definitions_cost_once() {
     );
     time("namespaces", many);
 }
+
+/// A gradient fading out keeps its fade: each stop its own opacity, not one average.
+#[test]
+fn gradient_opacity_varies_along_the_gradient() {
+    use deckcraft_color::ColorTransform;
+    use deckcraft_model::style::{Gradient, GradientStop};
+    let red = |a: Option<i32>| {
+        let mut c = ColorRef::rgb(Rgba::rgb(255, 0, 0));
+        c.mods.extend(a.map(ColorTransform::Alpha));
+        c
+    };
+    let g = Gradient {
+        stops: vec![GradientStop { pos: 0.0, color: red(None) }, GradientStop { pos: 1.0, color: red(Some(0)) }],
+        shape: GradientShape::Linear { angle: 0.0, scaled: false },
+        flip: None,
+        rotate_with_shape: true,
+        tile: [0.0; 4],
+    };
+    let shape =
+        Shape { xfrm: Some(Xfrm::new(50.0, 50.0, 200.0, 100.0)), geom: Geom::preset("rect"), fill: Some(Fill::Gradient(g)), ..Default::default() };
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&deck_with(vec![shape])).unwrap()).unwrap();
+    let Some(Fill::Gradient(g)) = &shapes_of(&back)[0].fill else { panic!("{:?}", shapes_of(&back)[0].fill) };
+    let (first, last) = (g.stops.first().unwrap(), g.stops.last().unwrap());
+    assert!(first.color.alpha() > 0.9 && last.color.alpha() < 0.1, "{:?}", g.stops);
+}
+
+/// Glow and soft edges are written as LibreOffice's extensions and read back.
+#[test]
+fn glow_and_soft_edges_round_trip() {
+    use deckcraft_model::style::{Effects, Glow};
+    let glow = Glow { color: ColorRef::rgb(Rgba::rgb(255, 200, 0)), radius: 8.0 };
+    let shape = Shape {
+        xfrm: Some(Xfrm::new(50.0, 50.0, 100.0, 100.0)),
+        geom: Geom::preset("ellipse"),
+        effects: Some(Effects { glow: Some(glow), soft_edge: Some(4.0), ..Default::default() }),
+        ..Default::default()
+    };
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&deck_with(vec![shape])).unwrap()).unwrap();
+    let e = shapes_of(&back)[0].effects.clone().unwrap();
+    let g = e.glow.unwrap();
+    assert!((g.radius - 8.0).abs() < 0.1 && g.color == ColorRef::rgb(Rgba::rgb(255, 200, 0)), "{g:?}");
+    assert!((e.soft_edge.unwrap() - 4.0).abs() < 0.1);
+}

@@ -2,7 +2,8 @@
 
 use deckcraft_color::{ColorTransform, Rgba};
 use deckcraft_model::style::{
-    ColorRef, Dash, Effects, Fill, Gradient, GradientShape, GradientStop, Line, LineEnd, PatternFill, PictureAdjust, PictureFill, PictureMode, Shadow,
+    ColorRef, Dash, Effects, Fill, Glow, Gradient, GradientShape, GradientStop, Line, LineEnd, PatternFill, PictureAdjust, PictureFill, PictureMode,
+    Shadow,
 };
 use deckcraft_model::{Background, MediaId};
 
@@ -27,12 +28,13 @@ impl Reader<'_> {
         // An opacity gradient wins over a flat opacity.
         let store = std::rc::Rc::clone(&self.store);
         let og = g.get("draw:opacity-name").and_then(|n| store.opacities.get(n));
-        let alpha = match &og {
-            Some(og) => {
-                let a = attr(og, "draw:start").and_then(units::percent).unwrap_or(1.0);
-                let b = attr(og, "draw:end").and_then(units::percent).unwrap_or(1.0);
-                Some(((a + b) / 2.0).clamp(0.0, 1.0))
-            }
+        // An opacity gradient's start and end; fills that can't vary take their average.
+        let og_ends = og.map(|og| {
+            let at = |k: &str| attr(og, k).and_then(units::percent).unwrap_or(1.0).clamp(0.0, 1.0);
+            (at("draw:start"), at("draw:end"))
+        });
+        let alpha = match og_ends {
+            Some((a, b)) => Some((a + b) / 2.0),
             None => g.get("draw:opacity").and_then(|v| units::percent(v)).map(|v| v.clamp(0.0, 1.0)),
         };
         let with_alpha = |c: Rgba| crate::styles::color_ref(c, alpha);
@@ -45,11 +47,24 @@ impl Reader<'_> {
                 Some(og) => Fill::Gradient(gradient(og, &|c| ColorRef::rgb(c), Some(color))),
                 None => Fill::solid(with_alpha(color)),
             },
-            "gradient" => g
-                .get("draw:fill-gradient-name")
-                .and_then(|n| self.store.gradients.get(n))
-                .map(|gr| Fill::Gradient(gradient(gr, &with_alpha, None)))
-                .unwrap_or_else(|| Fill::solid(with_alpha(color))),
+            "gradient" => match g.get("draw:fill-gradient-name").and_then(|n| self.store.gradients.get(n)) {
+                // Under an opacity gradient each stop takes the opacity where it is.
+                Some(gr) => Fill::Gradient(match og_ends {
+                    Some((a, b)) => {
+                        let mut out = gradient(gr, &|c| ColorRef::rgb(c), None);
+                        for s in &mut out.stops {
+                            s.color.mods.retain(|m| !matches!(m, ColorTransform::Alpha(_)));
+                            let o = a + (b - a) * s.pos;
+                            if o < 1.0 {
+                                s.color.mods.push(ColorTransform::Alpha((o * 100_000.0).round() as i32));
+                            }
+                        }
+                        out
+                    }
+                    None => gradient(gr, &with_alpha, None),
+                }),
+                None => Fill::solid(with_alpha(color)),
+            },
             "hatch" => {
                 let h = g.get("draw:fill-hatch-name").and_then(|n| self.store.hatches.get(n));
                 let ha = |k: &str| h.and_then(|h| attr(h, k));
@@ -157,28 +172,38 @@ impl Reader<'_> {
         l
     }
 
+    /// Shadow, glow and soft edges.
     pub(super) fn effects(&self, g: &Props) -> Option<Effects> {
+        let len = |k: &str| g.get(k).and_then(|v| units::length(v));
+        let glow = len("loext:glow-radius").filter(|r| *r > 0.0).map(|radius| {
+            let opacity = g.get("loext:glow-transparency").and_then(|v| units::percent(v)).map(|t| 1.0 - t);
+            let c = g.get("loext:glow-color").and_then(|c| units::color(c)).unwrap_or(Rgba::rgb(0x72, 0x9f, 0xcf));
+            Glow { color: crate::styles::color_ref(c, opacity), radius }
+        });
+        let soft_edge = len("loext:softedge-radius").filter(|r| *r > 0.0);
+        let shadow = self.shadow(g);
+        (shadow.is_some() || glow.is_some() || soft_edge.is_some()).then(|| Effects { outer_shadow: shadow, glow, soft_edge, ..Default::default() })
+    }
+
+    fn shadow(&self, g: &Props) -> Option<Shadow> {
         if g.get("draw:shadow").map(String::as_str) != Some("visible") {
             return None;
         }
         let len = |k: &str| g.get(k).and_then(|v| units::length(v));
         let (dx, dy) = (len("draw:shadow-offset-x").unwrap_or(0.0), len("draw:shadow-offset-y").unwrap_or(0.0));
         let color = crate::styles::color_prop(g, "draw:shadow-color", "draw:shadow-opacity").unwrap_or(ColorRef::rgb(Rgba::rgb(0x80, 0x80, 0x80)));
-        Some(Effects {
-            outer_shadow: Some(Shadow {
-                color,
-                blur: len("loext:shadow-blur").unwrap_or(0.0),
-                dist: dx.hypot(dy),
-                dir: dy.atan2(dx).to_degrees().rem_euclid(360.0),
-                inner: false,
-                sx: 1.0,
-                sy: 1.0,
-                kx: 0.0,
-                ky: 0.0,
-                align: String::new(),
-                rotate_with_shape: false,
-            }),
-            ..Default::default()
+        Some(Shadow {
+            color,
+            blur: len("loext:shadow-blur").unwrap_or(0.0),
+            dist: dx.hypot(dy),
+            dir: dy.atan2(dx).to_degrees().rem_euclid(360.0),
+            inner: false,
+            sx: 1.0,
+            sy: 1.0,
+            kx: 0.0,
+            ky: 0.0,
+            align: String::new(),
+            rotate_with_shape: false,
         })
     }
 }
