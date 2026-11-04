@@ -80,6 +80,25 @@ fn walk(cx: &TextCtx, el: &El, list: &ListCtx, out: &mut Vec<Paragraph>, guard: 
     }
 }
 
+/// The `xml:id` (or `text:id`) of each paragraph [`paragraphs`] reads from `container`, in order.
+pub fn paragraph_ids(container: &El) -> Vec<Option<String>> {
+    fn rec(el: &El, out: &mut Vec<Option<String>>, depth: usize) {
+        if depth > 64 || out.len() >= MAX_PARAGRAPHS {
+            return;
+        }
+        for e in el.elements() {
+            match e.name.as_str() {
+                "text:p" | "text:h" => out.push(attr(e, "xml:id").or_else(|| attr(e, "text:id")).map(str::to_string)),
+                "text:list" | "text:list-item" | "text:list-header" | "text:section" | "text:soft-page-break" => rec(e, out, depth + 1),
+                _ => {}
+            }
+        }
+    }
+    let mut out = vec![];
+    rec(container, &mut out, 0);
+    out
+}
+
 /// A `text:list` nested directly in a list item sits one level deeper than its parent list.
 fn guard_is_list(parent: &El) -> bool {
     parent.name == "text:list-item" || parent.name == "text:list-header"

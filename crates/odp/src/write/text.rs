@@ -17,11 +17,13 @@ use crate::units::{cm, hex, pct, pt, trim};
 pub fn body(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, shape: &Shape, outline: bool) -> String {
     let Some(t) = &shape.text else { return String::new() };
     let mut out = String::new();
-    for p in &t.paragraphs {
+    for (i, p) in t.paragraphs.iter().enumerate() {
         let pp = resolve::para(ctx, shape, p);
         let runs: Vec<(RunProps, &Run)> = p.runs.iter().map(|r| (resolve::run(ctx, shape, p, &r.props), r)).collect();
         let end = resolve::run(ctx, shape, p, &p.end_props);
-        out.push_str(&paragraph(w, auto, Some(ctx), p.level, &pp, &end, &runs, outline));
+        // A paragraph an animation targets carries an id.
+        let id = w.anim_targets.contains(&(shape.id.0, Some(i as u32))).then(|| format!("s{}p{i}", shape.id.0));
+        out.push_str(&paragraph(w, auto, Some(ctx), p.level, &pp, &end, &runs, outline, id));
     }
     out
 }
@@ -41,7 +43,7 @@ pub fn plain_paragraphs(w: &mut Writer, auto: &mut Auto, t: &TextBody) -> String
                 (rp, r)
             })
             .collect();
-        out.push_str(&paragraph(w, auto, None, p.level, &p.props, &end, &runs, false));
+        out.push_str(&paragraph(w, auto, None, p.level, &p.props, &end, &runs, false, None));
     }
     out
 }
@@ -56,6 +58,7 @@ fn paragraph(
     end: &RunProps,
     runs: &[(RunProps, &Run)],
     outline: bool,
+    id: Option<String>,
 ) -> String {
     // The paragraph style carries its alignment, spacing and indents, and the text properties of
     // its end (so an empty paragraph has its height).
@@ -99,7 +102,8 @@ fn paragraph(
             None => inner.push_str(&span),
         }
     }
-    let p = format!(r#"<text:p text:style-name="{pstyle}">{inner}</text:p>"#);
+    let id = id.map(|i| format!(r#" xml:id="{i}" text:id="{i}""#)).unwrap_or_default();
+    let p = format!(r#"<text:p{id} text:style-name="{pstyle}">{inner}</text:p>"#);
     let bullet = pp.bullet.clone().unwrap_or(Bullet::None);
     let bulleted = !matches!(bullet, Bullet::None);
     if !bulleted && !outline && level == 0 {

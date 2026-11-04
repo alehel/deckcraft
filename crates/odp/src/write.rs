@@ -131,6 +131,8 @@ pub(crate) struct Writer<'p> {
     /// Embedded objects written (charts), and the package directories they live in.
     pub objects: usize,
     pub dirs: Vec<(String, String)>,
+    /// Shapes and paragraphs the page's animations target: they get `xml:id`s.
+    pub anim_targets: std::collections::HashSet<(u32, Option<u32>)>,
 }
 
 impl Writer<'_> {
@@ -187,6 +189,7 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         page: String::new(),
         objects: 0,
         dirs: vec![],
+        anim_targets: Default::default(),
     };
     for (i, s) in p.slides.iter().enumerate() {
         w.page_names.insert(s.id.0, page_name(i, s));
@@ -413,6 +416,7 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
     let p = w.p;
     let Some(ctx) = Ctx::for_slide(p, s) else { return String::new() };
     w.page = master_name.to_string();
+    w.anim_targets = s.animations.iter().flat_map(|a| [Some((a.shape.0, a.paragraph)), a.trigger.map(|t| (t.0, None))]).flatten().collect();
     // The page style: background, transition, visibility, footers.
     let mut pp = String::new();
     if let Some(bg) = &s.background {
@@ -455,6 +459,15 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
             continue;
         }
         out.push_str(&shapes::shape(w, auto, &ctx, sh, 0));
+    }
+    // Transition and animations.
+    let filter = s.transition.as_ref().and_then(crate::anim::transition_filter);
+    if filter.is_some() || !s.animations.is_empty() {
+        let ids = |sid: deckcraft_model::ShapeId, para: Option<u32>| match para {
+            Some(pi) => Some(format!("s{}p{pi}", sid.0)),
+            None => Some(format!("s{}", sid.0)),
+        };
+        out.push_str(&crate::anim::write(&format!("pg{i}"), filter.as_deref(), &s.animations, &ids));
     }
     if !s.notes.paragraphs.is_empty() && !s.notes.text().trim().is_empty() {
         let notes = text::plain_paragraphs(w, auto, &s.notes);

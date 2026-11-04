@@ -332,3 +332,60 @@ fn charts_round_trip_as_chart_documents() {
         assert_eq!(c.legend.as_deref(), Some("b"));
     }
 }
+
+#[test]
+fn animations_and_transitions_round_trip() {
+    use deckcraft_model::anim::{AnimClass, AnimStart, Animation};
+    let a = Shape { xfrm: Some(Xfrm::new(50.0, 50.0, 100.0, 80.0)), geom: Geom::preset("rect"), ..Default::default() };
+    let b = Shape {
+        xfrm: Some(Xfrm::new(200.0, 50.0, 300.0, 200.0)),
+        text_box: true,
+        text: Some(TextBody::from_text("one\ntwo\nthree")),
+        ..Default::default()
+    };
+    let mut p = deck_with(vec![a, b]);
+    let ids: Vec<ShapeId> = shapes_of(&p).iter().map(|s| s.id).collect();
+    let anims = vec![
+        Animation { shape: ids[0], effect: "fly".into(), option: "l".into(), duration_ms: 750, ..Default::default() },
+        Animation { shape: ids[1], effect: "fade".into(), paragraph: Some(1), start: AnimStart::WithPrevious, delay_ms: 250, ..Default::default() },
+        Animation {
+            shape: ids[0],
+            class: AnimClass::Emphasis,
+            effect: "spin".into(),
+            option: "counterClockwise".into(),
+            start: AnimStart::AfterPrevious,
+            duration_ms: 2000,
+            ..Default::default()
+        },
+        Animation { shape: ids[1], class: AnimClass::Exit, effect: "wipeOut".into(), option: "t".into(), ..Default::default() },
+        Animation {
+            shape: ids[0],
+            class: AnimClass::Path,
+            effect: "customPath".into(),
+            path: Some("M 0 0 L 0.25 0.1 E".into()),
+            duration_ms: 2000,
+            ..Default::default()
+        },
+        Animation { shape: ids[1], effect: "zoom".into(), trigger: Some(ids[0]), ..Default::default() },
+    ];
+    let slide = Arc::make_mut(&mut p.slides[0]);
+    slide.animations = anims.clone();
+    slide.transition = Some(deckcraft_model::Transition { kind: "push".into(), option: "u".into(), duration_ms: 1200, ..Default::default() });
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    let s = &back.slides[0];
+    let t = s.transition.as_ref().unwrap();
+    assert_eq!((t.kind.as_str(), t.option.as_str(), t.duration_ms), ("push", "u", 1200));
+    let new_ids: Vec<ShapeId> = shapes_of(&back).iter().map(|s| s.id).collect();
+    let map = |id: ShapeId| new_ids[ids.iter().position(|i| *i == id).unwrap()];
+    assert_eq!(s.animations.len(), anims.len());
+    for (want, got) in anims.iter().zip(&s.animations) {
+        assert_eq!(got.shape, map(want.shape), "{}", want.effect);
+        assert_eq!((got.class, got.effect.as_str(), got.option.as_str()), (want.class, want.effect.as_str(), want.option.as_str()));
+        assert_eq!(got.start, want.start, "{}", want.effect);
+        assert_eq!(got.duration_ms, want.duration_ms, "{}", want.effect);
+        assert_eq!(got.delay_ms, want.delay_ms, "{}", want.effect);
+        assert_eq!(got.paragraph, want.paragraph, "{}", want.effect);
+        assert_eq!(got.trigger, want.trigger.map(map), "{}", want.effect);
+    }
+    assert_eq!(s.animations[4].path.as_deref(), Some("M 0 0 L 0.25 0.1 E"));
+}

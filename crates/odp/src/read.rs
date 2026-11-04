@@ -73,6 +73,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         shapes: 0,
         master_index: HashMap::new(),
         page_names: vec![],
+        targets: HashMap::new(),
     };
     r.p.masters.clear();
     if let Some(m) = meta.as_ref().and_then(|m| kid(m, "office:meta")) {
@@ -139,6 +140,8 @@ struct Reader<'a> {
     master_index: HashMap<String, usize>,
     /// Page names (`draw:name`) → slide ids, for `#name` links.
     page_names: Vec<(String, SlideId)>,
+    /// Element ids on the page being read (shapes and paragraphs), for its animations.
+    targets: crate::anim::Targets,
 }
 
 /// Where a shape is being read: which file's automatic styles apply, and the master it sits on.
@@ -361,7 +364,9 @@ impl Reader<'_> {
             slide.hidden = true;
         }
         slide.transition = transition(pp, page);
+        self.targets.clear();
         let mut shapes = vec![];
+        let mut timing = None;
         for e in page.elements() {
             match e.name.as_str() {
                 "presentation:notes" => {
@@ -373,12 +378,25 @@ impl Reader<'_> {
                         slide.notes = TextBody { paragraphs: t.paragraphs, ..Default::default() };
                     }
                 }
+                "anim:par" if attr(e, "presentation:node-type") == Some("timing-root") => timing = Some(e),
                 "anim:par" | "anim:seq" | "office:forms" => {}
                 _ => {
                     if let Some(s) = self.shape(e, &ctx, 0) {
                         shapes.push(s);
                     }
                 }
+            }
+        }
+        if let Some(t) = timing {
+            let page_id = attr(page, "xml:id").or_else(|| attr(page, "draw:id"));
+            let tm = crate::anim::read(t, page_id, &self.targets);
+            slide.animations = tm.animations;
+            if let Some(mut tr) = tm.transition {
+                // The page style keeps how the slide advances.
+                if let Some(old) = &slide.transition {
+                    tr.advance_after_ms = old.advance_after_ms;
+                }
+                slide.transition = Some(tr);
             }
         }
         // Footer fields the page shows, from its master's placeholders.
@@ -546,6 +564,9 @@ impl Reader<'_> {
             };
             s.ph = Some(Placeholder { kind, idx, ..Default::default() });
         }
+        if let Some(id) = attr(e, "xml:id").or_else(|| attr(e, "draw:id")) {
+            self.targets.insert(id.to_string(), (s.id, None));
+        }
         s.fill = Some(self.fill(g, ctx.scope));
         s.line = Some(self.line(g));
         s.effects = self.effects(g);
@@ -641,6 +662,13 @@ impl Reader<'_> {
         }
         if let Some(click) = self.event_listener(e) {
             s.click = Some(click);
+        }
+        // Paragraph ids, for effects that animate one paragraph.
+        let container = kid(e, "draw:text-box").unwrap_or(e);
+        for (i, id) in text::paragraph_ids(container).into_iter().enumerate() {
+            if let Some(id) = id {
+                self.targets.insert(id, (s.id, Some(i as u32)));
+            }
         }
         // Empty text bodies on non-placeholders aren't kept.
         if s.ph.is_none() && s.text.as_ref().is_some_and(|t| t.paragraphs.iter().all(Paragraph::is_empty)) && !matches!(s.kind, ShapeKind::Shape) {
@@ -882,6 +910,9 @@ impl Reader<'_> {
                 .as_ref()
                 .and_then(|s| s.row.get("style:row-height").or_else(|| s.row.get("style:min-row-height")).and_then(|v| units::length(v)))
                 .unwrap_or(0.0);
+            // An optimal-height row is as tall as its text: give it a small height to grow from.
+            let optimal = rs.as_ref().is_some_and(|s| s.row.get("style:use-optimal-row-height").map(String::as_str) == Some("true"));
+            let h = if optimal && h <= 0.0 { 12.0 } else { h };
             let default_cell = attr(row, "table:default-cell-style-name");
             let mut cells = vec![];
             for c in row.elements().filter(|c| c.name == "table:table-cell" || c.name == "table:covered-table-cell") {
@@ -956,24 +987,37 @@ impl Reader<'_> {
         }
         cell.grid_span = attr(c, "table:number-columns-spanned").and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 1000);
         cell.row_span = attr(c, "table:number-rows-spanned").and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 1000);
-        let style_name = attr(c, "table:style-name").or(default_style);
-        let st = self.store.resolve(ctx.scope, "table-cell", style_name);
-        // Cell fills come as graphic or cell properties.
+        // A cell's style is a graphic style (the row's default, `standard` in LibreOffice) with
+        // its own cell style over it.
+        let mut st = self.store.resolve(
+            ctx.scope,
+            "graphic",
+            Some(default_style.filter(|n| self.store.exists(ctx.scope, "graphic", n)).unwrap_or("standard")),
+        );
+        for name in [default_style, attr(c, "table:style-name")].into_iter().flatten() {
+            if self.store.exists(ctx.scope, "table-cell", name) {
+                let own = self.store.chain(ctx.scope, "table-cell", name);
+                for (k, v) in &own.graphic {
+                    st.graphic.insert(k.clone(), v.clone());
+                }
+                st.cell.extend(own.cell.clone());
+                st.paragraph.extend(own.paragraph.clone());
+                crate::styles::merge_text(&mut st.text, &own.text);
+            }
+        }
         let mut g = st.graphic.clone();
         if let Some(bg) = st.cell.get("fo:background-color")
             && bg != "transparent"
         {
-            g.entry("draw:fill".into()).or_insert_with(|| "solid".into());
-            g.entry("draw:fill-color".into()).or_insert_with(|| bg.clone());
+            g.insert("draw:fill".into(), "solid".into());
+            g.insert("draw:fill-color".into(), bg.clone());
         }
-        if g.contains_key("draw:fill") || g.contains_key("draw:fill-color") {
-            if !g.contains_key("draw:fill") {
-                g.insert("draw:fill".into(), "solid".into());
-            }
-            cell.fill = Some(self.fill(&g, ctx.scope));
-        }
+        // Unset, a cell is filled (the pool default), as the slide shows it.
+        cell.fill = Some(self.fill(&g, ctx.scope));
         let border = |k: &str| st.cell.get(k).or_else(|| st.cell.get("fo:border")).and_then(|b| border_line(b));
-        cell.borders = [border("fo:border-left"), border("fo:border-top"), border("fo:border-right"), border("fo:border-bottom")];
+        // An unset border is none (not the table style's).
+        cell.borders = [border("fo:border-left"), border("fo:border-top"), border("fo:border-right"), border("fo:border-bottom")]
+            .map(|b| b.or_else(|| Some(Line::none())));
         let pad = |k: &str| st.cell.get(k).or_else(|| st.cell.get("fo:padding")).and_then(|v| units::length(v));
         if let (Some(l), Some(t), Some(r), Some(b)) =
             (pad("fo:padding-left"), pad("fo:padding-top"), pad("fo:padding-right"), pad("fo:padding-bottom"))
@@ -981,9 +1025,8 @@ impl Reader<'_> {
             cell.margins = Some([l, r, t, b]);
         }
         cell.anchor = st.cell.get("style:vertical-align").or_else(|| st.graphic.get("draw:textarea-vertical-align")).and_then(|v| anchor(v));
-        let mut base = self.store.resolve(ctx.scope, "graphic", None);
-        base.paragraph.extend(st.paragraph.clone());
-        crate::styles::merge_text(&mut base.text, &st.text);
+        let mut base = st.clone();
+        base.list = None;
         let store = std::rc::Rc::clone(&self.store);
         let tcx = TextCtx { store: &store, scope: ctx.scope, base, outline_master: None, own: None, shape_para: None, slide_links: true };
         let mut paragraphs = text::paragraphs(&tcx, c);
@@ -1532,7 +1575,7 @@ fn transition(pp: &Props, page: &El) -> Option<deckcraft_model::Transition> {
     let dir = pp.get("smil:direction").map(String::as_str).unwrap_or("forward");
     let (kind, option) = match (smil, legacy) {
         (Some("fade"), _) => ("fade", ""),
-        (Some("slideWipe"), _) => ("push", side(sub, dir)),
+        (Some("slideWipe"), _) => ("cover", side(sub, dir)),
         (Some("pushWipe"), _) => ("push", side(sub, dir)),
         (Some("barWipe"), _) => ("wipe", side(sub, dir)),
         (Some("barnDoorWipe"), _) => ("split", if sub == "horizontal" { "horz" } else { "vert" }),

@@ -31,6 +31,9 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, depth: usize
     if s.hidden {
         common.push_str(r#" draw:display="none""#);
     }
+    if w.anim_targets.contains(&(s.id.0, None)) {
+        let _ = write!(common, r#" xml:id="s{0}" draw:id="s{0}""#, s.id.0);
+    }
     let desc = {
         let mut d = String::new();
         if !s.title.is_empty() {

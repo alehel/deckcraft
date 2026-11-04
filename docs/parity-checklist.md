@@ -2,7 +2,7 @@
 
 > **Generated:** 2026-10-14 (bullets/numbering remain D after empty-line marker review; summary by `cargo xtask parity`; rows re-scored by the 2026-10-14 community PR wave, duplicate Thesaurus, AutoCorrect, Artistic effects and Corrections rows folded; Preview in editor re-scored 2026-10-13; earlier rows re-scored 2026-10-10 against PowerPoint for Mac 16.113.4; video/animated GIF row re-scored 2026-10-11, #171) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
-> **Last updated:** 2026-11-04 · OpenDocument .odp open/save re-scored M → P (animations not yet).
+> **Last updated:** 2026-11-04 · OpenDocument .odp open/save re-scored M → P (animations round-trip; hatches, picture crop and comments pending).
 >
 > **Previously (2026-11-03):** Community PR wave 10: reflection transforms survive resaves (row stays P, rendering partial); Reuse Slides fits the destination size and brings referenced custom table styles (row stays P, picker has no thumbnails); Compress Pictures measures grouped pictures at displayed size (stays D). Scores unchanged.
 >
@@ -78,7 +78,7 @@ Open P0 items: Contextual tabs (Shape Format, Picture Format, Table Design/Layou
 | Files | Password protection | P2 | M |
 | Files | Reuse slides from another file | P1 | P |
 | Files | Drag and drop files onto the window | P1 | D |
-| Files | OpenDocument .odp open/save (animations not yet) | P2 | P |
+| Files | OpenDocument .odp open/save (hatches, picture crop, comments pending) | P2 | P |
 | Slides | New slide by layout | P0 | D |
 | Slides | Duplicate, delete, hide slides | P0 | D |
 | Slides | Reorder slides (thumbnails, sorter) | P0 | D |

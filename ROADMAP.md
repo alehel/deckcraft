@@ -45,7 +45,7 @@ format plus PPTX), scriptable by agents (CLI, JSON control channel, MCP), and av
 
 | Audience | Ready | Opus 5.5 agent hours to ~95% | Work that dominates |
 |---|---:|---|---|
-| Full target (ready for real work) | ~55% | 340–600 (~60% parallelizes: ~120–210 h wall clock with 3–4 agents) | Feature depth across all 20 areas, legacy `.ppt`, `.odp` animations and video export, localization in 11+ languages, GPU raster and hardware decode, AI features |
+| Full target (ready for real work) | ~55% | 340–600 (~60% parallelizes: ~120–210 h wall clock with 3–4 agents) | Feature depth across all 20 areas, legacy `.ppt` and video export, localization in 11+ languages, GPU raster and hardware decode, AI features |
 | Mainstream practitioner | ~53% | 150–250 (~50% parallelizes: ~70–120 h with 3 agents) | `.pptx` exchange (real-deck corpus, round-trip losses, EMF/SVG, embedded fonts) 45–75 h; depth in charts, animations, pictures, text, presenting, print/vector PDF 70–110 h; interaction (menu bar, Format Shape pane, font faces, dialogs) 25–40 h; stability 10–20 h |
 | Essentials user | ~62% | 50–90 (~40% parallelizes: ~30–55 h with 2–3 agents) | Opening received decks (corpus subset, EMF, SVG icons) 25–45 h; Windows launch fallback and Close prompt 6–12 h; font faces, Tab, paste, print, show navigation 12–20 h; start screen, menu bar, palette 6–10 h |
 
@@ -150,7 +150,7 @@ app's JSON control channel (`deckcraft --control PORT`).
 
 | Date | What landed |
 |---|---|
-| 2026-11-04 | OpenDocument presentations open and save: `.odp`, `.otp` and flat `.fodp` are read (styles, masters, placeholders, lists, custom-shape geometry, tables, pictures, charts, notes, transitions, footers, gradients, hatches, shadows, arrowheads) and `.odp`/`.otp` written with resolved formatting, each used layout as a master page and charts as chart documents. Compared with LibreOffice 24.2 renders of its 23 bundled templates and synthetic decks: ~95% pixel similarity reading and writing. Open dialogs, Save As, Export, the web app and the macOS, Windows and Linux file associations offer them. Animations are not read or written yet |
+| 2026-11-04 | OpenDocument presentations open and save: `.odp`, `.otp` and flat `.fodp` are read (styles, masters, placeholders, lists, custom-shape geometry, tables, pictures, charts, notes, transitions, footers, gradients, hatches, shadows, arrowheads, transitions and animations) and `.odp`/`.otp` written with resolved formatting, each used layout as a master page and charts as chart documents. Compared with LibreOffice 24.2 renders of its 23 bundled templates and synthetic decks: ~95% pixel similarity reading and writing. Open dialogs, Save As, Export, the web app and the macOS, Windows and Linux file associations offer them |
 | 2026-11-02 | Native and PPTX saves retain optional table right-to-left direction, including explicit false and omission; two-save round-trip tests keep labeled columns in order |
 | 2026-11-02 | Text runs preserve alternate-language metadata independently from the main language through native and PPTX saves |
 | 2026-11-02 | Picture compression measures displayed dimensions through nested group transforms; checklist score unchanged |
