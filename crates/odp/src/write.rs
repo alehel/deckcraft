@@ -133,6 +133,8 @@ pub(crate) struct Writer<'p> {
     pub dirs: Vec<(String, String)>,
     /// Shapes and paragraphs the page's animations target: they get `xml:id`s.
     pub anim_targets: std::collections::HashSet<(u32, Option<u32>)>,
+    /// Writing a master page: its date fields follow each slide's date setting.
+    pub in_master: bool,
 }
 
 impl Writer<'_> {
@@ -190,6 +192,7 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         objects: 0,
         dirs: vec![],
         anim_targets: Default::default(),
+        in_master: false,
     };
     for (i, s) in p.slides.iter().enumerate() {
         w.page_names.insert(s.id.0, page_name(i, s));
@@ -444,8 +447,11 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
         pp.push_str(&shapes::transition_attrs(t));
     }
     let page_style = auto.style("drawing-page", "dp", None, &format!("<style:drawing-page-properties{pp}/>"));
-    let mut out =
-        format!(r#"<draw:page draw:name="{}" draw:style-name="{page_style}" draw:master-page-name="{}""#, esc(&page_name(i, s)), esc(master_name));
+    let mut out = format!(
+        r#"<draw:page draw:name="{}" draw:style-name="{page_style}" draw:master-page-name="{}" xml:id="pg{i}" draw:id="pg{i}""#,
+        esc(&page_name(i, s)),
+        esc(master_name)
+    );
     if hf.footer && has(PhType::Footer) && !hf.footer_text.is_empty() {
         out.push_str(r#" presentation:use-footer-name="ftr1""#);
     }

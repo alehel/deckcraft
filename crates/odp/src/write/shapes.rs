@@ -924,6 +924,7 @@ pub fn presentation_styles(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &st
 /// A master page: background, the master's and layout's graphics, and the placeholders.
 pub fn master_page(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str, layout: Option<&Layout>) -> String {
     w.page = name.to_string();
+    w.in_master = true;
     let (bg, ph) = resolve::background(ctx, None);
     let bgx = fill_attrs(w, ctx, &bg, ph, true);
     let dp = auto.style("drawing-page", "dp", None, &format!(r#"<style:drawing-page-properties{bgx} draw:background-size="border"/>"#));
@@ -992,6 +993,7 @@ pub fn master_page(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str, layou
             );
         }
     }
+    w.in_master = false;
     format!(
         r#"<style:master-page style:name="{name}" style:page-layout-name="PM1" draw:style-name="{dp}">{shapes_xml}<presentation:notes style:page-layout-name="PM2"/></style:master-page>"#
     )

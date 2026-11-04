@@ -36,6 +36,8 @@ struct ListCtx<'a> {
     depth: usize,
     /// Inside a `text:list-item` (bulleted) rather than a `text:list-header`.
     bulleted: bool,
+    /// Inside a list at all (items and headers take its indents).
+    in_list: bool,
     start: Option<u32>,
 }
 
@@ -43,7 +45,7 @@ struct ListCtx<'a> {
 pub fn paragraphs(cx: &TextCtx, container: &El) -> Vec<Paragraph> {
     let mut out = vec![];
     let shape_list = cx.base.list.clone();
-    walk(cx, container, &ListCtx { style: shape_list.as_ref(), depth: 0, bulleted: false, start: None }, &mut out, 0);
+    walk(cx, container, &ListCtx { style: shape_list.as_ref(), depth: 0, bulleted: false, in_list: false, start: None }, &mut out, 0);
     out
 }
 
@@ -69,7 +71,7 @@ fn walk(cx: &TextCtx, el: &El, list: &ListCtx, out: &mut Vec<Paragraph>, guard: 
                     }
                     let style = attr(item, "text:style-override").and_then(|n| cx.store.list_style(cx.scope, n)).or(style);
                     let start = attr(item, "text:start-value").and_then(|v| v.parse::<u32>().ok());
-                    let inner = ListCtx { style, depth, bulleted, start };
+                    let inner = ListCtx { style, depth, bulleted, in_list: true, start };
                     walk(cx, item, &inner, out, guard + 1);
                 }
             }
@@ -165,10 +167,10 @@ fn paragraph(cx: &TextCtx, p: &El, list: &ListCtx) -> Paragraph {
     let style = para_style(cx, list.depth, attr(p, "text:style-name"));
     let mut props = para_props(cx.store, &style.paragraph, style.tabs.as_ref());
     let base_run = run_props(cx.store, &style.text);
-    let level_el = if list.bulleted { list.style.and_then(|l| level_style(l, list.depth)) } else { None };
+    let level_el = if list.in_list { list.style.and_then(|l| level_style(l, list.depth)) } else { None };
     // A paragraph style may name its own list style (`style:list-style-name`) when it's in a list.
     let level_el = level_el.or_else(|| {
-        if !list.bulleted {
+        if !list.in_list {
             return None;
         }
         style.list_style_name.as_deref().and_then(|n| cx.store.list_style(cx.scope, n)).and_then(|l| level_style(l, list.depth))
@@ -392,19 +394,25 @@ fn apply_list_level(store: &Store, pp: &mut ParaProps, level: Option<&El>, para:
     };
     let props = kid(l, "style:list-level-properties");
     let lp = |k: &str| props.and_then(|e| attr(e, k)).and_then(units::length);
-    let explicit_margin = para.contains_key("fo:margin-left");
-    if !explicit_margin {
-        // ODF 1.2 "label-alignment" mode puts the indents on a nested element.
-        let align = props.and_then(|e| kid(e, "style:list-level-label-alignment"));
-        if let Some(a) = align {
-            pp.margin_left = attr(a, "fo:margin-left").and_then(units::length).or(pp.margin_left);
-            pp.indent = attr(a, "fo:text-indent").and_then(units::length).or(pp.indent);
-        } else {
-            let before = lp("text:space-before").unwrap_or(0.0);
-            let label = lp("text:min-label-width").unwrap_or(0.0);
-            pp.margin_left = Some(before + label);
-            pp.indent = Some(-label);
+    // The list level's indents, added to the paragraph's own (LibreOffice writes the paragraph's
+    // as zero and the indent in the list). ODF 1.2 "label-alignment" mode puts them on a nested
+    // element.
+    let _ = para;
+    let (lm, li) = match props.and_then(|e| kid(e, "style:list-level-label-alignment")) {
+        Some(a) => {
+            (attr(a, "fo:margin-left").and_then(units::length).unwrap_or(0.0), attr(a, "fo:text-indent").and_then(units::length).unwrap_or(0.0))
         }
+        None => {
+            let label = lp("text:min-label-width").unwrap_or(0.0);
+            (lp("text:space-before").unwrap_or(0.0) + label, -label)
+        }
+    };
+    pp.margin_left = Some(pp.margin_left.unwrap_or(0.0) + lm);
+    pp.indent = Some(pp.indent.unwrap_or(0.0) + li);
+    if !list.bulleted {
+        // A list header: indented, without its bullet.
+        pp.bullet = Some(Bullet::None);
+        return;
     }
     let tp = kid(l, "style:text-properties");
     let tattr = |k: &str| tp.and_then(|e| attr(e, k));

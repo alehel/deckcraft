@@ -64,7 +64,10 @@ fn paragraph(
     // its end (so an empty paragraph has its height).
     let first = runs.first().map(|(r, _)| r).unwrap_or(end);
     let size = first.size.or(end.size).unwrap_or(18.0);
-    let ppx = para_attrs(pp, size);
+    let in_list = !matches!(pp.bullet.clone().unwrap_or(Bullet::None), Bullet::None) || outline || level > 0;
+    // In a list the indents live in the list level; the paragraph's are zero (as LibreOffice
+    // writes them: it adds the two).
+    let ppx = if in_list { para_attrs(&ParaProps { margin_left: Some(0.0), indent: Some(0.0), ..pp.clone() }, size) } else { para_attrs(pp, size) };
     let tabs = tab_stops(pp);
     let ptext = text_attrs(w, ctx, end);
     let pstyle = auto.style(
@@ -83,6 +86,8 @@ fn paragraph(
                 let f = field.to_ascii_lowercase();
                 if f == "slidenum" {
                     format!("<text:page-number>{}</text:page-number>", esc(&r.text))
+                } else if f.starts_with("datetime") && w.in_master {
+                    "<presentation:date-time/>".to_string()
                 } else if f.starts_with("datetime") {
                     format!(r#"<text:date style:data-style-name="D1">{}</text:date>"#, esc(&r.text))
                 } else if f == "slidecount" {
