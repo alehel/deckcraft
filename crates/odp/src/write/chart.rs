@@ -85,7 +85,7 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
             trim(if stacked || percent { 100.0 } else { c.overlap * 100.0 }, 0)
         );
     }
-    if c.kind == ChartType::LineMarkers {
+    if matches!(c.kind, ChartType::LineMarkers | ChartType::Scatter) {
         plot_props.push_str(r#" chart:symbol-type="automatic""#);
     } else if class == "line" {
         plot_props.push_str(r#" chart:symbol-type="none""#);
@@ -118,6 +118,10 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
     for (i, s) in series.iter().enumerate() {
         let color = hex(fill_color(ctx, s.fill.as_ref(), i));
         let mut g = format!(r#" draw:fill-color="{color}" svg:stroke-color="{color}""#);
+        // Scatter series are markers, as DeckCraft draws them.
+        if c.kind == ChartType::Scatter {
+            g.push_str(r#" draw:stroke="none""#);
+        }
         if class == "line" || class == "scatter" || class == "radar" {
             let width = s.line.as_ref().and_then(|l| l.width).unwrap_or(2.25);
             let _ = write!(g, r#" svg:stroke-width="{}""#, cm(width));
@@ -136,30 +140,36 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
             chp.push_str(r#" chart:interpolation="cubic-spline""#);
         }
         let ss = style(format!(r#"<style:graphic-properties{g}/><style:chart-properties{chp}/>"#));
+        // Columns named by domains: a scatter series' X values; a bubble series' Y values, then
+        // its X values (its sizes are its values).
         let mut domains = String::new();
-        if xy {
-            cols.push((format!("{} X", s.name), s.x_values.clone()));
+        let mut domain = |cols: &mut Vec<(String, Vec<Option<f64>>)>, name: String, vals: Vec<Option<f64>>| {
+            cols.push((name, vals));
             let _ = write!(domains, r#"<chart:domain table:cell-range-address="{}"/>"#, range(cols.len(), 1, rows.max(1)));
-        }
-        let (vals, sizes) = if c.kind == ChartType::Bubble { (s.values.clone(), Some(s.sizes.clone())) } else { (s.values.clone(), None) };
-        if let Some(sz) = sizes {
-            // Bubble: X, Y and size; ODF names the size column as the series' values.
-            cols.push((format!("{} Y", s.name), vals));
-            let _ = write!(domains, r#"<chart:domain table:cell-range-address="{}"/>"#, range(cols.len(), 1, rows.max(1)));
-            cols.push((s.name.clone(), sz));
+        };
+        if c.kind == ChartType::Bubble {
+            domain(&mut cols, format!("{} Y", s.name), s.values.clone());
+            domain(&mut cols, format!("{} X", s.name), s.x_values.clone());
+            cols.push((s.name.clone(), s.sizes.clone()));
         } else {
-            cols.push((s.name.clone(), vals));
+            if xy {
+                domain(&mut cols, format!("{} X", s.name), s.x_values.clone());
+            }
+            cols.push((s.name.clone(), s.values.clone()));
         }
         let vcol = cols.len();
         // Points with their own colour: overridden ones, and every slice of a varied pie. The
         // rest are unstyled runs (`chart:repeated`) that keep the series colour.
-        let varied = c.vary_colors && matches!(c.kind, ChartType::Pie | ChartType::Doughnut);
+        // A pie not varying its colours styles every slice in the series' colour (left unstyled,
+        // a pie's slices take a colour each).
+        let pie = matches!(c.kind, ChartType::Pie | ChartType::Doughnut);
+        let varied = c.vary_colors && pie;
         let mut points = String::new();
         let mut plain = 0usize;
         let own_fills: std::collections::HashMap<usize, &Fill> = s.point_fills.iter().map(|(k, f)| (*k, f)).collect();
         for p in 0..s.values.len().min(MAX) {
             let own = own_fills.get(&p).copied();
-            if own.is_none() && !varied {
+            if own.is_none() && !pie {
                 plain += 1;
                 continue;
             }
@@ -167,7 +177,13 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
                 let _ = write!(points, r#"<chart:data-point chart:repeated="{plain}"/>"#);
                 plain = 0;
             }
-            let ps = style(format!(r#"<style:graphic-properties draw:fill-color="{}"/>"#, hex(fill_color(ctx, own, p))));
+            // Its own colour, the slice's (varied), or the series'.
+            let c = match own {
+                Some(f) => hex(fill_color(ctx, Some(f), p)),
+                None if varied => hex(fill_color(ctx, None, p)),
+                None => color.clone(),
+            };
+            let ps = style(format!(r#"<style:graphic-properties draw:fill-color="{c}"/>"#));
             let _ = write!(points, r#"<chart:data-point chart:style-name="{ps}"/>"#);
         }
         let axis = if s.secondary_axis { r#" chart:attached-axis="secondary-y""# } else { "" };

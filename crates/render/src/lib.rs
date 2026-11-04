@@ -49,6 +49,8 @@ use vello_common::filter_effects::{EdgeMode, Filter, FilterPrimitive};
 use vello_cpu::{RenderContext, Resources, peniko};
 
 pub use deckcraft_anim::{transition_frame, transition_layers, uses_slide_parts};
+/// The size sub- and superscript text is drawn at, of the text's.
+pub use deckcraft_text::SUB_SUPER;
 pub use extent::{Region, TILE, layout_extent, pasteboard_region, slide_extent};
 pub use images::{decode as decode_image, gif_frame, natural_size as image_natural_size};
 pub use morph_path::PathMorph;

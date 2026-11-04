@@ -140,11 +140,13 @@ Detail in [file-format-parity.md](file-format-parity.md).
   triple hatches keep their spacing to within 0.5%. Not kept through `.odp`: diagonal cell borders,
   vertical cell text and the table style's name; the first slide number; "advance on click" off;
   video autoplay; clicks that run a program; percentage paragraph spacing (written in points);
-  shrink-to-fit line reduction; pattern fills read back as tiled pictures. LibreOffice itself
+  shrink-to-fit line reduction; pattern fills read back as tiled pictures; a chart's secondary
+  axis and its number formats; the notes page size. LibreOffice itself
   draws every text shadow grey and re-saves it as `1pt 1pt`, shows filled outlined text filled
   without its outline (white filled text is written hollow so it shows), drops link tooltips,
   keeps the date footer's format only as its own `D1`–style formats, and shows a one-line
-  distributed paragraph left-aligned.
+  distributed paragraph left-aligned, and when it re-saves a list whose numbering restarts several
+  times it keeps only the first restart's start.
 - **Impact:** a few unusual LibreOffice decks lose an object or a detail.
 - **Estimate:** 4–8 h (SVG rendering is its own renderer item).
 

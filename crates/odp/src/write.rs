@@ -568,6 +568,15 @@ fn meta_xml(p: &Presentation) -> String {
     for k in pr.keywords.split(',').map(str::trim).filter(|k| !k.is_empty()) {
         let _ = write!(m, "<meta:keyword>{}</meta:keyword>", esc(k));
     }
+    if pr.revision > 0 {
+        let _ = write!(m, "<meta:editing-cycles>{}</meta:editing-cycles>", pr.revision);
+    }
+    // Properties ODF has no element for, as user-defined ones.
+    for (name, v) in [("Category", &pr.category), ("Company", &pr.company)] {
+        if !v.is_empty() {
+            let _ = write!(m, r#"<meta:user-defined meta:name="{name}">{}</meta:user-defined>"#, esc(v));
+        }
+    }
     let _ = write!(m, "<meta:generator>DeckCraft/{}</meta:generator>", env!("CARGO_PKG_VERSION"));
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?><office:document-meta xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0" office:version="1.3"><office:meta>{m}</office:meta></office:document-meta>"#
@@ -579,8 +588,18 @@ fn show_settings(p: &Presentation, names: &HashMap<u32, String>) -> String {
     if p.show.loop_until_esc {
         attrs.push_str(r#" presentation:endless="true""#);
     }
-    if p.show.show_type == "browse" {
+    if p.show.show_type == "browsed" {
         attrs.push_str(r#" presentation:full-screen="false""#);
+    }
+    // A range starts at its first slide (ODF has no end).
+    if let Some(name) = p.show.range.and_then(|(from, _)| p.slides.get((from as usize).saturating_sub(1))).and_then(|s| names.get(&s.id.0)) {
+        let _ = write!(attrs, r#" presentation:start-page="{}""#, esc(name));
+    }
+    if !p.show.use_timings {
+        attrs.push_str(r#" presentation:force-manual="true""#);
+    }
+    if p.show.without_animation {
+        attrs.push_str(r#" presentation:animations="disabled""#);
     }
     if let Some(cs) = &p.show.custom_show {
         let _ = write!(attrs, r#" presentation:show="{}""#, esc(cs));

@@ -53,8 +53,9 @@ pub use layout::layout;
 #[cfg(test)]
 use layout::layout_scaled;
 pub use run::{Dash, Deco, DecoLine, GlyphRun, RunEffects, TextShadow, UPRIGHT_CENTRE};
+pub use shape::SUB_SUPER;
 #[cfg(test)]
-use shape::{SUB_SUPER, caps_char, is_upright, shaping_features};
+use shape::{caps_char, is_upright, shaping_features};
 #[cfg(test)]
 use style::Cell;
 pub use style::{Fields, NoFields, Opts};

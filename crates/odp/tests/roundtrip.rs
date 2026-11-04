@@ -435,20 +435,37 @@ fn numbering_runs_restart_only_where_they_begin() {
         });
         p
     };
-    let starts_written = |paras: Vec<Paragraph>| {
+    // Where the numbering restarts (a list that doesn't continue the one before), and the deck
+    // read back.
+    let restarts = |paras: Vec<Paragraph>| {
         let shape = Shape {
             xfrm: Some(Xfrm::new(50.0, 50.0, 300.0, 200.0)),
             text_box: true,
             text: Some(TextBody { paragraphs: paras, ..Default::default() }),
             ..Default::default()
         };
-        let xml = part(&deckcraft_odp::export(&deck_with(vec![shape])).unwrap(), "content.xml");
+        let bytes = deckcraft_odp::export(&deck_with(vec![shape])).unwrap();
+        let xml = part(&bytes, "content.xml");
         let page = &xml[xml.find("<draw:page ").unwrap()..];
-        page.match_indices("text:start-value=\"").map(|(i, m)| page[i + m.len()..].split('"').next().unwrap().to_string()).collect::<Vec<_>>()
+        let n = page.matches(r#"text:continue-numbering="false""#).count();
+        let back = deckcraft_odp::import(&bytes).unwrap();
+        let starts: Vec<Option<u32>> = shapes_of(&back)[0]
+            .text
+            .as_ref()
+            .unwrap()
+            .paragraphs
+            .iter()
+            .map(|p| match &p.props.bullet {
+                Some(Bullet::AutoNum { start_at, .. }) => Some(*start_at),
+                _ => None,
+            })
+            .collect();
+        (n, starts)
     };
-    assert_eq!(starts_written(vec![para("a", Some(3)), para("b", Some(3)), para("c", Some(3))]), ["3"]);
+    let three = restarts(vec![para("a", Some(3)), para("b", Some(3)), para("c", Some(3))]);
+    assert_eq!(three, (1, vec![Some(3); 3]));
     let mixed = vec![para("a", Some(1)), para("b", Some(1)), para("plain", None), para("c", Some(1)), para("d", Some(7)), para("e", Some(7))];
-    assert_eq!(starts_written(mixed), ["1", "1", "7"]);
+    assert_eq!(restarts(mixed), (3, vec![Some(1), Some(1), None, Some(1), Some(7), Some(7)]));
 }
 
 /// Page names stay unique even when a slide's own name looks like another's numbered one.
@@ -975,7 +992,7 @@ fn links_notes_numbering_and_vertical_text_survive_libreoffice() {
     assert!(xml.contains("#action?jump=nextslide"));
     assert!(xml.contains(r#"xmlns:dom="http://www.w3.org/2001/xml-events""#));
     assert!(xml.contains(r#"-notes" presentation:class="notes""#));
-    assert!(xml.contains(r#"text:start-value="3""#) && xml.contains(r#"loext:writing-mode="bt-lr""#));
+    assert!(xml.contains(r#"text:start-value="3">"#) && xml.contains(r#"loext:writing-mode="bt-lr""#));
     let back = deckcraft_odp::import(&bytes).unwrap();
     let s = shapes_of(&back);
     let runs = &s[0].text.as_ref().unwrap().paragraphs[0].runs;
@@ -1296,4 +1313,95 @@ fn round_three_retest_fixes_hold() {
     let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
     assert!(p.media.len() <= 64, "{}", p.media.len());
     assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
+}
+
+/// Review round 4: what round-trips now — bubble domains, date and time fields, invisible text,
+/// explicit "off" formatting, raised text size, comment white space, spaces after a line break,
+/// single-colour pies, per-series labels, show settings, number schemes, kerning, meta.
+#[test]
+fn round_four_fixes_hold() {
+    use deckcraft_model::chart::{Chart, ChartType, Series};
+    use deckcraft_model::text::{Caps, RunKind};
+    let field = |f: &str| Run { kind: RunKind::Field { field: f.into() }, ..Run::new("x") };
+    let mut invisible = Run::new("ghost");
+    invisible.props.fill = Some(Fill::solid(ColorRef::rgb(Rgba::rgb(255, 0, 0)).with(deckcraft_color::ColorTransform::Alpha(0))));
+    let mut plain = Run::new("Mixed");
+    (plain.props.caps, plain.props.spacing, plain.props.baseline, plain.props.kern) = (Some(Caps::None), Some(0.0), Some(0.0), Some(12.0));
+    let mut sup = Run::new("2");
+    (sup.props.baseline, sup.props.size) = (Some(0.3), Some(20.0));
+    let mut minus = Paragraph { runs: vec![Run::new("n")], ..Default::default() };
+    minus.props.bullet = Some(Bullet::AutoNum { scheme: "arabicMinus".into(), start_at: 1 });
+    let after_break = Paragraph { runs: vec![Run::new("a"), Run { kind: RunKind::Break, ..Run::new("") }, Run::new("  lead")], ..Default::default() };
+    let body = TextBody {
+        paragraphs: vec![
+            Paragraph { runs: vec![field("datetime10"), field("datetime4")], ..Default::default() },
+            Paragraph { runs: vec![invisible, plain, sup], ..Default::default() },
+            minus,
+            after_break,
+        ],
+        ..Default::default()
+    };
+    let text = Shape { xfrm: Some(Xfrm::new(20.0, 20.0, 400.0, 200.0)), text_box: true, text: Some(body), ..Default::default() };
+    let bubble = Chart {
+        kind: ChartType::Bubble,
+        series: vec![Series {
+            name: "B".into(),
+            x_values: vec![Some(1.0), Some(2.0)],
+            values: vec![Some(10.0), Some(20.0)],
+            sizes: vec![Some(1.0), Some(5.0)],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let green = Fill::solid(ColorRef::rgb(Rgba::rgb(0, 150, 0)));
+    let pie = Chart {
+        kind: ChartType::Pie,
+        vary_colors: false,
+        series: vec![Series { name: "P".into(), values: vec![Some(1.0), Some(2.0), Some(3.0)], fill: Some(green), ..Default::default() }],
+        categories: vec!["a".into(), "b".into(), "c".into()],
+        ..Default::default()
+    };
+    let labels = Chart {
+        kind: ChartType::Column,
+        series: vec![
+            Series { name: "S1".into(), values: vec![Some(1.0)], data_labels: Some(true), ..Default::default() },
+            Series { name: "S2".into(), values: vec![Some(2.0)], ..Default::default() },
+        ],
+        categories: vec!["a".into()],
+        ..Default::default()
+    };
+    let chart = |c: Chart, y: f64| Shape { xfrm: Some(Xfrm::new(20.0, y, 200.0, 100.0)), kind: ShapeKind::Chart(Box::new(c)), ..Default::default() };
+    let mut p = deck_with(vec![text, chart(bubble, 250.0), chart(pie, 360.0), chart(labels, 470.0)]);
+    Arc::make_mut(&mut p.slides[0]).comments.push(deckcraft_model::Comment {
+        author: "A".into(),
+        text: "col1\tcol2  two\n  indented".into(),
+        ..Default::default()
+    });
+    (p.show.show_type, p.show.use_timings, p.show.without_animation) = ("browsed".into(), false, true);
+    (p.props.revision, p.props.category, p.props.company) = (7, "Science".into(), "Aurora Ltd".into());
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    let s = shapes_of(&back);
+    let paras = &s[0].text.as_ref().unwrap().paragraphs;
+    let fields: Vec<String> =
+        paras[0].runs.iter().filter_map(|r| if let RunKind::Field { field } = &r.kind { Some(field.clone()) } else { None }).collect();
+    assert_eq!(fields, ["datetime10", "datetime4"]);
+    let r = &paras[1].runs;
+    assert!(r[0].props.fill.as_ref().is_some_and(|f| matches!(f, Fill::Solid { color } if color.alpha() < 0.01)), "{:?}", r[0].props.fill);
+    let m = &r.iter().find(|x| x.text == "Mixed").unwrap().props;
+    assert_eq!((m.caps, m.spacing, m.baseline), (Some(Caps::None), Some(0.0), Some(0.0)));
+    assert!(m.kern.is_some_and(|k| k > 0.0));
+    let sp = &r.iter().find(|x| x.text == "2").unwrap().props;
+    assert!(sp.size.is_some_and(|z| (z - 20.0).abs() < 0.2), "{:?}", sp.size);
+    assert!(matches!(&paras[2].props.bullet, Some(Bullet::AutoNum { scheme, .. }) if scheme == "arabicMinus"));
+    assert_eq!(paras[3].text(), "a\u{b}  lead");
+    let charts: Vec<&Chart> = s.iter().filter_map(|x| if let ShapeKind::Chart(c) = &x.kind { Some(&**c) } else { None }).collect();
+    assert_eq!(
+        (charts[0].series[0].x_values.clone(), charts[0].series[0].values.clone()),
+        (vec![Some(1.0), Some(2.0)], vec![Some(10.0), Some(20.0)])
+    );
+    assert!(!charts[1].vary_colors);
+    assert_eq!((charts[2].series[0].data_labels, charts[2].series[1].data_labels.unwrap_or(false)), (Some(true), false));
+    assert_eq!(back.slides[0].comments[0].text, "col1\tcol2  two\n  indented");
+    assert_eq!((back.show.show_type.as_str(), back.show.use_timings, back.show.without_animation), ("browsed", false, true));
+    assert_eq!((back.props.revision, back.props.category.as_str(), back.props.company.as_str()), (7, "Science", "Aurora Ltd"));
 }

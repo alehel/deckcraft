@@ -188,9 +188,7 @@ pub fn read(content: &El) -> Option<Chart> {
         let n = c.series.iter().map(|s| s.values.len()).max().unwrap_or(0);
         c.categories.truncate(n);
     }
-    if matches!(c.kind, ChartType::Pie | ChartType::Doughnut) {
-        c.vary_colors = true;
-    }
+
     if let Some(g) = cp("chart:gap-width").and_then(|v| v.parse::<f64>().ok()) {
         c.gap_width = (g / 100.0).clamp(0.0, 5.0);
     }
@@ -219,21 +217,18 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
             .map(|(t, _)| t)
             .unwrap_or_else(|| format!("Series {}", i + 1));
         let mut series = Series { name, values: values.iter().map(|(_, n)| *n).collect(), ..Default::default() };
-        // Scatter and bubble charts: the first domain is X, a second (bubble) is the size.
-        let domains: Vec<&El> = kids(s, "chart:domain").collect();
-        if let Some(d) = domains.first().and_then(|d| attr(d, "table:cell-range-address")) {
-            let xs: Vec<Option<f64>> = grid.range(d).iter().map(|(_, n)| *n).collect();
-            if c.kind == ChartType::Bubble {
-                series.sizes = series.values.clone();
-                series.values = domains
-                    .get(1)
-                    .and_then(|d| attr(d, "table:cell-range-address"))
-                    .map(|a| grid.range(a).iter().map(|(_, n)| *n).collect())
-                    .unwrap_or_default();
-                series.x_values = xs;
-            } else {
-                series.x_values = xs;
-            }
+        // A scatter series' domain is its X values. A bubble series' values are its sizes, and
+        // its domains its Y values, then its X values.
+        let domain = |k: usize| -> Option<Vec<Option<f64>>> {
+            let a = kids(s, "chart:domain").nth(k).and_then(|d| attr(d, "table:cell-range-address"))?;
+            Some(grid.range(a).iter().map(|(_, n)| *n).collect())
+        };
+        if c.kind == ChartType::Bubble {
+            series.sizes = std::mem::take(&mut series.values);
+            series.values = domain(0).unwrap_or_default();
+            series.x_values = domain(1).unwrap_or_default();
+        } else if let Some(xs) = domain(0) {
+            series.x_values = xs;
         }
         if matches!(c.kind, ChartType::Line | ChartType::StackedLine | ChartType::Scatter | ChartType::Radar) {
             // Lines are drawn in their stroke colour.
@@ -250,18 +245,20 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
             }
         }
         series.fill = simple_fill(&ss.graphic);
-        if ss.chart_prop("chart:data-label-number").is_some_and(|v| v != "none") {
-            series.data_labels = Some(true);
-            c.data_labels = true;
-        }
+        // Labels are a series' own.
+        series.data_labels = Some(ss.chart_prop("chart:data-label-number").is_some_and(|v| v != "none"));
         // Per-point overrides (pie slices), for the points the series has.
         let mut idx = 0usize;
+        let mut styled_same = 0usize;
         for p in kids(s, "chart:data-point") {
             if idx >= series.values.len() {
                 break;
             }
             let rep = repeat(p, "chart:repeated").min(series.values.len() - idx);
             let fill = attr(p, "chart:style-name").map(|n| store.resolve(Scope::Content, "chart", Some(n))).and_then(|st| simple_fill(&st.graphic));
+            if fill.is_some() && fill == series.fill {
+                styled_same += rep;
+            }
             if let Some(f) = fill.filter(|f| series.fill.as_ref() != Some(f)) {
                 let n = rep.min(fills_left);
                 fills_left -= n;
@@ -276,6 +273,10 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
         }
         if attr(s, "chart:attached-axis") == Some("secondary-y") {
             series.secondary_axis = true;
+        }
+        // A pie's slices take a colour each, unless every slice is styled in the series' colour.
+        if i == 0 && matches!(c.kind, ChartType::Pie | ChartType::Doughnut) {
+            c.vary_colors = !(series.point_fills.is_empty() && styled_same > 0 && styled_same >= series.values.len());
         }
         c.series.push(series);
     }

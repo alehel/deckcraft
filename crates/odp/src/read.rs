@@ -154,7 +154,7 @@ impl Decls {
         for e in body.elements() {
             let name = attr(e, "presentation:name").unwrap_or_default().to_string();
             let text = || {
-                let mut t = e.text();
+                let mut t = text::plain_text(e);
                 if let Some((i, _)) = t.char_indices().nth(MAX_DECL_TEXT) {
                     t.truncate(i);
                 }
@@ -234,6 +234,9 @@ impl Reader<'_> {
         props.modified = t("dc:date");
         props.keywords = kids(m, "meta:keyword").map(|k| k.text()).collect::<Vec<_>>().join(", ");
         props.revision = t("meta:editing-cycles").trim().parse().unwrap_or(0);
+        let user = |n: &str| kids(m, "meta:user-defined").find(|u| attr(u, "meta:name") == Some(n)).map(|u| u.text()).unwrap_or_default();
+        props.category = user("Category");
+        props.company = user("Company");
     }
 
     fn settings(&mut self, s: &El) {
@@ -241,7 +244,19 @@ impl Reader<'_> {
             self.p.show.loop_until_esc = true;
         }
         if attr(s, "presentation:show-type") == Some("window") || attr(s, "presentation:full-screen") == Some("false") {
-            self.p.show.show_type = "browse".into();
+            self.p.show.show_type = "browsed".into();
+        }
+        if attr(s, "presentation:force-manual") == Some("true") {
+            self.p.show.use_timings = false;
+        }
+        if attr(s, "presentation:animations") == Some("disabled") {
+            self.p.show.without_animation = true;
+        }
+        // The show starts at a page: a range from it to the end.
+        let start =
+            attr(s, "presentation:start-page").and_then(|n| self.page_names.get(n)).and_then(|id| self.p.slides.iter().position(|sl| sl.id == *id));
+        if let (Some(i), Ok(n)) = (start, u32::try_from(self.p.slides.len())) {
+            self.p.show.range = Some((i as u32 + 1, n));
         }
         if let Some(name) = attr(s, "presentation:show") {
             self.p.show.custom_show = Some(name.to_string());
@@ -1139,7 +1154,7 @@ fn comment(e: &El) -> deckcraft_model::Comment {
         author: t("dc:creator"),
         initials,
         date: t("dc:date"),
-        text: kids(e, "text:p").map(|p| p.text()).collect::<Vec<_>>().join("\n"),
+        text: kids(e, "text:p").map(text::plain_text).collect::<Vec<_>>().join("\n"),
         x: attr(e, "svg:x").and_then(units::length).unwrap_or(0.0),
         y: attr(e, "svg:y").and_then(units::length).unwrap_or(0.0),
         resolved: attr(e, "loext:resolved") == Some("true"),

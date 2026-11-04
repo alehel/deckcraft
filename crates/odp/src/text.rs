@@ -260,16 +260,23 @@ fn inline(cx: &TextCtx, el: &El, text_props: &Props, link: Option<&Hyperlink>, r
                     push_literal(runs, &props, "\t", link);
                     st.at_start = false;
                 }
+                // (White space is dropped only at the start of the paragraph, not of a line.)
                 "text:line-break" => {
                     st.space_pending = false;
                     runs.push(Run { text: String::new(), props: props.clone(), kind: RunKind::Break });
-                    st.at_start = true;
                 }
+                // A fixed date or time is the text it shows.
+                "text:date" | "text:time" if attr(e, "text:fixed") == Some("true") => inline(cx, e, text_props, link, runs, st, depth + 1),
                 "text:page-number" | "text:page-count" | "text:date" | "text:time" | "presentation:date-time" => {
                     flush_space(runs, &props, st, link);
+                    // A date's format from our date styles (named after it); a time is a time.
+                    let ours = attr(e, "style:data-style-name")
+                        .filter(|s| s.strip_prefix("datetime").is_some_and(|n| n.parse::<u8>().is_ok_and(|n| (1..=13).contains(&n))));
                     let field = match e.name.as_str() {
                         "text:page-number" => "slidenum",
                         "text:page-count" => "slidecount",
+                        _ if ours.is_some() => ours.unwrap_or("datetime1"),
+                        "text:time" => "datetime10",
                         _ => "datetime1",
                     };
                     let shown = e.text();
@@ -299,6 +306,54 @@ fn inline(cx: &TextCtx, el: &El, text_props: &Props, link: Option<&Hyperlink>, r
             },
         }
     }
+}
+
+/// The plain text of a paragraph-like element as ODF lays it out: white space collapsed to single
+/// spaces (dropped at the start), `text:s` as its spaces, `text:tab` and `text:line-break` as tab
+/// and new line, the text of other elements inside. For texts without formatting (comments,
+/// footer declarations).
+pub fn plain_text(el: &El) -> String {
+    fn walk(el: &El, out: &mut String, pending: &mut bool, depth: usize) {
+        if depth > 64 || out.len() > 1 << 20 {
+            return;
+        }
+        for c in &el.children {
+            match c {
+                deckcraft_pptx::XmlNode::Text(t) => {
+                    for ch in t.chars() {
+                        if ch.is_whitespace() {
+                            *pending = true;
+                        } else {
+                            if std::mem::take(pending) && !out.is_empty() {
+                                out.push(' ');
+                            }
+                            out.push(ch);
+                        }
+                    }
+                }
+                deckcraft_pptx::XmlNode::El(e) => {
+                    let literal = match e.name.as_str() {
+                        "text:s" => Some(" ".repeat(attr(e, "text:c").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).clamp(1, 1000))),
+                        "text:tab" => Some("\t".to_string()),
+                        "text:line-break" => Some("\n".to_string()),
+                        _ => None,
+                    };
+                    match literal {
+                        Some(s) => {
+                            if std::mem::take(pending) && !out.is_empty() {
+                                out.push(' ');
+                            }
+                            out.push_str(&s);
+                        }
+                        None => walk(e, out, pending, depth + 1),
+                    }
+                }
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(el, &mut out, &mut false, 0);
+    out
 }
 
 /// `xlink:href` of a `text:a` or `draw:a`/`presentation:event-listener`.
@@ -477,6 +532,7 @@ pub fn num_scheme(fmt: &str, prefix: &str, suffix: &str) -> String {
         ("(", ")") => "ParenBoth",
         (_, ")") => "ParenR",
         (_, ".") => "Period",
+        (_, "-") => "Minus",
         (_, "") => "Plain",
         _ => "Period",
     };
@@ -516,8 +572,7 @@ pub fn run_props(store: &Store, t: &Props, auto: Rgba) -> RunProps {
         });
     }
     if let Some(c) = g("fo:color").and_then(units::color) {
-        // A zero opacity is LibreOffice's "unset".
-        let op = g("loext:opacity").and_then(units::percent).filter(|o| *o > 0.0);
+        let op = g("loext:opacity").and_then(units::percent);
         rp.fill = Some(Fill::solid(crate::styles::color_ref(c, op)));
     } else if g("style:use-window-font-color") == Some("true") {
         rp.fill = Some(Fill::solid(ColorRef::rgb(auto)));
@@ -530,12 +585,18 @@ pub fn run_props(store: &Store, t: &Props, auto: Rgba) -> RunProps {
             Some(v) => units::percent(v),
             None => None,
         };
-        if let Some(o) = off.filter(|o| *o != 0.0) {
-            rp.baseline = Some(o.clamp(-10.0, 10.0));
-            let scale = it.next().and_then(units::percent).unwrap_or(0.58);
-            if let Some(sz) = rp.size {
-                rp.size = Some((sz * scale).clamp(1.0, 4000.0));
+        match off {
+            // Raised or lowered text is drawn at SUB_SUPER of its size: the size is what the
+            // file's scale over that comes to.
+            Some(o) if o != 0.0 => {
+                rp.baseline = Some(o.clamp(-10.0, 10.0));
+                let scale = it.next().and_then(units::percent).unwrap_or(0.58);
+                if let Some(sz) = rp.size {
+                    rp.size = Some((sz * scale / deckcraft_render::SUB_SUPER).clamp(1.0, 4000.0));
+                }
             }
+            Some(_) => rp.baseline = Some(0.0),
+            None => {}
         }
     }
     if g("fo:font-variant") == Some("small-caps") {
@@ -545,8 +606,10 @@ pub fn run_props(store: &Store, t: &Props, auto: Rgba) -> RunProps {
     } else if g("fo:font-variant") == Some("normal") || g("fo:text-transform") == Some("none") {
         rp.caps = Some(Caps::None);
     }
-    if let Some(sp) = g("fo:letter-spacing").and_then(units::length) {
-        rp.spacing = Some(sp.clamp(-4000.0, 4000.0));
+    match g("fo:letter-spacing") {
+        Some("normal") => rp.spacing = Some(0.0),
+        Some(v) => rp.spacing = units::length(v).map(|sp| sp.clamp(-4000.0, 4000.0)).or(rp.spacing),
+        None => {}
     }
     if let Some(bg) = g("fo:background-color").and_then(units::color) {
         rp.highlight = Some(ColorRef::rgb(bg));
@@ -581,8 +644,11 @@ pub fn run_props(store: &Store, t: &Props, auto: Rgba) -> RunProps {
         let part = |k: &str| g(k).filter(|v| !v.is_empty() && *v != "none").map(|v| format!("-{v}")).unwrap_or_default();
         rp.lang = Some(format!("{lang}{}{}", part("fo:script"), part("fo:country")));
     }
-    if g("style:letter-kerning") == Some("true") {
-        rp.kern = Some(0.0);
+    // Kerning on is kerning at every size (the model's 0 is off).
+    match g("style:letter-kerning") {
+        Some("true") => rp.kern = Some(1.0),
+        Some("false") => rp.kern = Some(0.0),
+        _ => {}
     }
     rp
 }

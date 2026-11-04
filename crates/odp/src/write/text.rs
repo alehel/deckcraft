@@ -128,7 +128,11 @@ fn paragraph(
                 } else if f.starts_with("datetime") && on_master {
                     "<presentation:date-time/>".to_string()
                 } else if f.starts_with("datetime") {
-                    format!(r#"<text:date style:data-style-name="{}">{}</text:date>"#, super::date_style(&f), esc(&r.text))
+                    // Times (`datetime10` on) are time fields.
+                    let style = super::date_style(&f);
+                    let el =
+                        if ["datetime10", "datetime11", "datetime12", "datetime13"].contains(&style.as_str()) { "text:time" } else { "text:date" };
+                    format!(r#"<{el} style:data-style-name="{style}">{}</{el}>"#, esc(&r.text))
                 } else if f == "slidecount" {
                     format!("<text:page-count>{}</text:page-count>", esc(&r.text))
                 } else {
@@ -158,20 +162,18 @@ fn paragraph(
     let level_el = list_level(w, ctx, lv + 1, pp, &bullet, size, first);
     let lstyle = auto.list(&level_el);
     let item = if bulleted { "text:list-item" } else { "text:list-header" };
-    // Numbering continues from the paragraph before; a new run restarts at its own start.
-    let start = match &bullet {
-        Bullet::AutoNum { start_at, .. } if starts_run => format!(r#" text:start-value="{start_at}""#),
-        _ => String::new(),
-    };
-    let mut open = format!(r#"<text:list text:style-name="{lstyle}" text:continue-numbering="true">"#);
+    // Numbering continues from the list before, or (a new run) restarts at the start its level
+    // style gives: LibreOffice keeps a run's start there through its own saves, and adds an item's
+    // start to it.
+    let continues = !(starts_run && matches!(bullet, Bullet::AutoNum { .. }));
+    let mut open = format!(r#"<text:list text:style-name="{lstyle}" text:continue-numbering="{continues}">"#);
     let mut close = String::new();
     for d in 0..=lv {
         let it = if d == lv { item } else { "text:list-item" };
-        let st = if d == lv { start.as_str() } else { "" };
         if d > 0 {
             open.push_str("<text:list>");
         }
-        let _ = write!(open, "<{it}{st}>");
+        let _ = write!(open, "<{it}>");
         close.insert_str(0, &format!("</{it}>{}", if d > 0 { "</text:list>" } else { "" }));
     }
     format!("{open}{p}{close}</text:list>")
@@ -219,11 +221,10 @@ fn list_level(w: &mut Writer, ctx: &Ctx, level: usize, pp: &ParaProps, bullet: &
                 esc(&c)
             )
         }
-        // The start is the list item's (LibreOffice adds a level style's start to it).
-        Bullet::AutoNum { scheme, .. } => {
+        Bullet::AutoNum { scheme, start_at } => {
             let (fmt, prefix, suffix) = num_format(scheme);
             format!(
-                r#"<text:list-level-style-number text:level="{level}" style:num-format="{fmt}" style:num-prefix="{prefix}" style:num-suffix="{suffix}">{props}<style:text-properties{tp}/></text:list-level-style-number>"#
+                r#"<text:list-level-style-number text:level="{level}" style:num-format="{fmt}" style:num-prefix="{prefix}" style:num-suffix="{suffix}" text:start-value="{start_at}">{props}<style:text-properties{tp}/></text:list-level-style-number>"#
             )
         }
         Bullet::Picture { .. } => match picture {
@@ -467,16 +468,27 @@ pub fn text_attrs(w: &mut Writer, ctx: &Ctx, r: &RunProps) -> String {
             let _ = write!(a, r#" loext:opacity="{}""#, pct(alpha.clamp(0.0, 1.0)));
         }
     }
-    if let Some(b) = r.baseline.filter(|b| *b != 0.0) {
-        let _ = write!(a, r#" style:text-position="{}% 100%""#, trim(b * 100.0, 1));
+    // Values set to "off" are written too, so a style's (or the master's) don't show through.
+    match r.baseline {
+        // Raised or lowered text is drawn at SUB_SUPER of its size.
+        Some(b) if b != 0.0 => {
+            let _ = write!(a, r#" style:text-position="{}% {}""#, trim(b * 100.0, 1), pct(deckcraft_render::SUB_SUPER));
+        }
+        Some(_) => a.push_str(r#" style:text-position="0% 100%""#),
+        None => {}
     }
     match r.caps {
         Some(Caps::Small) => a.push_str(r#" fo:font-variant="small-caps""#),
         Some(Caps::All) => a.push_str(r#" fo:text-transform="uppercase""#),
-        _ => {}
+        Some(Caps::None) => a.push_str(r#" fo:font-variant="normal" fo:text-transform="none""#),
+        None => {}
     }
-    if let Some(sp) = r.spacing.filter(|s| *s != 0.0) {
-        let _ = write!(a, r#" fo:letter-spacing="{}""#, cm(sp));
+    match r.spacing {
+        Some(sp) if sp != 0.0 => {
+            let _ = write!(a, r#" fo:letter-spacing="{}""#, cm(sp));
+        }
+        Some(_) => a.push_str(r#" fo:letter-spacing="normal""#),
+        None => {}
     }
     if let Some(h) = &r.highlight {
         let _ = write!(a, r#" fo:background-color="{}""#, hex(ctx.color(h, None)));
@@ -487,6 +499,9 @@ pub fn text_attrs(w: &mut Writer, ctx: &Ctx, r: &RunProps) -> String {
     }
     if hollow {
         a.push_str(r#" style:text-outline="true""#);
+    }
+    if let Some(k) = r.kern {
+        let _ = write!(a, r#" style:letter-kerning="{}""#, k > 0.0);
     }
     if let Some(lang) = r.lang.as_deref().filter(|l| !l.is_empty()) {
         a.push_str(&lang_attrs(lang));

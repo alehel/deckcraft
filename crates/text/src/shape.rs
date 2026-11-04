@@ -346,7 +346,7 @@ pub(crate) enum Upright {
 }
 
 /// Size of superscript and subscript text relative to the run's size.
-pub(crate) const SUB_SUPER: f64 = 0.66;
+pub const SUB_SUPER: f64 = 0.66;
 
 /// The OpenType features to change from the shaper's defaults for an item, as PowerPoint draws
 /// it: kerning only where the run asks for it (`kern`), and no standard or contextual ligatures in
