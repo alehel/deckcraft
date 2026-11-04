@@ -523,7 +523,10 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
     let p = w.p;
     let Some(ctx) = Ctx::for_slide(p, s) else { return String::new() };
     let mut pg = PageCtx::new(master_name, format!("pg{i}"), false, resolve::background(&ctx, Some(s)));
-    pg.refer(w, &s.shapes, &s.animations);
+    // By-paragraph builds as one effect per paragraph, which the page's ids must cover.
+    let effects = crate::anim::expand_builds(&s.animations, &s.shapes);
+    let animations: Vec<deckcraft_model::Animation> = effects.iter().map(|e| e.a.clone()).collect();
+    pg.refer(w, &s.shapes, &animations);
     // The page style: background, transition, visibility, footers.
     let mut pp = String::new();
     if s.background.is_some() {
@@ -589,7 +592,7 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
     // Transition and animations.
     let filter = s.transition.as_ref().and_then(crate::anim::transition_filter);
     if filter.is_some() || !s.animations.is_empty() {
-        out.push_str(&crate::anim::write(&pg.tag, filter.as_deref(), &s.animations, &ctx, &|sid, para| pg.id(sid, para)));
+        out.push_str(&crate::anim::write(&pg.tag, filter.as_deref(), &effects, &ctx, &|sid, para| pg.id(sid, para)));
     }
     if !s.notes.paragraphs.is_empty() && !s.notes.text().trim().is_empty() {
         let notes = text::plain_paragraphs(w, auto, &ctx, &s.notes);

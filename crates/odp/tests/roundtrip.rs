@@ -1107,3 +1107,26 @@ fn glow_and_soft_edges_round_trip() {
     assert!((g.radius - 8.0).abs() < 0.1 && g.color == ColorRef::rgb(Rgba::rgb(255, 200, 0)), "{g:?}");
     assert!((e.soft_edge.unwrap() - 4.0).abs() < 0.1);
 }
+
+/// A by-paragraph build is written as one effect per paragraph (what LibreOffice plays) and read
+/// back as the one build.
+#[test]
+fn by_paragraph_builds_round_trip() {
+    use deckcraft_model::anim::{Animation, TextBuild};
+    let text = Shape {
+        xfrm: Some(Xfrm::new(50.0, 50.0, 300.0, 200.0)),
+        text_box: true,
+        text: Some(TextBody::from_text("one\ntwo\nthree")),
+        ..Default::default()
+    };
+    let mut p = deck_with(vec![text]);
+    let id = shapes_of(&p)[0].id;
+    let build = Animation { shape: id, effect: "fade".into(), text_build: TextBuild::ByParagraph, ..Default::default() };
+    Arc::make_mut(&mut p.slides[0]).animations = vec![build.clone()];
+    let bytes = deckcraft_odp::export(&p).unwrap();
+    assert_eq!(part(&bytes, "content.xml").matches("presentation:group-id=").count(), 3);
+    let back = deckcraft_odp::import(&bytes).unwrap();
+    let a = &back.slides[0].animations;
+    assert_eq!(a.len(), 1, "{a:?}");
+    assert_eq!((a[0].text_build, a[0].paragraph, a[0].start), (TextBuild::ByParagraph, None, build.start));
+}

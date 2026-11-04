@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use deckcraft_color::Rgba;
-use deckcraft_model::anim::{ANIMATIONS, AnimClass, AnimStart, Animation};
+use deckcraft_model::anim::{ANIMATIONS, AnimClass, AnimStart, Animation, BuildRole, TextBuild};
 use deckcraft_model::resolve::Ctx;
 use deckcraft_model::style::ColorRef;
 use deckcraft_model::{ShapeId, Transition};
@@ -394,19 +394,84 @@ pub fn read(root: &El, page_id: Option<&str>, targets: &Targets) -> Timing {
 }
 
 fn read_sequence(seq: &El, trigger: Option<ShapeId>, targets: &Targets, out: &mut Vec<Animation>) {
-    // Click groups → time groups → effects.
-    for group in kids(seq, "anim:par") {
+    // Click groups → time groups → effects, each with the text group (`presentation:group-id`)
+    // it belongs to.
+    let mut read: Vec<(Animation, Option<&str>)> = vec![];
+    'all: for group in kids(seq, "anim:par") {
         for timed in kids(group, "anim:par") {
             for effect in kids(timed, "anim:par").chain(kids(timed, "anim:iterate")) {
-                if out.len() >= MAX_EFFECTS {
-                    return;
+                if out.len() + read.len() >= MAX_EFFECTS {
+                    break 'all;
                 }
                 if let Some(a) = read_effect(effect, trigger, targets) {
-                    out.push(a);
+                    read.push((a, attr(effect, "presentation:group-id")));
                 }
             }
         }
     }
+    out.extend(join_builds(read));
+}
+
+/// Consecutive effects of one text group on paragraphs of one shape are one by-paragraph build:
+/// its first effect, on the whole shape.
+fn join_builds(read: Vec<(Animation, Option<&str>)>) -> Vec<Animation> {
+    let mut out: Vec<Animation> = vec![];
+    let mut i = 0;
+    while let Some((a, group)) = read.get(i) {
+        let same = |k: &usize| read.get(*k).is_some_and(|(b, g)| g.is_some() && g == group && b.shape == a.shape && b.paragraph.is_some());
+        let mut end = i + 1;
+        while a.paragraph.is_some() && same(&end) {
+            end += 1;
+        }
+        let mut first = a.clone();
+        if end > i + 1 {
+            (first.paragraph, first.text_build) = (None, TextBuild::ByParagraph);
+        }
+        out.push(first);
+        i = end;
+    }
+    out
+}
+
+/// A by-paragraph build as LibreOffice plays one: an effect per paragraph shown on its own
+/// (deeper and blank paragraphs come with the one above, as PowerPoint plays them), each marked
+/// with its build's text group. Other effects are written as they are.
+pub fn expand_builds(animations: &[Animation], shapes: &[deckcraft_model::Shape]) -> Vec<Effect> {
+    let mut out = vec![];
+    for (n, a) in animations.iter().enumerate() {
+        let text = deckcraft_model::find_shape(shapes, a.shape).and_then(|s| s.text.as_ref()).filter(|_| a.text_build == TextBuild::ByParagraph);
+        let Some(text) = text else {
+            out.push(Effect { a: a.clone(), build: None });
+            continue;
+        };
+        let roles = deckcraft_model::anim::paragraph_build_roles(text);
+        let mut tops = 0;
+        for (i, role) in roles.iter().enumerate().take(deckcraft_model::anim::MAX_BUILD_PARAGRAPHS) {
+            let start = match role {
+                BuildRole::Top => {
+                    tops += 1;
+                    match (tops, a.start) {
+                        (1, s) | (_, s @ AnimStart::OnClick) => s,
+                        _ => AnimStart::AfterPrevious,
+                    }
+                }
+                BuildRole::Member(_) if text.paragraphs.get(i).is_some_and(deckcraft_model::anim::build_filled) => AnimStart::WithPrevious,
+                _ => continue,
+            };
+            let paragraph = u32::try_from(i).ok();
+            out.push(Effect { a: Animation { start, paragraph, text_build: TextBuild::AsOne, ..a.clone() }, build: Some(n) });
+        }
+        if tops == 0 {
+            out.push(Effect { a: a.clone(), build: None });
+        }
+    }
+    out
+}
+
+/// An effect as written: its animation, and the by-paragraph build it is part of.
+pub struct Effect {
+    pub a: Animation,
+    pub build: Option<usize>,
 }
 
 /// What an effect's animation nodes do.
@@ -656,7 +721,7 @@ fn nodes(a: &Animation, t: &str, ctx: &Ctx) -> String {
 pub fn write(
     page_id: &str,
     transition: Option<&str>,
-    animations: &[Animation],
+    animations: &[Effect],
     ctx: &Ctx,
     ids: &dyn Fn(ShapeId, Option<u32>) -> Option<String>,
 ) -> String {
@@ -664,21 +729,21 @@ pub fn write(
     if let Some(t) = transition {
         let _ = write!(out, r#"<anim:par smil:begin="{page_id}.begin">{t}</anim:par>"#);
     }
-    let main: Vec<&Animation> = animations.iter().filter(|a| a.trigger.is_none()).collect();
+    let main: Vec<&Effect> = animations.iter().filter(|e| e.a.trigger.is_none()).collect();
     if !main.is_empty() {
         out.push_str(r#"<anim:seq smil:dur="indefinite" presentation:node-type="main-sequence">"#);
         groups(&mut out, &main, ctx, ids, "next");
         out.push_str("</anim:seq>");
     }
     let mut triggers: Vec<ShapeId> = vec![];
-    for tr in animations.iter().filter_map(|a| a.trigger) {
+    for tr in animations.iter().filter_map(|e| e.a.trigger) {
         if !triggers.contains(&tr) {
             triggers.push(tr);
         }
     }
     for tr in triggers {
         let Some(tid) = ids(tr, None) else { continue };
-        let list: Vec<&Animation> = animations.iter().filter(|a| a.trigger == Some(tr)).collect();
+        let list: Vec<&Effect> = animations.iter().filter(|e| e.a.trigger == Some(tr)).collect();
         let _ = write!(out, r#"<anim:seq smil:dur="indefinite" smil:begin="{tid}.click" presentation:node-type="interactive-sequence">"#);
         groups(&mut out, &list, ctx, ids, "0s");
         out.push_str("</anim:seq>");
@@ -695,14 +760,14 @@ fn span(a: &Animation) -> u32 {
 }
 
 /// Click groups of a sequence, each holding time groups of effects.
-fn groups(out: &mut String, list: &[&Animation], ctx: &Ctx, ids: &dyn Fn(ShapeId, Option<u32>) -> Option<String>, first_begin: &str) {
+fn groups(out: &mut String, list: &[&Effect], ctx: &Ctx, ids: &dyn Fn(ShapeId, Option<u32>) -> Option<String>, first_begin: &str) {
     // A click group starts at an on-click effect (or the sequence's first effect) and runs until
     // the next on-click one.
-    let mut starts: Vec<usize> = (0..list.len()).filter(|&k| k == 0 || list[k].start == AnimStart::OnClick).collect();
+    let mut starts: Vec<usize> = (0..list.len()).filter(|&k| k == 0 || list[k].a.start == AnimStart::OnClick).collect();
     starts.push(list.len());
     for (gi, w) in starts.windows(2).enumerate() {
         let group = &list[w[0]..w[1]];
-        let begin = match (gi, group.first().map(|a| a.start)) {
+        let begin = match (gi, group.first().map(|e| e.a.start)) {
             (0, Some(AnimStart::OnClick)) => first_begin,
             (0, _) => "0s",
             _ => "next",
@@ -711,7 +776,8 @@ fn groups(out: &mut String, list: &[&Animation], ctx: &Ctx, ids: &dyn Fn(ShapeId
         // Time groups: a new one at each after-previous effect, starting when the previous ends.
         let mut block_end = 0u32;
         let mut t0 = 0u32;
-        for (k, a) in group.iter().enumerate() {
+        for (k, e) in group.iter().enumerate() {
+            let a = &e.a;
             if k == 0 || a.start == AnimStart::AfterPrevious {
                 if k > 0 {
                     out.push_str("</anim:par>");
@@ -721,7 +787,7 @@ fn groups(out: &mut String, list: &[&Animation], ctx: &Ctx, ids: &dyn Fn(ShapeId
             }
             block_end = block_end.max(t0.saturating_add(span(a)));
             let Some(t) = ids(a.shape, a.paragraph) else { continue };
-            effect(out, a, &t, ctx);
+            effect(out, a, e.build, &t, ctx);
         }
         if !group.is_empty() {
             out.push_str("</anim:par>");
@@ -731,7 +797,7 @@ fn groups(out: &mut String, list: &[&Animation], ctx: &Ctx, ids: &dyn Fn(ShapeId
 }
 
 /// One effect node: its preset, timing modifiers and animations.
-fn effect(out: &mut String, a: &Animation, t: &str, ctx: &Ctx) {
+fn effect(out: &mut String, a: &Animation, build: Option<usize>, t: &str, ctx: &Ctx) {
     let (preset, sub) = preset_of(a);
     let node = match a.start {
         AnimStart::OnClick => "on-click",
@@ -757,6 +823,9 @@ fn effect(out: &mut String, a: &Animation, t: &str, ctx: &Ctx) {
         }
     }
     let _ = write!(out, r#" presentation:node-type="{node}" presentation:preset-class="{class}" presentation:preset-id="{}""#, esc(&preset));
+    if let Some(b) = build {
+        let _ = write!(out, r#" presentation:group-id="{b}""#);
+    }
     if !sub.is_empty() {
         let _ = write!(out, r#" presentation:preset-sub-type="{}""#, esc(&sub));
     }
