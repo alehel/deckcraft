@@ -392,9 +392,13 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
 /// separated by commas), else `pageN`.
 fn page_names(p: &Presentation) -> HashMap<u32, String> {
     let mut out = HashMap::new();
+    let own = |s: &Slide| s.name.replace(',', " ").trim().to_string();
+    // Named slides first, so an unnamed one keeps its plain `pageN` (which a reader takes for no
+    // name) unless a slide is really called that.
+    let order = p.slides.iter().enumerate().filter(|(_, s)| !own(s).is_empty()).chain(p.slides.iter().enumerate().filter(|(_, s)| own(s).is_empty()));
     let mut used = std::collections::HashSet::new();
-    for (i, s) in p.slides.iter().enumerate() {
-        let own = s.name.replace(',', " ").trim().to_string();
+    for (i, s) in order {
+        let own = own(s);
         let base = if own.is_empty() { format!("page{}", i + 1) } else { own };
         // Taken (by an earlier slide, or by another's numbered name): number it until it isn't.
         let mut name = base.clone();
@@ -408,7 +412,8 @@ fn page_names(p: &Presentation) -> HashMap<u32, String> {
     out
 }
 
-/// PowerPoint's date and time formats (`datetime1` … `datetime13`) as number styles `D1` … `D13`.
+/// PowerPoint's date and time formats (`datetime1` … `datetime13`) as number styles
+/// `datetime1` … `datetime13` (their own names, which LibreOffice's `D1`… don't collide with).
 const DATE_FORMATS: [&str; 13] = [
     // 11/4/2026
     "M/D/Y",
@@ -438,17 +443,17 @@ const DATE_FORMATS: [&str; 13] = [
     "h:m:s a",
 ];
 
-/// The number style of a date format (`datetime4` → `D4`; anything else is the first).
+/// The number style of a date format (`datetime4`; anything else is the first).
 pub(crate) fn date_style(format: &str) -> String {
     let n = format.strip_prefix("datetime").and_then(|n| n.parse::<usize>().ok()).filter(|n| (1..=DATE_FORMATS.len()).contains(n));
-    format!("D{}", n.unwrap_or(1))
+    format!("datetime{}", n.unwrap_or(1))
 }
 
 /// The `number:date-style` of every date format.
 fn date_styles() -> String {
     let mut out = String::new();
     for (i, f) in DATE_FORMATS.iter().enumerate() {
-        let _ = write!(out, r#"<number:date-style style:name="D{}">"#, i + 1);
+        let _ = write!(out, r#"<number:date-style style:name="datetime{}">"#, i + 1);
         for c in f.chars() {
             out.push_str(match c {
                 'M' => "<number:month/>",

@@ -160,10 +160,10 @@ pub fn view_box(s: Option<&str>) -> Option<[f64; 4]> {
     }
 }
 
-/// SVG path data in a view box → one model path in view-box units (origin moved to 0,0).
 /// Longest `svg:d` read.
 pub const MAX_PATH_TEXT: usize = 4 << 20;
 
+/// SVG path data in a view box → one model path in view-box units (origin moved to 0,0).
 pub fn svg_path(d: &str, vb: [f64; 4], closed_fill: bool) -> Option<CustomPath> {
     if d.len() > MAX_PATH_TEXT {
         return None;
@@ -227,7 +227,6 @@ const MAX_DEPTH: usize = 256;
 const MAX_WORK: usize = 1_000_000;
 /// Steps all the shapes of one document may take together.
 pub const DOCUMENT_WORK: usize = 50_000_000;
-/// 1/100 mm per point (`logwidth`/`logheight` are in 1/100 mm).
 /// [`Eval::low`] when the value being computed depends on nothing unfinished.
 const COMPLETE: usize = usize::MAX;
 
@@ -676,8 +675,6 @@ pub fn enhanced(g: &El, w: f64, h: f64, budget: &mut usize) -> Option<Enhanced> 
     })
 }
 
-/// Split the path into commands and their parameters, evaluate them into sub-paths placed by
-/// `frame`.
 /// The path being drawn: the open subpath and its pen position, and the paths finished so far.
 struct Pen<'f> {
     frame: &'f Frame,
@@ -743,6 +740,8 @@ impl<'f> Pen<'f> {
     }
 }
 
+/// Split the path into commands and their parameters, evaluate them into sub-paths placed by
+/// `frame`.
 fn eval_path(src: &str, ev: &mut Eval, frame: &Frame) -> Vec<CustomPath> {
     let mut pen = Pen::new(frame);
     let toks: Vec<&str> = src.split(|c: char| c.is_whitespace() || c == ',').filter(|t| !t.is_empty()).take(200_000).collect();

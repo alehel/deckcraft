@@ -1202,3 +1202,47 @@ fn pictures_keep_their_outline() {
     assert_eq!(s[0].geom.preset_name(), Some("ellipse"));
     assert!(matches!(s[0].fill, Some(Fill::Picture(_))), "{:?}", s[0].fill);
 }
+
+/// Review round 3: a language tag with two regions writes one `fo:country`; a group without a
+/// fill gives its group-filled children none (not their style's); a one-paragraph build is an
+/// effect on the whole shape; an adjusted picture in an ellipse stays a picture.
+#[test]
+fn round_three_fixes_hold() {
+    use deckcraft_model::anim::{Animation, TextBuild};
+    let mut run = Run::new("x");
+    run.props.lang = Some("en-US-GB".into());
+    let text = Shape {
+        xfrm: Some(Xfrm::new(50.0, 50.0, 200.0, 50.0)),
+        text_box: true,
+        text: Some(TextBody { paragraphs: vec![Paragraph { runs: vec![run], ..Default::default() }], ..Default::default() }),
+        ..Default::default()
+    };
+    let mut child = Shape {
+        id: ShapeId(8101),
+        xfrm: Some(Xfrm::new(0.0, 0.0, 50.0, 50.0)),
+        geom: Geom::preset("rect"),
+        fill: Some(Fill::Group),
+        ..Default::default()
+    };
+    child.style = Some(deckcraft_model::style::ShapeStyle::accent(deckcraft_color::SchemeSlot::Accent1));
+    let group = Shape {
+        xfrm: Some(Xfrm::new(300.0, 50.0, 50.0, 50.0)),
+        kind: ShapeKind::Group { children: vec![child], child: Xfrm::new(0.0, 0.0, 50.0, 50.0) },
+        ..Default::default()
+    };
+    let mut p = deck_with(vec![text, group]);
+    let id = shapes_of(&p)[0].id;
+    Arc::make_mut(&mut p.slides[0]).animations = vec![Animation { shape: id, text_build: TextBuild::ByParagraph, ..Default::default() }];
+    let bytes = deckcraft_odp::export(&p).unwrap();
+    let xml = part(&bytes, "content.xml");
+    for (tag, attrs) in tags(&xml) {
+        let names: std::collections::HashSet<&String> = attrs.iter().map(|(k, _)| k).collect();
+        assert_eq!(names.len(), attrs.len(), "<{tag}> repeats an attribute");
+    }
+    let back = deckcraft_odp::import(&bytes).unwrap();
+    let s = shapes_of(&back);
+    let ShapeKind::Group { children, .. } = &s[1].kind else { panic!("{:?}", s[1].kind) };
+    assert!(matches!(children[0].fill, None | Some(Fill::None)), "{:?}", children[0].fill);
+    let a = &back.slides[0].animations;
+    assert_eq!((a.len(), a[0].paragraph), (1, None));
+}

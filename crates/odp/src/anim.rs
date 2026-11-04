@@ -412,22 +412,33 @@ fn read_sequence(seq: &El, trigger: Option<ShapeId>, targets: &Targets, out: &mu
     out.extend(join_builds(read));
 }
 
-/// Consecutive effects of one text group on paragraphs of one shape are one by-paragraph build:
-/// its first effect, on the whole shape.
+/// Consecutive effects of one text group on paragraphs of one shape are read as one effect on the
+/// whole shape: all together (every later one with the first) as one block, started the way
+/// [`expand_builds`] starts a build's paragraphs (each on a click, or each after the one before;
+/// deeper ones with their parent) as that build. A group started otherwise, and a lone effect,
+/// stay as they are.
 fn join_builds(read: Vec<(Animation, Option<&str>)>) -> Vec<Animation> {
     let mut out: Vec<Animation> = vec![];
     let mut i = 0;
     while let Some((a, group)) = read.get(i) {
-        let same = |k: &usize| read.get(*k).is_some_and(|(b, g)| g.is_some() && g == group && b.shape == a.shape && b.paragraph.is_some());
+        let grouped = group.is_some() && a.paragraph.is_some();
+        let same = |k: usize| read.get(k).is_some_and(|(b, g)| g == group && b.shape == a.shape && b.paragraph.is_some());
         let mut end = i + 1;
-        while a.paragraph.is_some() && same(&end) {
+        while grouped && same(end) {
             end += 1;
         }
-        let mut first = a.clone();
-        if end > i + 1 {
-            (first.paragraph, first.text_build) = (None, TextBuild::ByParagraph);
+        let next = if a.start == AnimStart::OnClick { AnimStart::OnClick } else { AnimStart::AfterPrevious };
+        let rest = read.get(i + 1..end).unwrap_or_default();
+        let together = rest.iter().all(|(b, _)| b.start == AnimStart::WithPrevious);
+        let as_built = rest.iter().all(|(b, _)| b.start == next || b.start == AnimStart::WithPrevious);
+        if !rest.is_empty() && (together || as_built) {
+            let mut first = a.clone();
+            first.paragraph = None;
+            first.text_build = if together { TextBuild::AsOne } else { TextBuild::ByParagraph };
+            out.push(first);
+        } else {
+            out.extend(read.get(i..end).unwrap_or_default().iter().map(|(b, _)| b.clone()));
         }
-        out.push(first);
         i = end;
     }
     out
@@ -461,8 +472,11 @@ pub fn expand_builds(animations: &[Animation], shapes: &[deckcraft_model::Shape]
             let paragraph = u32::try_from(i).ok();
             out.push(Effect { a: Animation { start, paragraph, text_build: TextBuild::AsOne, ..a.clone() }, build: Some(n) });
         }
-        if tops == 0 {
-            out.push(Effect { a: a.clone(), build: None });
+        // A build of one paragraph is an effect on the whole shape.
+        let mine = out.iter().filter(|e| e.build == Some(n)).count();
+        if mine <= 1 {
+            out.retain(|e| e.build != Some(n));
+            out.push(Effect { a: Animation { text_build: TextBuild::AsOne, ..a.clone() }, build: None });
         }
     }
     out
@@ -847,6 +861,21 @@ mod tests {
         assert_eq!(duration_iso("PT00H00M05S"), Some(5000));
         assert_eq!(duration_iso("PT1.5S"), Some(1500));
         assert_eq!(duration_iso("bogus"), None);
+    }
+
+    /// A text group joins into one effect only as the build or block it is: each on a click is
+    /// a by-paragraph build, all together one block, anything else stays as its effects.
+    #[test]
+    fn text_groups_join_only_as_they_play() {
+        let e = |start, p: u32| (Animation { start, paragraph: Some(p), ..Default::default() }, Some("g"));
+        let joined = |starts: [AnimStart; 3]| join_builds(starts.iter().enumerate().map(|(i, s)| e(*s, i as u32)).collect());
+        let built = joined([AnimStart::OnClick; 3]);
+        assert_eq!((built.len(), built[0].text_build, built[0].paragraph), (1, TextBuild::ByParagraph, None));
+        let block = joined([AnimStart::OnClick, AnimStart::WithPrevious, AnimStart::WithPrevious]);
+        assert_eq!((block.len(), block[0].text_build, block[0].paragraph), (1, TextBuild::AsOne, None));
+        assert_eq!(joined([AnimStart::OnClick, AnimStart::AfterPrevious, AnimStart::AfterPrevious]).len(), 3);
+        // A lone paragraph effect stays on its paragraph.
+        assert_eq!(join_builds(vec![e(AnimStart::OnClick, 1)])[0].paragraph, Some(1));
     }
 
     #[test]

@@ -68,7 +68,8 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
             // through the group's whole transform (rotation and flips included).
             let m = deckcraft_geom::group_child_affine(&x, child.rect());
             // A child filled with the group's fill (`grpFill`) gets it here: ODF groups have none.
-            let group_fill = resolve::fill(ctx, s).0;
+            let (group_fill, ph) = resolve::fill(ctx, s);
+            let group_fill = Some(group_fill.map_or(Fill::None, |f| with_placeholder(ctx, f, ph)));
             let mut inner = String::new();
             for c in children {
                 let mut placed = c.clone();
@@ -84,8 +85,9 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
             // A picture in an outline other than its box (an ellipse, a star): that outline,
             // filled with the picture (an ODF frame is always a box). An uncropped one only: a
             // fill has no crop.
+            // (A fill has no picture adjustments either: an adjusted picture stays a frame.)
             let boxed = matches!(&s.geom, Geom::Preset { name, .. } if name == "rect");
-            if !boxed && fill.crop.iter().all(|c| *c == 0.0) {
+            if !boxed && fill.crop.iter().all(|c| *c == 0.0) && fill.adjust == deckcraft_model::style::PictureAdjust::default() {
                 let filled = Shape {
                     kind: ShapeKind::Shape,
                     fill: Some(Fill::Picture(PictureFill { mode: PictureMode::Stretch { fill_rect: [0.0; 4] }, ..fill.clone() })),
@@ -592,6 +594,23 @@ pub fn line_attrs(w: &mut Writer, ctx: &Ctx, l: &Line, ph: Option<Rgba>) -> Stri
             write!(s, r#" draw:marker-{key}="{mname}" draw:marker-{key}-width="{}" draw:marker-{key}-center="false""#, cm((width.max(0.75)) * mul));
     }
     s
+}
+
+/// A fill whose placeholder colour (`phClr`, from a style reference) is made the colour it stands
+/// for, so the fill means the same wherever it is used.
+fn with_placeholder(ctx: &Ctx, f: Fill, ph: Option<Rgba>) -> Fill {
+    let Some(ph) = ph else { return f };
+    let fix = |c: &deckcraft_model::style::ColorRef| crate::styles::color_ref(ctx.color(c, Some(ph)), Some(c.alpha()));
+    match f {
+        Fill::Solid { color } => Fill::solid(fix(&color)),
+        Fill::Gradient(mut g) => {
+            for s in &mut g.stops {
+                s.color = fix(&s.color);
+            }
+            Fill::Gradient(g)
+        }
+        other => other,
+    }
 }
 
 /// A `draw:frame` around `inner` (a picture, table, media, chart): its style, the shape's common

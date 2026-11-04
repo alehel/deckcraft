@@ -129,12 +129,12 @@ fn canonicalise(el: &mut El, scope: &mut Scope, depth: usize) {
     }
 }
 
-/// Exact-name attribute lookup.
 /// A `*-repeated` count (at least 1).
 pub fn repeat(e: &El, k: &str) -> usize {
     attr(e, k).and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).max(1)
 }
 
+/// Exact-name attribute lookup.
 pub fn attr<'a>(el: &'a El, name: &str) -> Option<&'a str> {
     el.attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
 }

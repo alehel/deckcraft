@@ -475,9 +475,9 @@ pub fn text_attrs(w: &mut Writer, ctx: &Ctx, r: &RunProps) -> String {
         let (dx, dy) = (sh.dist * sh.dir.to_radians().cos(), sh.dist * sh.dir.to_radians().sin());
         let _ = write!(a, r#" fo:text-shadow="{} {} {} {}""#, pt(dx), pt(dy), pt(sh.blur.max(0.0)), hex(ctx.color(&sh.color, None)));
     }
-    // ODF outlines text in the text's colour, hollow: filled outlined text shows as an outline
-    // of its fill's colour (the nearest it has), unfilled text in the outline's.
-    if r.outline.is_some() {
+    // ODF outlines text hollow, in the text's colour: only unfilled outlined text is that (filled
+    // text keeps its fill, and loses its outline).
+    if r.outline.is_some() && matches!(r.fill, Some(Fill::None)) {
         a.push_str(r#" style:text-outline="true""#);
     }
     if let Some(lang) = r.lang.as_deref().filter(|l| !l.is_empty()) {
@@ -492,14 +492,20 @@ fn lang_attrs(lang: &str) -> String {
     let mut a = String::new();
     let mut tags = lang.split(['-', '_']);
     let _ = write!(a, r#" fo:language="{}""#, esc(tags.next().unwrap_or(lang)));
+    // The first script and the first region only (each attribute is written once).
+    let (mut script, mut country) = (None, None);
     for t in tags {
-        let k = match t.len() {
-            4 if t.chars().all(|c| c.is_ascii_alphabetic()) => "fo:script",
-            2 if t.chars().all(|c| c.is_ascii_alphabetic()) => "fo:country",
-            3 if t.chars().all(|c| c.is_ascii_digit()) => "fo:country",
-            _ => continue,
-        };
-        let _ = write!(a, r#" {k}="{}""#, esc(t));
+        match t.len() {
+            4 if t.chars().all(|c| c.is_ascii_alphabetic()) => script = script.or(Some(t)),
+            2 if t.chars().all(|c| c.is_ascii_alphabetic()) => country = country.or(Some(t)),
+            3 if t.chars().all(|c| c.is_ascii_digit()) => country = country.or(Some(t)),
+            _ => {}
+        }
+    }
+    for (k, v) in [("fo:script", script), ("fo:country", country)] {
+        if let Some(v) = v {
+            let _ = write!(a, r#" {k}="{}""#, esc(v));
+        }
     }
     a
 }

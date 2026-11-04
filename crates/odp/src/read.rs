@@ -117,14 +117,14 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         r.p.masters = fallback;
     }
     let decls = Decls::read(body);
-    // The date format, from a current-date declaration in one of our date styles (`D4` is
-    // `datetime4`).
-    let ours = |s: &str| s.strip_prefix('D').and_then(|n| n.parse::<u8>().ok()).filter(|n| (1..=13).contains(n));
+    // The date format, from a current-date declaration in one of our date styles (named after
+    // the format).
+    let ours = |s: &str| s.strip_prefix("datetime").and_then(|n| n.parse::<u8>().ok()).filter(|n| (1..=13).contains(n));
     if let Some(n) = decls.dates.values().filter(|d| d.0).find_map(|d| d.2.as_deref().and_then(ours)) {
         r.p.header_footer.date_format = format!("datetime{n}");
     }
-    for page in kids(body, "draw:page").take(MAX_PAGES) {
-        if let Some(s) = r.page(page, &decls) {
+    for (i, page) in kids(body, "draw:page").take(MAX_PAGES).enumerate() {
+        if let Some(s) = r.page(page, i, &decls) {
             r.p.slides.push(Arc::new(s));
         }
     }
@@ -383,7 +383,8 @@ impl Reader<'_> {
     // -----------------------------------------------------------------------------------------
     // Pages
 
-    fn page(&mut self, page: &El, decls: &Decls) -> Option<Slide> {
+    /// The `index`th page (from 0) of the document.
+    fn page(&mut self, page: &El, index: usize, decls: &Decls) -> Option<Slide> {
         let id = SlideId(self.p.alloc_id()?);
         let master_name = attr(page, "draw:master-page-name").unwrap_or("").to_string();
         let mi = self.master_index.get(&master_name).copied().unwrap_or(0);
@@ -406,7 +407,7 @@ impl Reader<'_> {
         let title_slide = page.elements().any(|e| attr(e, "presentation:class") == Some("subtitle"));
         let ctx = Ctx { scope: Scope::Content, master: master_name, bg, title_slide };
         // `pageN` for the Nth page is the name a writer gives a slide that has none.
-        let unnamed = format!("page{}", self.p.slides.len() + 1);
+        let unnamed = format!("page{}", index + 1);
         let name = attr(page, "draw:name").filter(|n| *n != unnamed).unwrap_or("").to_string();
         let mut slide = Slide { id, name, background: page_bg, ..Default::default() };
         if let Some(n) = attr(page, "draw:name") {
