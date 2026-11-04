@@ -92,8 +92,10 @@ fn norm_rotation(r: f64) -> f64 {
     if r >= 360.0 { 0.0 } else { r + 0.0 }
 }
 
+/// `rrggbb`, as in a media name.
 fn hex6(c: Rgba) -> String {
-    format!("{:02x}{:02x}{:02x}", c.r, c.g, c.b)
+    let h = crate::units::hex(c);
+    h.strip_prefix('#').unwrap_or(&h).to_string()
 }
 
 /// Exactly six lowercase hex digits.

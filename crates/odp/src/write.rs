@@ -172,8 +172,7 @@ impl PageCtx {
 
     /// The glue point a connector end at `site` of `shape` attaches to.
     pub fn glue_point(&self, shape: deckcraft_model::ShapeId, site: u32) -> u32 {
-        let fallback = || crate::GLUE_POINTS.iter().position(|s| *s == site).unwrap_or(0) as u32;
-        self.glue.get(&(shape.0, site)).copied().unwrap_or_else(fallback)
+        self.glue.get(&(shape.0, site)).copied().unwrap_or_else(|| crate::geometry::glue_point_of_site(None, site))
     }
 
     /// The `xml:id` of a shape (or one of its paragraphs), when something refers to it and it is
@@ -197,10 +196,7 @@ impl PageCtx {
         });
         for (id, site) in ends {
             wanted.push((id, None));
-            if let Some(x) = deckcraft_model::find_shape(shapes, id).and_then(|t| t.xfrm.map(|x| (t, x))) {
-                let (t, x) = x;
-                self.glue.insert((id.0, site), crate::geometry::glue_point_of_site(&t.geom, x.w, x.h, site));
-            }
+            self.glue.insert((id.0, site), crate::geometry::glue_point_of_site(deckcraft_model::find_shape(shapes, id), site));
         }
         for (id, para) in wanted {
             let Some(sh) = deckcraft_model::find_shape(shapes, id) else { continue };
@@ -588,7 +584,7 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
         out.push_str(&crate::anim::write(&pg.tag, filter.as_deref(), &s.animations, &ctx, &|sid, para| pg.id(sid, para)));
     }
     if !s.notes.paragraphs.is_empty() && !s.notes.text().trim().is_empty() {
-        let notes = text::plain_paragraphs(w, auto, &s.notes);
+        let notes = text::plain_paragraphs(w, auto, &ctx, &s.notes);
         let _ = write!(
             out,
             r#"<presentation:notes><draw:page-thumbnail draw:page-number="{}" presentation:class="page" svg:x="1.5cm" svg:y="2cm" svg:width="18cm" svg:height="10cm"/><draw:frame presentation:class="notes" svg:x="2cm" svg:y="13.5cm" svg:width="17cm" svg:height="13cm"><draw:text-box>{notes}</draw:text-box></draw:frame></presentation:notes>"#,

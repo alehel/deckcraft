@@ -4,7 +4,7 @@
 use deckcraft_model::chart::{Chart, ChartType, Series};
 use deckcraft_model::style::{ColorRef, Fill, Line};
 
-use crate::dom::{El, attr, kid, kids};
+use crate::dom::{El, attr, kid, kids, repeat};
 use crate::styles::{Scope, Store};
 use crate::units;
 
@@ -22,10 +22,6 @@ type Value = (String, Option<f64>);
 struct Grid {
     rows: Vec<Vec<Value>>,
     width: usize,
-}
-
-fn repeat(e: &El, k: &str) -> usize {
-    attr(e, k).and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).max(1)
 }
 
 impl Grid {

@@ -2,6 +2,11 @@
 
 use deckcraft_color::Rgba;
 
+/// Hundredths of a millimetre (ODF's drawing unit) per point.
+pub const HMM_PER_PT: f64 = 2540.0 / 72.0;
+/// Points per centimetre.
+pub const PT_PER_CM: f64 = 72.0 / 2.54;
+
 /// Split a leading decimal number (sign, digits with an optional `.`, optional exponent `e±n`)
 /// from the unit after it: `2.5E+2pt` → (`2.5E+2`, `pt`). An `e` that no exponent digits follow
 /// belongs to the unit (`1em` → `1`, `em`). `None` when there is no number.
@@ -59,7 +64,7 @@ fn number_unit(s: &str) -> Option<(f64, &str)> {
 pub fn length(s: &str) -> Option<f64> {
     let (v, unit) = number_unit(s)?;
     let pt = match unit.to_ascii_lowercase().as_str() {
-        "cm" => v * 72.0 / 2.54,
+        "cm" => v * PT_PER_CM,
         "mm" => v * 72.0 / 25.4,
         "in" | "inch" => v * 72.0,
         "pt" | "" => v,

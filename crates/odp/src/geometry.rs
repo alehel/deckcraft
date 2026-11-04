@@ -98,10 +98,11 @@ pub fn shape_geometry(geom: &deckcraft_model::Geom, w: f64, h: f64) -> deckcraft
 /// as fractions of the box.
 const EDGE_MIDDLES: [(f64, f64); 4] = [(0.5, 0.0), (1.0, 0.5), (0.5, 1.0), (0.0, 0.5)];
 
-/// A shape's connection sites as fractions of its box (none for custom outlines).
-fn site_fractions(geom: &deckcraft_model::Geom, w: f64, h: f64) -> Vec<(f64, f64)> {
-    let (w, h) = (w.max(1e-6), h.max(1e-6));
-    shape_geometry(geom, w, h).sites.iter().map(|p| (p.x / w, p.y / h)).collect()
+/// A shape's connection sites as fractions of its box (none for custom outlines, or no shape).
+fn site_fractions(target: Option<&deckcraft_model::Shape>) -> Vec<(f64, f64)> {
+    let Some((t, x)) = target.and_then(|t| Some((t, t.xfrm?))) else { return vec![] };
+    let (w, h) = (x.w.max(1e-6), x.h.max(1e-6));
+    shape_geometry(&t.geom, w, h).sites.iter().map(|p| (p.x / w, p.y / h)).collect()
 }
 
 fn nearest(from: (f64, f64), to: impl Iterator<Item = (f64, f64)>) -> Option<usize> {
@@ -109,18 +110,18 @@ fn nearest(from: (f64, f64), to: impl Iterator<Item = (f64, f64)>) -> Option<usi
     to.enumerate().min_by(|a, b| d(a.1).total_cmp(&d(b.1))).map(|(i, _)| i)
 }
 
-/// The default glue point nearest a shape's connection site. Shapes without sites are boxes,
-/// whose sites run top, left, bottom, right.
-pub fn glue_point_of_site(geom: &deckcraft_model::Geom, w: f64, h: f64, site: u32) -> u32 {
-    let sites = site_fractions(geom, w, h);
+/// The default glue point nearest a shape's connection site. Shapes without sites (and missing
+/// ones) are boxes, whose sites run top, left, bottom, right.
+pub fn glue_point_of_site(target: Option<&deckcraft_model::Shape>, site: u32) -> u32 {
+    let sites = site_fractions(target);
     let at = sites.get(site as usize).copied();
     let by_position = at.and_then(|p| nearest(p, EDGE_MIDDLES.into_iter()));
     by_position.or_else(|| crate::GLUE_POINTS.iter().position(|s| *s == site)).unwrap_or(0) as u32
 }
 
 /// The connection site nearest a default glue point.
-pub fn site_of_glue_point(geom: &deckcraft_model::Geom, w: f64, h: f64, glue: u32) -> u32 {
-    let sites = site_fractions(geom, w, h);
+pub fn site_of_glue_point(target: Option<&deckcraft_model::Shape>, glue: u32) -> u32 {
+    let sites = site_fractions(target);
     let mid = EDGE_MIDDLES.get(glue as usize).copied();
     let by_position = mid.and_then(|m| nearest(m, sites.into_iter()));
     by_position.map(|i| i as u32).or_else(|| crate::GLUE_POINTS.get(glue as usize).copied()).unwrap_or(0)
@@ -225,7 +226,6 @@ const MAX_DEPTH: usize = 256;
 /// its equations, path parameters and text areas.
 const MAX_WORK: usize = 1_000_000;
 /// 1/100 mm per point (`logwidth`/`logheight` are in 1/100 mm).
-const HMM_PER_PT: f64 = 2540.0 / 72.0;
 /// [`Eval::low`] when the value being computed depends on nothing unfinished.
 const COMPLETE: usize = usize::MAX;
 
@@ -260,7 +260,7 @@ struct Eval<'a> {
 
 impl<'a> Eval<'a> {
     fn new(vb: [f64; 4], size: (f64, f64), stretch: [Option<f64>; 2], modifiers: &'a [f64], formulas: &'a HashMap<&'a str, Vec<Tok>>) -> Self {
-        let log = |v: f64| if v.is_finite() && v > 0.0 { v * HMM_PER_PT } else { 0.0 };
+        let log = |v: f64| if v.is_finite() && v > 0.0 { v * units::HMM_PER_PT } else { 0.0 };
         Eval { vb, log: [log(size.0), log(size.1)], stretch, modifiers, formulas, slots: HashMap::new(), depth: 0, work: 0, low: COMPLETE }
     }
 

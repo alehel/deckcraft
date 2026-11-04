@@ -25,13 +25,14 @@ pub fn body(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, shape: &Sh
         let end = resolve::run(ctx, shape, p, &p.end_props);
         // A paragraph an animation targets carries an id.
         let id = pg.id(shape.id, Some(i as u32));
-        out.push_str(&paragraph(w, auto, Some(ctx), p.level, &pp, &end, &runs, outline, id, pg.is_master, starts));
+        out.push_str(&paragraph(w, auto, ctx, p.level, &pp, &end, &runs, outline, id, pg.is_master, starts));
     }
     out
 }
 
-/// Paragraphs with only their own formatting (notes, table cells resolved by the caller).
-pub fn plain_paragraphs(w: &mut Writer, auto: &mut Auto, t: &TextBody) -> String {
+/// Paragraphs with only their own formatting (notes), their theme colours and fonts resolved
+/// through `ctx`.
+pub fn plain_paragraphs(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, t: &TextBody) -> String {
     let mut out = String::new();
     let mut numbering = Numbering::default();
     for p in &t.paragraphs {
@@ -47,7 +48,7 @@ pub fn plain_paragraphs(w: &mut Writer, auto: &mut Auto, t: &TextBody) -> String
                 (rp, r)
             })
             .collect();
-        out.push_str(&paragraph(w, auto, None, p.level, &p.props, &end, &runs, false, None, false, starts));
+        out.push_str(&paragraph(w, auto, ctx, p.level, &p.props, &end, &runs, false, None, false, starts));
     }
     out
 }
@@ -88,7 +89,7 @@ impl Numbering {
 fn paragraph(
     w: &mut Writer,
     auto: &mut Auto,
-    ctx: Option<&Ctx>,
+    ctx: &Ctx,
     level: u8,
     pp: &ParaProps,
     end: &RunProps,
@@ -174,7 +175,7 @@ fn paragraph(
     format!("{open}{p}{close}</text:list>")
 }
 
-fn list_level(w: &mut Writer, ctx: Option<&Ctx>, level: usize, pp: &ParaProps, bullet: &Bullet, size: f64, first: &RunProps) -> String {
+fn list_level(w: &mut Writer, ctx: &Ctx, level: usize, pp: &ParaProps, bullet: &Bullet, size: f64, first: &RunProps) -> String {
     let margin = pp.margin_left.unwrap_or(0.0);
     let indent = pp.indent.unwrap_or(0.0);
     let rel = pp.bullet_size.or_else(|| pp.bullet_size_points.map(|p| p / size.max(1.0))).unwrap_or(1.0);
@@ -198,13 +199,13 @@ fn list_level(w: &mut Writer, ctx: Option<&Ctx>, level: usize, pp: &ParaProps, b
     let mut tp = format!(r#" fo:font-size="{}""#, pct(rel.clamp(0.25, 4.0)));
     if let Some(f) = pp.bullet_font.as_deref().filter(|_| pp.bullet_font_follow_text != Some(true)) {
         let _ = write!(tp, r#" fo:font-family="{}""#, super::quoted_family(f));
-    } else if let Some(c) = ctx {
-        let f = resolve::font_family(c, first);
+    } else {
+        let f = resolve::font_family(ctx, first);
         let _ = write!(tp, r#" fo:font-family="{}""#, super::quoted_family(&f));
     }
-    match (&pp.bullet_color, ctx) {
-        (Some(c), Some(cx)) if pp.bullet_color_follow_text != Some(true) => {
-            let _ = write!(tp, r#" fo:color="{}""#, hex(cx.color(c, None)));
+    match &pp.bullet_color {
+        Some(c) if pp.bullet_color_follow_text != Some(true) => {
+            let _ = write!(tp, r#" fo:color="{}""#, hex(ctx.color(c, None)));
         }
         _ => tp.push_str(r#" style:use-window-font-color="true""#),
     }
@@ -332,7 +333,7 @@ fn para_attrs_in(pp: &ParaProps, size: f64, in_list: bool) -> String {
 pub(crate) fn level_style(w: &mut Writer, ctx: &Ctx, level: usize, lv: &LevelStyle, in_list: bool) -> (String, Option<String>) {
     let size = lv.run.size.unwrap_or(18.0);
     let props = para_attrs_in(&lv.para, size, in_list);
-    let list = in_list.then(|| list_level(w, Some(ctx), level, &lv.para, &lv.para.bullet.clone().unwrap_or(Bullet::None), size, &lv.run));
+    let list = in_list.then(|| list_level(w, ctx, level, &lv.para, &lv.para.bullet.clone().unwrap_or(Bullet::None), size, &lv.run));
     (props, list)
 }
 
@@ -385,22 +386,16 @@ fn tab_stops(pp: &ParaProps) -> String {
 }
 
 /// `style:text-properties` attributes of resolved run properties.
-pub fn text_attrs(w: &mut Writer, ctx: Option<&Ctx>, r: &RunProps) -> String {
+pub fn text_attrs(w: &mut Writer, ctx: &Ctx, r: &RunProps) -> String {
     let mut a = String::new();
-    let family = match ctx {
-        Some(c) => Some(resolve::font_family(c, r)),
-        None => r.font.clone().filter(|f| !f.starts_with('+')),
-    };
-    if let Some(f) = family.filter(|f| !f.is_empty()) {
+    let f = resolve::font_family(ctx, r);
+    if !f.is_empty() {
         let _ = write!(a, r#" style:font-name="{}""#, esc(&f));
         w.fonts.insert(f);
     }
     let theme_font = |name: &Option<String>| -> Option<String> {
         let n = name.as_deref()?;
-        let f = match ctx {
-            Some(c) => c.master.theme.font(n),
-            None => n.to_string(),
-        };
+        let f = ctx.master.theme.font(n);
         (!f.is_empty() && !f.starts_with('+')).then_some(f)
     };
     if let Some(f) = theme_font(&r.font_ea) {
@@ -427,10 +422,7 @@ pub fn text_attrs(w: &mut Writer, ctx: Option<&Ctx>, r: &RunProps) -> String {
         let (style, ty, width) = crate::vocab::odf_underline(u);
         let _ = write!(a, r#" style:text-underline-style="{style}""#);
         if style != "none" {
-            let color = match (&r.underline_color, ctx) {
-                (Some(c), Some(cx)) => hex(cx.color(c, None)),
-                _ => "font-color".into(),
-            };
+            let color = r.underline_color.as_ref().map_or_else(|| "font-color".into(), |c| hex(ctx.color(c, None)));
             let _ = write!(a, r#" style:text-underline-type="{ty}" style:text-underline-width="{width}" style:text-underline-color="{color}""#);
         }
     }
@@ -440,12 +432,11 @@ pub fn text_attrs(w: &mut Writer, ctx: Option<&Ctx>, r: &RunProps) -> String {
         Some(Strike::None) => a.push_str(r#" style:text-line-through-style="none""#),
         None => {}
     }
-    let color = match (&r.fill, ctx) {
-        (Some(Fill::Solid { color }), Some(c)) => Some((c.color(color, None), color.alpha())),
-        (Some(Fill::Solid { color }), None) => Some((color.resolve(&deckcraft_model::Theme::default().colors, None), color.alpha())),
-        (Some(Fill::Gradient(g)), Some(c)) => g.stops.first().map(|s| (c.color(&s.color, None), s.color.alpha())),
-        (Some(Fill::None), _) => Some((Rgba::BLACK, 0.0)),
-        _ => ctx.map(|c| (resolve::text_color(c, r), 1.0)),
+    let color = match &r.fill {
+        Some(Fill::Solid { color }) => Some((ctx.color(color, None), color.alpha())),
+        Some(Fill::Gradient(g)) => g.stops.first().map(|s| (ctx.color(&s.color, None), s.color.alpha())),
+        Some(Fill::None) => Some((Rgba::BLACK, 0.0)),
+        _ => Some((resolve::text_color(ctx, r), 1.0)),
     };
     if let Some((c, alpha)) = color {
         let _ = write!(a, r#" fo:color="{}""#, hex(c));
@@ -464,8 +455,8 @@ pub fn text_attrs(w: &mut Writer, ctx: Option<&Ctx>, r: &RunProps) -> String {
     if let Some(sp) = r.spacing.filter(|s| *s != 0.0) {
         let _ = write!(a, r#" fo:letter-spacing="{}""#, cm(sp));
     }
-    if let (Some(h), Some(c)) = (&r.highlight, ctx) {
-        let _ = write!(a, r#" fo:background-color="{}""#, hex(c.color(h, None)));
+    if let Some(h) = &r.highlight {
+        let _ = write!(a, r#" fo:background-color="{}""#, hex(ctx.color(h, None)));
     }
     if r.shadow.is_some() {
         a.push_str(r#" fo:text-shadow="1pt 1pt""#);

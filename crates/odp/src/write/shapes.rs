@@ -14,7 +14,7 @@ use kurbo::{Affine, BezPath, Point};
 use super::text;
 use super::{Auto, PageCtx, Writer, rad};
 use crate::dom::esc;
-use crate::units::{cm, hex, pct, trim};
+use crate::units::{HMM_PER_PT, cm, hex, pct, trim};
 use crate::vocab;
 
 const MAX_DEPTH: usize = 64;
@@ -252,11 +252,11 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
         for sp in crate::geometry::shape_geometry(&s.geom, x.w.max(1e-3), x.h.max(1e-3)).paths {
             route.extend(sp.path);
         }
-        route.apply_affine(Affine::scale(2540.0 / 72.0) * x.affine());
+        route.apply_affine(Affine::scale(HMM_PER_PT) * x.affine());
         let ends = route.elements().first().zip(route.elements().last()).and_then(|(a, b)| Some((a.end_point()?, b.end_point()?)));
         if let Some((a, b)) = ends {
             let kind = if s.geom.preset_name().is_some_and(|n| n.starts_with("curved")) { "curve" } else { "standard" };
-            let pt = |v: f64| cm(v * 72.0 / 2540.0);
+            let pt = |v: f64| cm(v / HMM_PER_PT);
             return format!(
                 r#"<draw:connector{style_attr}{common} draw:type="{kind}"{} svg:x1="{}" svg:y1="{}" svg:x2="{}" svg:y2="{}" svg:d="{}">{text}{desc}{events}</draw:connector>"#,
                 glue(start, end),
@@ -326,8 +326,8 @@ fn place_in(m: Affine, child: Xfrm) -> Xfrm {
 fn enhanced_geometry(s: &Shape, x: &Xfrm) -> String {
     let (w, h) = (x.w.max(1e-3), x.h.max(1e-3));
     let geo = crate::geometry::shape_geometry(&s.geom, w, h);
-    let vw = (w * 2540.0 / 72.0).round().max(1.0);
-    let vh = (h * 2540.0 / 72.0).round().max(1.0);
+    let vw = (w * HMM_PER_PT).round().max(1.0);
+    let vh = (h * HMM_PER_PT).round().max(1.0);
     let scale = Affine::scale_non_uniform(vw / w, vh / h);
     let mut path = String::new();
     for sp in &geo.paths {
@@ -368,7 +368,7 @@ fn path_element(bp: &BezPath, style: &str, inner: &str) -> String {
     }
     let mut p = bp.clone();
     // svg:d in 1/100 mm in a view box of the path's size.
-    let s = 2540.0 / 72.0;
+    let s = HMM_PER_PT;
     p.apply_affine(Affine::scale(s) * Affine::translate((-bb.x0, -bb.y0)));
     format!(
         r#"<draw:path draw:style-name="{style}" svg:x="{}" svg:y="{}" svg:width="{}" svg:height="{}" svg:viewBox="0 0 {} {}" svg:d="{}">{inner}</draw:path>"#,
@@ -800,7 +800,7 @@ pub fn presentation_styles(w: &mut Writer, ctx: &Ctx, name: &str) -> String {
     let level = |ls: &ListStyle, l: u8| ls.level(l).cloned().unwrap_or_default();
     // A presentation style: graphic properties (with a list style), paragraph and text properties.
     let style = |w: &mut Writer, sname: &str, parent: Option<&str>, g: &str, lv: &LevelStyle, props: &str, list: &str| {
-        let tp = text::text_attrs(w, Some(ctx), &lv.run);
+        let tp = text::text_attrs(w, ctx, &lv.run);
         let parent = parent.map(|p| format!(r#" style:parent-style-name="{p}""#)).unwrap_or_default();
         format!(
             r#"<style:style style:name="{sname}" style:family="presentation"{parent}><style:graphic-properties{g}>{list}</style:graphic-properties><style:paragraph-properties{props}/><style:text-properties{tp}/></style:style>"#
@@ -897,7 +897,7 @@ pub fn master_page(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str, layou
             let para = s.text.as_ref().and_then(|t| t.paragraphs.first()).cloned().unwrap_or_default();
             let pp = resolve::para(ctx, s, &para);
             let rp = resolve::run(ctx, s, &para, para.runs.first().map(|r| &r.props).unwrap_or(&para.end_props));
-            let tp = text::text_attrs(w, Some(ctx), &rp);
+            let tp = text::text_attrs(w, ctx, &rp);
             let align = crate::text::odf_align(pp.align.unwrap_or(deckcraft_model::text::Align::Left));
             let ps =
                 auto.style("paragraph", "P", None, &format!(r#"<style:paragraph-properties fo:text-align="{align}"/><style:text-properties{tp}/>"#));

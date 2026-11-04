@@ -16,7 +16,7 @@ use deckcraft_model::{
 };
 
 use crate::OdpError;
-use crate::dom::{El, attr, kid, kids};
+use crate::dom::{El, attr, kid, kids, repeat};
 use crate::geometry;
 use crate::package::Package;
 use crate::styles::{Props, Scope, Store, Style};
@@ -33,11 +33,6 @@ const MAX_TABLE_SIDE: usize = 1000;
 const MAX_TABLE_CELLS: usize = 65_536;
 /// Most text (bytes) a table's repeated cells and rows may copy.
 const MAX_TABLE_TEXT: usize = 4 << 20;
-
-/// A `*-repeated` count (at least 1).
-fn repeat(e: &El, k: &str) -> usize {
-    attr(e, k).and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).max(1)
-}
 
 /// Most pages read.
 const MAX_PAGES: usize = 10_000;
@@ -79,7 +74,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         .and_then(|n| store.page_layouts.get(n))
         .and_then(|p| Some(Size::new(units::length(p.get("fo:page-width")?)?, units::length(p.get("fo:page-height")?)?)))
         .filter(|s| s.width >= 1.0 && s.height >= 1.0 && s.width < 1.0e5 && s.height < 1.0e5)
-        .unwrap_or(Size::new(28.0 * 72.0 / 2.54, 15.75 * 72.0 / 2.54));
+        .unwrap_or(Size::new(28.0 * units::PT_PER_CM, 15.75 * units::PT_PER_CM));
 
     let mut p = defaults::blank_presentation(size, Default::default(), false);
     // Picture bullets and embedded fonts: loaded into the presentation before the styles are
@@ -431,11 +426,7 @@ impl Reader<'_> {
                 let (id, pt) = g.as_ref()?;
                 let (sid, _) = self.targets.get(id)?;
                 // The target's connection site nearest LibreOffice's glue point.
-                let site = match deckcraft_model::find_shape(&shapes, *sid).and_then(|t| t.xfrm.map(|x| (t, x))) {
-                    Some((t, x)) => geometry::site_of_glue_point(&t.geom, x.w, x.h, *pt),
-                    None => crate::GLUE_POINTS.get(*pt as usize).copied().unwrap_or(0),
-                };
-                Some((*sid, site))
+                Some((*sid, geometry::site_of_glue_point(deckcraft_model::find_shape(&shapes, *sid), *pt)))
             };
             let (a, b) = (resolve(&start), resolve(&end));
             if let Some(c) = deckcraft_model::find_shape_mut(&mut shapes, cid)
@@ -888,7 +879,7 @@ impl Reader<'_> {
         let d = attr(e, "svg:d").filter(|d| d.len() <= geometry::MAX_PATH_TEXT)?;
         // svg:d without a view box is in 1/100 mm.
         let mut p = kurbo::BezPath::from_svg(d).ok()?;
-        p.apply_affine(kurbo::Affine::scale(72.0 / 2540.0));
+        p.apply_affine(kurbo::Affine::scale(1.0 / units::HMM_PER_PT));
         let bb = kurbo::Shape::bounding_box(&p);
         if !bb.is_finite() {
             return None;
@@ -1238,7 +1229,7 @@ impl Reader<'_> {
             let n = name?;
             let m = self.store.markers.get(n);
             let kind = marker_kind(n, m);
-            let mw = w.and_then(|v| units::length(v)).unwrap_or(0.3 * 72.0 / 2.54);
+            let mw = w.and_then(|v| units::length(v)).unwrap_or(0.3 * units::PT_PER_CM);
             let ratio = mw / width.max(0.75);
             let size = if ratio <= 2.5 {
                 "sm"
