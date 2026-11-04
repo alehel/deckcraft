@@ -614,6 +614,23 @@ fn transition_directions_round_trip() {
     }
 }
 
+/// A language with a script and a region keeps all three (`fo:language`, `fo:script`, `fo:country`).
+#[test]
+fn language_tags_round_trip() {
+    let mut run = Run::new("文字");
+    run.props.lang = Some("zh-Hans-CN".into());
+    let shape = Shape {
+        xfrm: Some(Xfrm::new(50.0, 50.0, 200.0, 50.0)),
+        text_box: true,
+        text: Some(TextBody { paragraphs: vec![Paragraph { runs: vec![run], ..Default::default() }], ..Default::default() }),
+        ..Default::default()
+    };
+    let p = deck_with(vec![shape]);
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    let t = shapes_of(&back)[0].text.clone().unwrap();
+    assert_eq!(t.paragraphs[0].runs[0].props.lang.as_deref(), Some("zh-Hans-CN"));
+}
+
 #[test]
 fn comments_round_trip() {
     let mut p = defaults::new_presentation(None);

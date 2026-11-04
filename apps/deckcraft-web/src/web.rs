@@ -207,6 +207,7 @@ fn mime_for(name: &str) -> &'static str {
         Some("txt") => "text/plain",
         Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         Some("odp") => "application/vnd.oasis.opendocument.presentation",
+        Some("otp") => "application/vnd.oasis.opendocument.presentation-template",
         Some("deckcraft") => "application/zip",
         _ => "application/octet-stream",
     }

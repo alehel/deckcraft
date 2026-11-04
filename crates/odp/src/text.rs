@@ -599,10 +599,8 @@ pub fn run_props(store: &Store, t: &Props, auto: Rgba) -> RunProps {
         rp.fill = Some(Fill::None);
     }
     if let Some(lang) = g("fo:language").filter(|l| *l != "zxx" && *l != "none") {
-        rp.lang = Some(match g("fo:country").filter(|c| *c != "none") {
-            Some(c) => format!("{lang}-{c}"),
-            None => lang.to_string(),
-        });
+        let part = |k: &str| g(k).filter(|v| !v.is_empty() && *v != "none").map(|v| format!("-{v}")).unwrap_or_default();
+        rp.lang = Some(format!("{lang}{}{}", part("fo:script"), part("fo:country")));
     }
     if g("style:letter-kerning") == Some("true") {
         rp.kern = Some(0.0);

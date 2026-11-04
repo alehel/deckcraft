@@ -453,10 +453,18 @@ pub fn text_attrs(w: &mut Writer, ctx: Option<&Ctx>, r: &RunProps) -> String {
         a.push_str(r#" style:text-outline="true""#);
     }
     if let Some(lang) = r.lang.as_deref().filter(|l| !l.is_empty()) {
-        let (l, c) = lang.split_once('-').unwrap_or((lang, ""));
-        let _ = write!(a, r#" fo:language="{}""#, esc(l));
-        if !c.is_empty() {
-            let _ = write!(a, r#" fo:country="{}""#, esc(c));
+        // BCP 47: language, then a four-letter script and a two-letter or three-digit region;
+        // other subtags have no ODF attribute.
+        let mut tags = lang.split(['-', '_']);
+        let _ = write!(a, r#" fo:language="{}""#, esc(tags.next().unwrap_or(lang)));
+        for t in tags {
+            let k = match t.len() {
+                4 if t.chars().all(|c| c.is_ascii_alphabetic()) => "fo:script",
+                2 if t.chars().all(|c| c.is_ascii_alphabetic()) => "fo:country",
+                3 if t.chars().all(|c| c.is_ascii_digit()) => "fo:country",
+                _ => continue,
+            };
+            let _ = write!(a, r#" {k}="{}""#, esc(t));
         }
     }
     a

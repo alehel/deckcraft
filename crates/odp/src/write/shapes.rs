@@ -302,7 +302,7 @@ fn place_in(m: Affine, child: Xfrm) -> Xfrm {
 /// `draw:enhanced-geometry` drawing the shape's outline in a view box of its size (1/100 mm).
 fn enhanced_geometry(s: &Shape, x: &Xfrm) -> String {
     let (w, h) = (x.w.max(1e-3), x.h.max(1e-3));
-    let geo = deckcraft_render_free_geometry(s, w, h);
+    let geo = shape_geometry(s, w, h);
     let vw = (w * 2540.0 / 72.0).round().max(1.0);
     let vh = (h * 2540.0 / 72.0).round().max(1.0);
     let scale = Affine::scale_non_uniform(vw / w, vh / h);
@@ -360,7 +360,7 @@ fn enhanced_geometry(s: &Shape, x: &Xfrm) -> String {
 }
 
 /// The shape's geometry (preset or custom) at its size, without the renderer.
-fn deckcraft_render_free_geometry(s: &Shape, w: f64, h: f64) -> deckcraft_geom::preset::Geometry {
+fn shape_geometry(s: &Shape, w: f64, h: f64) -> deckcraft_geom::preset::Geometry {
     use deckcraft_geom::preset::{Geometry, SubPath, build};
     match &s.geom {
         Geom::Preset { name, adj } => build(name, w, h, adj).or_else(|| build("rect", w, h, &[])).unwrap_or(Geometry {
