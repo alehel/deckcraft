@@ -658,26 +658,77 @@ pub fn enhanced(g: &El, w: f64, h: f64) -> Option<Enhanced> {
 
 /// Split the path into commands and their parameters, evaluate them into sub-paths placed by
 /// `frame`.
+/// The path being drawn: the open subpath and its pen position, and the paths finished so far.
+struct Pen<'f> {
+    frame: &'f Frame,
+    out: Vec<CustomPath>,
+    bp: BezPath,
+    cur: Point,
+    /// Where the open subpath began (`Z` returns there).
+    start: Point,
+    open: bool,
+    fill: bool,
+    stroke: bool,
+}
+
+impl<'f> Pen<'f> {
+    fn new(frame: &'f Frame) -> Self {
+        Pen { frame, out: vec![], bp: BezPath::new(), cur: Point::ZERO, start: Point::ZERO, open: false, fill: true, stroke: true }
+    }
+
+    /// Start a subpath at the pen if none is open (curves continue from where the pen is).
+    fn ensure_open(&mut self) {
+        if !self.open {
+            self.bp.move_to(self.cur);
+            self.start = self.cur;
+            self.open = true;
+        }
+    }
+
+    /// To `p`: a new subpath there (when asked, or when none is open), else a line.
+    fn to(&mut self, p: Point, new_subpath: bool) {
+        if new_subpath || !self.open {
+            self.bp.move_to(p);
+            self.start = p;
+            self.open = true;
+        } else {
+            self.bp.line_to(p);
+        }
+        self.cur = p;
+    }
+
+    fn arc(&mut self, arc: &Arc) {
+        append_arc(&mut self.bp, arc);
+        self.cur = arc_end(arc);
+    }
+
+    fn close(&mut self) {
+        if self.open {
+            self.bp.close_path();
+            self.cur = self.start;
+        }
+        self.open = false;
+    }
+
+    /// End the path (`N`): it is mapped to the shape and kept; the next one fills and strokes
+    /// unless told otherwise.
+    fn finish(&mut self) {
+        if !self.bp.elements().is_empty() {
+            let p = self.frame.map_path(&std::mem::take(&mut self.bp));
+            let (w, h) = self.frame.size;
+            let fill = if self.fill { FillMode::Norm } else { FillMode::None };
+            self.out.push(CustomPath { w, h, d: path_d(&p), fill, stroke: self.stroke });
+        }
+        (self.fill, self.stroke, self.open) = (true, true, false);
+    }
+}
+
 fn eval_path(src: &str, ev: &mut Eval, frame: &Frame) -> Vec<CustomPath> {
-    let mut out: Vec<CustomPath> = vec![];
-    let mut bp = BezPath::new();
-    let (mut fill, mut stroke) = (true, true);
-    let mut cur = Point::ZERO;
-    let mut start = Point::ZERO;
-    let mut open = false;
+    let mut pen = Pen::new(frame);
     let toks: Vec<&str> = src.split(|c: char| c.is_whitespace() || c == ',').filter(|t| !t.is_empty()).take(200_000).collect();
     let mut i = 0;
     let mut cmd = 'M';
     let mut quadrant_x = true;
-    let flush = |bp: &mut BezPath, fill: &mut bool, stroke: &mut bool, out: &mut Vec<CustomPath>| {
-        if !bp.elements().is_empty() {
-            let p = frame.map_path(&std::mem::take(bp));
-            let (w, h) = frame.size;
-            out.push(CustomPath { w, h, d: path_d(&p), fill: if *fill { FillMode::Norm } else { FillMode::None }, stroke: *stroke });
-        }
-        *fill = true;
-        *stroke = true;
-    };
     while let Some(&t) = toks.get(i) {
         let first = t.chars().next().unwrap_or(' ');
         // A command letter (single upper-case letter that isn't a keyword).
@@ -685,27 +736,10 @@ fn eval_path(src: &str, ev: &mut Eval, frame: &Frame) -> Vec<CustomPath> {
             cmd = first;
             i += 1;
             match cmd {
-                'Z' => {
-                    if open {
-                        bp.close_path();
-                        cur = start;
-                    }
-                    open = false;
-                    continue;
-                }
-                'N' => {
-                    flush(&mut bp, &mut fill, &mut stroke, &mut out);
-                    open = false;
-                    continue;
-                }
-                'F' => {
-                    fill = false;
-                    continue;
-                }
-                'S' => {
-                    stroke = false;
-                    continue;
-                }
+                'Z' => pen.close(),
+                'N' => pen.finish(),
+                'F' => pen.fill = false,
+                'S' => pen.stroke = false,
                 'X' => quadrant_x = true,
                 'Y' => quadrant_x = false,
                 _ => {}
@@ -723,50 +757,33 @@ fn eval_path(src: &str, ev: &mut Eval, frame: &Frame) -> Vec<CustomPath> {
         let pt = |k: usize| Point::new(g(k), g(k + 1));
         match cmd {
             'M' => {
-                bp.move_to(pt(0));
-                cur = pt(0);
-                start = cur;
-                open = true;
+                pen.to(pt(0), true);
                 // Further pairs after a moveto are linetos.
                 cmd = 'L';
             }
-            'L' => {
-                line_or_move(&mut bp, &mut open, &mut start, pt(0));
-                cur = pt(0);
-            }
+            'L' => pen.to(pt(0), false),
             'C' => {
-                if !open {
-                    bp.move_to(cur);
-                    start = cur;
-                    open = true;
-                }
-                bp.curve_to(pt(0), pt(2), pt(4));
-                cur = pt(4);
+                pen.ensure_open();
+                pen.bp.curve_to(pt(0), pt(2), pt(4));
+                pen.cur = pt(4);
             }
             'Q' => {
-                if !open {
-                    bp.move_to(cur);
-                    start = cur;
-                    open = true;
-                }
-                bp.quad_to(pt(0), pt(2));
-                cur = pt(2);
+                pen.ensure_open();
+                pen.bp.quad_to(pt(0), pt(2));
+                pen.cur = pt(2);
             }
             'X' | 'Y' => {
-                let p1 = pt(0);
-                if !open {
-                    bp.move_to(cur);
-                    start = cur;
-                    open = true;
-                }
+                // A quarter ellipse to the point, starting along x (or y), the axes alternating.
+                let (p0, p1) = (pen.cur, pt(0));
+                pen.ensure_open();
                 const K: f64 = 0.552_284_749_8;
                 let (c1, c2) = if quadrant_x {
-                    (Point::new(cur.x + K * (p1.x - cur.x), cur.y), Point::new(p1.x, p1.y - K * (p1.y - cur.y)))
+                    (Point::new(p0.x + K * (p1.x - p0.x), p0.y), Point::new(p1.x, p1.y - K * (p1.y - p0.y)))
                 } else {
-                    (Point::new(cur.x, cur.y + K * (p1.y - cur.y)), Point::new(p1.x - K * (p1.x - cur.x), p1.y))
+                    (Point::new(p0.x, p0.y + K * (p1.y - p0.y)), Point::new(p1.x - K * (p1.x - p0.x), p1.y))
                 };
-                bp.curve_to(c1, c2, p1);
-                cur = p1;
+                pen.bp.curve_to(c1, c2, p1);
+                pen.cur = p1;
                 quadrant_x = !quadrant_x;
             }
             'T' | 'U' => {
@@ -781,18 +798,11 @@ fn eval_path(src: &str, ev: &mut Eval, frame: &Frame) -> Vec<CustomPath> {
                     sweep = 360.0;
                 }
                 let arc = Arc::new(c, r, -a0.to_radians(), -sweep.to_radians(), 0.0);
-                let s = Point::new(c.x + r.x * a0.to_radians().cos(), c.y - r.y * a0.to_radians().sin());
-                if cmd == 'U' || !open {
-                    bp.move_to(s);
-                    start = s;
-                    open = true;
-                } else {
-                    bp.line_to(s);
-                }
-                append_arc(&mut bp, &arc);
-                cur = arc_end(&arc);
+                pen.to(Point::new(c.x + r.x * a0.to_radians().cos(), c.y - r.y * a0.to_radians().sin()), cmd == 'U');
+                pen.arc(&arc);
             }
             'A' | 'B' | 'W' | 'V' => {
+                // The ellipse in the box p1–p2, from the ray to p3 to the ray to p4.
                 let (p1, p2, p3, p4) = (pt(0), pt(2), pt(4), pt(6));
                 let c = p1.midpoint(p2);
                 let r = Vec2::new(((p2.x - p1.x) / 2.0).abs(), ((p2.y - p1.y) / 2.0).abs());
@@ -801,26 +811,16 @@ fn eval_path(src: &str, ev: &mut Eval, frame: &Frame) -> Vec<CustomPath> {
                 }
                 let ang = |p: Point| ((p.y - c.y) / r.y).atan2((p.x - c.x) / r.x);
                 let (s, e) = (ang(p3), ang(p4));
-                let clockwise = matches!(cmd, 'W' | 'V');
                 let mut sweep = e - s;
-                if clockwise {
+                if matches!(cmd, 'W' | 'V') {
                     if sweep <= 0.0 {
                         sweep += std::f64::consts::TAU;
                     }
                 } else if sweep >= 0.0 {
                     sweep -= std::f64::consts::TAU;
                 }
-                let arc = Arc::new(c, r, s, sweep, 0.0);
-                let sp = Point::new(c.x + r.x * s.cos(), c.y + r.y * s.sin());
-                if matches!(cmd, 'B' | 'V') || !open {
-                    bp.move_to(sp);
-                    start = sp;
-                    open = true;
-                } else {
-                    bp.line_to(sp);
-                }
-                append_arc(&mut bp, &arc);
-                cur = arc_end(&arc);
+                pen.to(Point::new(c.x + r.x * s.cos(), c.y + r.y * s.sin()), matches!(cmd, 'B' | 'V'));
+                pen.arc(&Arc::new(c, r, s, sweep, 0.0));
             }
             'G' => {
                 // OOXML arcTo: radii, start angle and sweep in degrees, clockwise.
@@ -838,31 +838,15 @@ fn eval_path(src: &str, ev: &mut Eval, frame: &Frame) -> Vec<CustomPath> {
                 if sw.abs() >= std::f64::consts::TAU - 1e-9 {
                     sweep = sw.signum() * std::f64::consts::TAU;
                 }
-                let c = Point::new(cur.x - r.x * s.cos(), cur.y - r.y * s.sin());
-                if !open {
-                    bp.move_to(cur);
-                    start = cur;
-                    open = true;
-                }
-                let arc = Arc::new(c, r, s, sweep, 0.0);
-                append_arc(&mut bp, &arc);
-                cur = arc_end(&arc);
+                let c = Point::new(pen.cur.x - r.x * s.cos(), pen.cur.y - r.y * s.sin());
+                pen.ensure_open();
+                pen.arc(&Arc::new(c, r, s, sweep, 0.0));
             }
             _ => {}
         }
     }
-    flush(&mut bp, &mut fill, &mut stroke, &mut out);
-    out
-}
-
-fn line_or_move(bp: &mut BezPath, open: &mut bool, start: &mut Point, p: Point) {
-    if *open {
-        bp.line_to(p);
-    } else {
-        bp.move_to(p);
-        *start = p;
-        *open = true;
-    }
+    pen.finish();
+    pen.out
 }
 
 /// An arc as cubic curves, to a tolerance relative to its size: the number of curves stays a
