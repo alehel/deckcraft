@@ -85,8 +85,16 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         }
     }
     embedded_fonts(&pkg, &store, &mut p);
-    let mut r =
-        Reader { pkg: &pkg, store: std::rc::Rc::new(store), p, shapes: 0, master_index: HashMap::new(), page_names: vec![], targets: HashMap::new() };
+    let mut r = Reader {
+        pkg: &pkg,
+        store: std::rc::Rc::new(store),
+        p,
+        shapes: 0,
+        master_index: HashMap::new(),
+        page_names: vec![],
+        targets: HashMap::new(),
+        glue: vec![],
+    };
     r.p.masters.clear();
     if let Some(m) = meta.as_ref().and_then(|m| kid(m, "office:meta")) {
         r.meta(m);
@@ -154,6 +162,8 @@ struct Reader<'a> {
     page_names: Vec<(String, SlideId)>,
     /// Element ids on the page being read (shapes and paragraphs), for its animations.
     targets: crate::anim::Targets,
+    /// Connectors on the page being read and the (element id, glue point) of each end.
+    glue: Vec<(ShapeId, Option<(String, u32)>, Option<(String, u32)>)>,
 }
 
 /// Where a shape is being read: which file's automatic styles apply, and the master it sits on.
@@ -392,6 +402,7 @@ impl Reader<'_> {
         }
         slide.transition = transition(pp, page);
         self.targets.clear();
+        self.glue.clear();
         let mut shapes = vec![];
         let mut timing = None;
         for e in page.elements() {
@@ -417,6 +428,23 @@ impl Reader<'_> {
                         shapes.push(s);
                     }
                 }
+            }
+        }
+        // Glued connector ends, now that every shape on the page has its id.
+        for (cid, start, end) in std::mem::take(&mut self.glue) {
+            let resolve = |g: &Option<(String, u32)>| {
+                let (id, pt) = g.as_ref()?;
+                let (sid, _) = self.targets.get(id)?;
+                // LibreOffice numbers a shape's glue points top, right, bottom, left; ours run top,
+                // left, bottom, right.
+                Some((*sid, [0, 3, 2, 1].get(*pt as usize).copied().unwrap_or(0)))
+            };
+            let (a, b) = (resolve(&start), resolve(&end));
+            if let Some(c) = deckcraft_model::find_shape_mut(&mut shapes, cid)
+                && let ShapeKind::Connector { start, end } = &mut c.kind
+            {
+                *start = a;
+                *end = b;
             }
         }
         if let Some(t) = timing {
@@ -646,10 +674,13 @@ impl Reader<'_> {
                     "draw:polygon" => attr(e, "draw:points").and_then(|p| geometry::points_path(p, vb, true)),
                     _ => attr(e, "svg:d").and_then(|d| geometry::svg_path(d, vb, name == "draw:path")),
                 };
-                if name == "draw:connector" && path.is_none() {
-                    // A straight connector: its end points.
+                let straight = attr(e, "draw:type") == Some("line");
+                if name == "draw:connector" && (path.is_none() || straight) {
+                    // A straight connector: its end points, and the shapes it is glued to.
                     s.xfrm = Some(line_xfrm(e));
                     s.kind = ShapeKind::Connector { start: None, end: None };
+                    let glue = |k: &str, g: &str| attr(e, k).map(|id| (id.to_string(), attr(e, g).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0)));
+                    self.glue.push((s.id, glue("draw:start-shape", "draw:start-glue-point"), glue("draw:end-shape", "draw:end-glue-point")));
                     s.geom = Geom::preset("straightConnector1");
                     s.fill = Some(Fill::None);
                 } else {

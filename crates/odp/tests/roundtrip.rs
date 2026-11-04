@@ -457,3 +457,27 @@ fn media_picture_bullets_columns_and_embedded_fonts_round_trip() {
         assert_eq!(back.media(ef.regular.unwrap()).map(|i| i.data.to_vec()), Some(f));
     }
 }
+
+#[test]
+fn glued_connectors_round_trip() {
+    let a = Shape { xfrm: Some(Xfrm::new(50.0, 50.0, 100.0, 60.0)), geom: Geom::preset("rect"), ..Default::default() };
+    let b = Shape { xfrm: Some(Xfrm::new(300.0, 200.0, 100.0, 60.0)), geom: Geom::preset("ellipse"), ..Default::default() };
+    let mut p = deck_with(vec![a, b]);
+    let ids: Vec<ShapeId> = shapes_of(&p).iter().map(|s| s.id).collect();
+    let c = Shape {
+        id: ShapeId(p.alloc_id().unwrap()),
+        xfrm: Some(Xfrm::new(150.0, 80.0, 150.0, 120.0)),
+        kind: ShapeKind::Connector { start: Some((ids[0], 3)), end: Some((ids[1], 1)) },
+        geom: Geom::preset("straightConnector1"),
+        line: Some(deckcraft_model::style::Line::solid(ColorRef::rgb(Rgba::BLACK), 1.5)),
+        ..Default::default()
+    };
+    Arc::make_mut(&mut p.slides[0]).shapes.push(c);
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    let s = shapes_of(&back);
+    let ShapeKind::Connector { start, end } = &s[2].kind else { panic!("{:?}", s[2].kind) };
+    assert_eq!(*start, Some((s[0].id, 3)));
+    assert_eq!(*end, Some((s[1].id, 1)));
+    let x = s[2].xfrm.unwrap();
+    assert!((x.x - 150.0).abs() < 0.01 && (x.w - 150.0).abs() < 0.01 && (x.h - 120.0).abs() < 0.01);
+}

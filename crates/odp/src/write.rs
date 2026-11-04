@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 
 use deckcraft_model::resolve::{self, Ctx};
-use deckcraft_model::{LayoutId, PhType, Presentation, Slide};
+use deckcraft_model::{LayoutId, PhType, Presentation, ShapeKind, Slide};
 
 use crate::OdpError;
 use crate::dom::esc;
@@ -460,6 +460,14 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
     let Some(ctx) = Ctx::for_slide(p, s) else { return String::new() };
     w.page = master_name.to_string();
     w.anim_targets = s.animations.iter().flat_map(|a| [Some((a.shape.0, a.paragraph)), a.trigger.map(|t| (t.0, None))]).flatten().collect();
+    // Shapes connectors are glued to need ids too.
+    deckcraft_model::walk(&s.shapes, &mut |sh, _| {
+        if let ShapeKind::Connector { start, end } = &sh.kind {
+            for (id, _) in [start, end].into_iter().flatten() {
+                w.anim_targets.insert((id.0, None));
+            }
+        }
+    });
     // The page style: background, transition, visibility, footers.
     let mut pp = String::new();
     if let Some(bg) = &s.background {

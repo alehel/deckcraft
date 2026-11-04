@@ -198,9 +198,23 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, x: &Xfrm, co
             let b = r * Point::new(x2, y2);
             (x1, y1, x2, y2) = (a.x, a.y, b.x, b.y);
         }
-        let el = if matches!(s.kind, ShapeKind::Connector { .. }) { "draw:connector" } else { "draw:line" };
+        let (el, glue) = match &s.kind {
+            ShapeKind::Connector { start, end } => {
+                // A straight connector, glued where it was (our sites run top, left, bottom, right;
+                // LibreOffice's glue points top, right, bottom, left).
+                let mut g = String::from(r#" draw:type="line""#);
+                for (k, e) in [("start", start), ("end", end)] {
+                    if let Some((id, site)) = e {
+                        let pt = [0, 3, 2, 1].get(*site as usize).copied().unwrap_or(0);
+                        let _ = write!(g, r#" draw:{k}-shape="s{}" draw:{k}-glue-point="{pt}""#, id.0);
+                    }
+                }
+                ("draw:connector", g)
+            }
+            _ => ("draw:line", String::new()),
+        };
         return format!(
-            r#"<{el}{style_attr}{common} svg:x1="{}" svg:y1="{}" svg:x2="{}" svg:y2="{}">{text}{desc}{events}</{el}>"#,
+            r#"<{el}{style_attr}{common}{glue} svg:x1="{}" svg:y1="{}" svg:x2="{}" svg:y2="{}">{text}{desc}{events}</{el}>"#,
             cm(x1),
             cm(y1),
             cm(x2),
