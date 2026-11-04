@@ -134,3 +134,58 @@ impl Package {
         }
     }
 }
+
+pub fn sniff_image(d: &[u8]) -> (&'static str, &'static str) {
+    if d.starts_with(b"\x89PNG") {
+        ("image/png", "png")
+    } else if d.starts_with(&[0xFF, 0xD8]) {
+        ("image/jpeg", "jpg")
+    } else if d.starts_with(b"GIF8") {
+        ("image/gif", "gif")
+    } else if d.starts_with(b"<svg") || d.starts_with(b"<?xml") {
+        ("image/svg+xml", "svg")
+    } else {
+        ("application/octet-stream", "bin")
+    }
+}
+
+/// Standard base64 (white space ignored), bounded.
+pub fn base64(s: &str) -> Option<Vec<u8>> {
+    if s.len() > 512 * 1024 * 1024 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let mut acc = 0u32;
+    let mut bits = 0;
+    for c in s.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            c if c.is_ascii_whitespace() => continue,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_decodes() {
+        assert_eq!(base64("aGVs\nbG8="), Some(b"hello".to_vec()));
+        assert_eq!(base64("*"), None);
+    }
+}

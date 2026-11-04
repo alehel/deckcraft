@@ -238,6 +238,59 @@ fn secs(ms: u32) -> String {
     trim(f64::from(ms) / 1000.0, 3)
 }
 
+/// The transition a page style describes: SMIL attributes, or the ODF 1.0 `transition-style`.
+pub fn page_transition(pp: &crate::styles::Props) -> Option<deckcraft_model::Transition> {
+    let get = |k: &str| pp.get(k).map(String::as_str);
+    let (kind, option) = match (get("smil:type"), get("presentation:transition-style")) {
+        (Some(ty), _) => transition_of(ty, get("smil:subtype").unwrap_or(""), get("smil:direction") == Some("reverse")),
+        (None, Some(s)) if s.contains("fade") => ("fade", ""),
+        (None, Some(s)) if s.starts_with("move") => ("cover", ""),
+        (None, Some(s)) if s != "none" => ("fade", ""),
+        _ if pp.contains_key("presentation:duration") => ("none", ""),
+        _ => return None,
+    };
+    let duration = get("smil:dur")
+        .and_then(clock)
+        .or_else(|| match get("presentation:transition-speed")? {
+            "slow" => Some(1000),
+            "fast" => Some(300),
+            _ => Some(500),
+        })
+        .unwrap_or(700);
+    let auto = get("presentation:transition-type") == Some("automatic");
+    let after = if auto { get("presentation:duration").and_then(duration_iso) } else { None };
+    if kind == "none" && after.is_none() {
+        return None;
+    }
+    Some(deckcraft_model::Transition {
+        kind: kind.into(),
+        option: option.into(),
+        duration_ms: duration.min(60_000),
+        advance_after_ms: after,
+        ..Default::default()
+    })
+}
+
+/// An ISO 8601 duration (`PT00H00M05S`, `PT5.5S`) in ms.
+fn duration_iso(s: &str) -> Option<u32> {
+    let t = s.trim().strip_prefix("PT").or_else(|| s.trim().strip_prefix("P0DT"))?;
+    let mut total = 0.0;
+    let mut num = String::new();
+    for c in t.chars() {
+        match c {
+            'H' => total += num.parse::<f64>().ok()? * 3_600_000.0,
+            'M' => total += num.parse::<f64>().ok()? * 60_000.0,
+            'S' => total += num.parse::<f64>().ok()? * 1000.0,
+            _ => {
+                num.push(c);
+                continue;
+            }
+        }
+        num.clear();
+    }
+    (total.is_finite() && total >= 0.0).then(|| total.min(f64::from(u32::MAX)) as u32)
+}
+
 /// Our effect id and option for a LibreOffice preset id and sub-type.
 fn effect_of(class: AnimClass, preset: &str, sub: &str) -> (String, String) {
     let infix = CLASSES.iter().find(|c| c.0 == class).map_or("", |c| c.2);
@@ -714,6 +767,18 @@ fn effect(out: &mut String, a: &Animation, t: &str, ctx: &Ctx) {
 mod tests {
     use super::*;
     use deckcraft_model::anim::TRANSITIONS as KINDS;
+
+    #[test]
+    fn clocks_and_durations() {
+        assert_eq!(clock("1.5s"), Some(1500));
+        assert_eq!(clock("250ms"), Some(250));
+        assert_eq!(clock("00:00:02"), Some(2000));
+        assert_eq!(clock("0.5min"), Some(30_000));
+        assert_eq!(clock("0.01h"), Some(36_000));
+        assert_eq!(duration_iso("PT00H00M05S"), Some(5000));
+        assert_eq!(duration_iso("PT1.5S"), Some(1500));
+        assert_eq!(duration_iso("bogus"), None);
+    }
 
     #[test]
     fn presets_map_both_ways() {
