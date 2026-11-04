@@ -15,6 +15,8 @@ const MAX_ENTRIES: usize = 50_000;
 
 pub struct Package {
     parts: HashMap<String, Vec<u8>>,
+    /// Lower-case part names → names, for lookups whose case differs.
+    lower: HashMap<String, String>,
     /// A flat document (`.fodp`): everything is in this one XML.
     pub flat: Option<Vec<u8>>,
 }
@@ -63,7 +65,7 @@ impl Package {
             if bytes.len() > MAX_XML_PART {
                 return Err(OdpError::NotOdp("flat document too large".into()));
             }
-            return Ok(Package { parts: HashMap::new(), flat: Some(bytes.to_vec()) });
+            return Ok(Package { parts: HashMap::new(), lower: HashMap::new(), flat: Some(bytes.to_vec()) });
         }
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| OdpError::NotOdp(e.to_string()))?;
         if zip.len() > MAX_ENTRIES {
@@ -103,7 +105,8 @@ impl Package {
             total = total.saturating_add(data.len() as u64);
             parts.insert(name, data);
         }
-        Ok(Package { parts, flat: None })
+        let lower = parts.keys().map(|k| (k.to_ascii_lowercase(), k.clone())).collect();
+        Ok(Package { parts, lower, flat: None })
     }
 
     /// A part by its path in the package (`Pictures/a.png`, `./Pictures/a.png`). Lookup falls back
@@ -113,8 +116,7 @@ impl Package {
         if let Some(d) = self.parts.get(n) {
             return Some(d);
         }
-        let lower = n.to_ascii_lowercase();
-        self.parts.iter().find(|(k, _)| k.to_ascii_lowercase() == lower).map(|(_, d)| d.as_slice())
+        self.lower.get(&n.to_ascii_lowercase()).and_then(|k| self.parts.get(k)).map(Vec::as_slice)
     }
 
     pub fn xml(&self, name: &str) -> Option<crate::dom::El> {

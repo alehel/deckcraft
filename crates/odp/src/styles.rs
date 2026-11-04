@@ -93,10 +93,17 @@ pub fn merge_text(base: &mut Props, over: &Props) {
     for (k, v) in over {
         if k.contains("font-size")
             && let Some(f) = units::percent(v)
-            && let Some(abs) = base.get(k.as_str()).and_then(|b| units::length(b))
+            && let Some(under) = base.get(k.as_str())
         {
-            base.insert(k.clone(), units::pt(abs * f));
-            continue;
+            // Of an absolute size, a size; of another percentage, their product.
+            if let Some(abs) = units::length(under) {
+                base.insert(k.clone(), units::pt(abs * f));
+                continue;
+            }
+            if let Some(g) = units::percent(under) {
+                base.insert(k.clone(), units::pct(f * g));
+                continue;
+            }
         }
         base.insert(k.clone(), v.clone());
     }
@@ -132,7 +139,13 @@ pub struct Store {
     pub page_layouts: HashMap<String, Props>,
     /// Display names, for writing styles back (`Default-title` etc. are plain already).
     pub common_names: Vec<(String, String)>,
+    /// Spaces the document's `text:s` elements have expanded to so far (each one asks for up to
+    /// a thousand), against [`MAX_EXPANDED_SPACES`].
+    pub spaces_used: std::cell::Cell<usize>,
 }
+
+/// Most spaces a document's `text:s` elements expand to in all.
+pub const MAX_EXPANDED_SPACES: usize = 1 << 22;
 
 fn read_props(el: &El) -> Props {
     el.attrs.iter().filter(|(k, _)| !k.starts_with("xmlns")).map(|(k, v)| (k.clone(), v.clone())).collect()
@@ -438,6 +451,13 @@ mod tests {
         assert_eq!(r.text.get("fo:font-size").map(String::as_str), Some("20pt"));
         assert_eq!(r.text.get("fo:color").map(String::as_str), Some("#ff0000"));
         assert_eq!(s.font_family("LS"), "Liberation Sans");
+        // A percentage of a percentage multiplies.
+        let mut base = Props::new();
+        base.insert("fo:font-size".into(), "80%".into());
+        let mut over = Props::new();
+        over.insert("fo:font-size".into(), "50%".into());
+        merge_text(&mut base, &over);
+        assert_eq!(base.get("fo:font-size").map(String::as_str), Some("40%"));
         // A self-parented style terminates.
         let _ = s.resolve(Scope::Styles, "presentation", Some("loop"));
     }

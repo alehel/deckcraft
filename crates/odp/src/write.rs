@@ -391,10 +391,13 @@ fn page_names(p: &Presentation) -> HashMap<u32, String> {
     let mut used = std::collections::HashSet::new();
     for (i, s) in p.slides.iter().enumerate() {
         let own = s.name.replace(',', " ").trim().to_string();
-        let mut name = if own.is_empty() { format!("page{}", i + 1) } else { own };
-        if !used.insert(name.clone()) {
-            name = format!("{name} ({})", i + 1);
-            used.insert(name.clone());
+        let base = if own.is_empty() { format!("page{}", i + 1) } else { own };
+        // Taken (by an earlier slide, or by another's numbered name): number it until it isn't.
+        let mut name = base.clone();
+        let mut k = i + 1;
+        while !used.insert(name.clone()) {
+            name = format!("{base} ({k})");
+            k += 1;
         }
         out.insert(s.id.0, name);
     }

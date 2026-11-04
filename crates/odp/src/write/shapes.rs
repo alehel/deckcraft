@@ -775,18 +775,15 @@ fn table(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, t: &Table) ->
                 None => r#" draw:fill="none""#.to_string(),
             };
             let mut cp = String::new();
-            // Model sides are left, top, right, bottom; the look's left, right, top, bottom.
-            for (i, side) in ["left", "top", "right", "bottom"].iter().enumerate() {
+            // The model's and the table look's sides both run left, right, top, bottom.
+            for (i, side) in ["left", "right", "top", "bottom"].iter().enumerate() {
                 let own = cell.borders.get(i).cloned().flatten();
                 let b = match own {
                     Some(l) => border(ctx, Some(&l)),
-                    None => {
-                        let li = [0, 2, 1, 3][i];
-                        match look.sides.get(li).copied().flatten().or(look.border) {
-                            Some((c, wd)) if c.a > 0 && wd > 0.0 => format!("{} solid {}", cm(wd), hex(c)),
-                            _ => "none".into(),
-                        }
-                    }
+                    None => match look.sides.get(i).copied().flatten().or(look.border) {
+                        Some((c, wd)) if c.a > 0 && wd > 0.0 => format!("{} solid {}", cm(wd), hex(c)),
+                        _ => "none".into(),
+                    },
                 };
                 let _ = write!(cp, r#" fo:border-{side}="{b}""#);
             }
@@ -897,7 +894,7 @@ pub fn master_page(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str, layou
     let bgx = fill_attrs(w, ctx, &bg, ph);
     let dp = auto.style("drawing-page", "dp", None, &format!(r#"<style:drawing-page-properties{bgx} draw:background-size="border"/>"#));
     let mut shapes_xml = String::new();
-    let (_, show_master) = (true, layout.is_none_or(|l| l.show_master_shapes));
+    let show_master = layout.is_none_or(|l| l.show_master_shapes);
     let master_ctx = Ctx::for_master(ctx.pres, ctx.master);
     if show_master {
         for s in ctx.master.shapes.iter().filter(|s| s.ph.is_none()) {

@@ -832,8 +832,18 @@ fn line_or_move(bp: &mut BezPath, open: &mut bool, start: &mut Point, p: Point) 
     }
 }
 
+/// An arc as cubic curves, to a tolerance relative to its size: the number of curves stays a
+/// handful per turn at any radius (a fixed tolerance makes a huge radius take millions).
 fn append_arc(bp: &mut BezPath, arc: &Arc) {
-    arc.to_cubic_beziers(0.1, |p1, p2, p| bp.curve_to(p1, p2, p));
+    let r = arc.radii.x.abs().max(arc.radii.y.abs());
+    if !r.is_finite() || r <= 0.0 || !arc.sweep_angle.is_finite() {
+        bp.line_to(arc_end(arc));
+        return;
+    }
+    // At most a few turns: more draw the same outline again.
+    let sweep = arc.sweep_angle.clamp(-4.0 * std::f64::consts::TAU, 4.0 * std::f64::consts::TAU);
+    let arc = Arc { sweep_angle: sweep, ..*arc };
+    arc.to_cubic_beziers((r * 1e-4).max(1e-9), |p1, p2, p| bp.curve_to(p1, p2, p));
 }
 
 fn arc_end(arc: &Arc) -> Point {
@@ -990,6 +1000,18 @@ mod tests {
         assert_eq!(ev.equation("s"), 1.0);
         assert_eq!(ev.depth, 0);
         assert_eq!(ev.low, COMPLETE);
+    }
+
+    /// Huge or non-finite arc radii draw in a bounded number of curves.
+    #[test]
+    fn huge_arcs_stay_small() {
+        let mut bp = BezPath::new();
+        bp.move_to((0.0, 0.0));
+        for r in [1e100, 1e300, f64::MAX] {
+            let arc = Arc { center: Point::ORIGIN, radii: kurbo::Vec2::new(r, r), start_angle: 0.0, sweep_angle: 1e9, x_rotation: 0.0 };
+            append_arc(&mut bp, &arc);
+        }
+        assert!(bp.elements().len() < 200, "{}", bp.elements().len());
     }
 
     #[test]

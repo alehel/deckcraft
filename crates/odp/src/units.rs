@@ -122,11 +122,15 @@ pub fn hex(c: Rgba) -> String {
     format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)
 }
 
-/// A SMIL clock value (`1.5s`, `500ms`, `00:00:01.5`) in ms.
+/// A SMIL clock value (`1.5s`, `500ms`, `0.5min`, `1h`, `00:00:01.5`) in ms.
 pub fn clock(s: &str) -> Option<u32> {
     let s = s.trim();
     let v = if let Some(ms) = s.strip_suffix("ms") {
         ms.trim().parse::<f64>().ok()?
+    } else if let Some(min) = s.strip_suffix("min") {
+        min.trim().parse::<f64>().ok()? * 60_000.0
+    } else if let Some(h) = s.strip_suffix('h') {
+        h.trim().parse::<f64>().ok()? * 3_600_000.0
     } else if let Some(sec) = s.strip_suffix('s') {
         sec.trim().parse::<f64>().ok()? * 1000.0
     } else if s.contains(':') {

@@ -254,7 +254,11 @@ fn inline(cx: &TextCtx, el: &El, text_props: &Props, link: Option<&Hyperlink>, r
                 }
                 "text:s" => {
                     flush_space(runs, &props, st, link);
-                    let n = attr(e, "text:c").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).clamp(1, 1000);
+                    // Each asks for up to a thousand; the document has a budget for them all.
+                    let used = cx.store.spaces_used.get();
+                    let want = attr(e, "text:c").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).clamp(1, 1000);
+                    let n = want.min(crate::styles::MAX_EXPANDED_SPACES.saturating_sub(used)).max(1);
+                    cx.store.spaces_used.set(used.saturating_add(n));
                     push_literal(runs, &props, &" ".repeat(n), link);
                     st.at_start = false;
                 }

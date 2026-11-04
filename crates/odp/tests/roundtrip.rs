@@ -332,6 +332,58 @@ fn huge_repeats_and_spans_are_bounded() {
     deckcraft_odp::export(&p).unwrap();
 }
 
+/// Repeats that cost nothing to write must still cost something to read: empty chart rows,
+/// cells padded out to a wide table, and big text copied into every repeated cell.
+#[test]
+fn cheap_repeats_are_charged_their_real_cost() {
+    let page = |body: String| {
+        format!(
+            r#"<office:document {NS} office:mimetype="application/vnd.oasis.opendocument.presentation"><office:body><office:presentation><draw:page>{body}</draw:page></office:presentation></office:body></office:document>"#
+        )
+    };
+    let empty_rows = r#"<table:table-row table:number-rows-repeated="65536"/>"#.repeat(4000);
+    let chart = format!(
+        r#"<draw:frame svg:width="10cm" svg:height="5cm"><draw:object><office:document><office:body><office:chart><chart:chart chart:class="chart:bar"><chart:plot-area/><table:table table:name="local-table"><table:table-rows>{empty_rows}</table:table-rows></table:table></chart:chart></office:chart></office:body></office:document></draw:object></draw:frame>"#
+    );
+    let wide = r#"<draw:frame svg:width="10cm" svg:height="5cm"><table:table><table:table-column table:number-columns-repeated="1000"/><table:table-row table:number-rows-repeated="1000"><table:table-cell table:number-columns-repeated="1000"/></table:table-row></table:table></draw:frame>"#;
+    let text = format!(
+        r#"<draw:frame svg:width="10cm" svg:height="5cm"><table:table><table:table-column table:number-columns-repeated="1000"/><table:table-row table:number-rows-repeated="1000"><table:table-cell table:number-columns-repeated="1000"><text:p>{}</text:p></table:table-cell></table:table-row></table:table></draw:frame>"#,
+        "x".repeat(20_000)
+    );
+    for doc in [page(chart), page(wide.to_string()), page(text)] {
+        let started = std::time::Instant::now();
+        let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+        let mut cells = 0usize;
+        let mut chars = 0usize;
+        deckcraft_model::walk(&p.slides[0].shapes, &mut |sh, _| {
+            if let ShapeKind::Table(t) = &sh.kind {
+                for r in &t.rows {
+                    cells += r.cells.len();
+                    chars += r.cells.iter().map(|c| c.text.text().len()).sum::<usize>();
+                }
+            }
+        });
+        assert!(cells <= 65_536 && chars <= 5 << 20, "{cells} cells, {chars} chars");
+        assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
+    }
+}
+
+/// `text:s` elements each ask for up to a thousand spaces; a document gets a few million in all.
+#[test]
+fn expanded_spaces_have_a_document_budget() {
+    let frame = format!(
+        r#"<draw:frame svg:width="10cm" svg:height="5cm"><draw:text-box><text:p>{}</text:p></draw:text-box></draw:frame>"#,
+        r#"<text:s text:c="1000"/>"#.repeat(10_000)
+    );
+    let doc = format!(
+        r#"<office:document {NS} office:mimetype="application/vnd.oasis.opendocument.presentation"><office:body><office:presentation><draw:page>{}</draw:page></office:presentation></office:body></office:document>"#,
+        frame.repeat(10)
+    );
+    let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+    let total: usize = p.slides[0].shapes.iter().filter_map(|s| s.text.as_ref()).map(|t| t.text().len()).sum();
+    assert!(total <= (1 << 22) + 200_000, "{total}");
+}
+
 /// A cell whose style says `transparent` has no fill; a trailing space in a paragraph stays.
 #[test]
 fn transparent_cells_and_trailing_spaces_read() {
@@ -367,6 +419,60 @@ fn outline_levels_resolve_from_the_master() {
     let size = |i: usize| paras[i].runs[0].props.size;
     assert_eq!((size(1), size(2)), (Some(32.0), Some(20.0)));
     assert!(paras[2].props.margin_left.unwrap() > paras[1].props.margin_left.unwrap());
+}
+
+/// Auto-numbers continue across paragraphs and restart only where a new run begins: after a
+/// paragraph without a number, or at a different start.
+#[test]
+fn numbering_runs_restart_only_where_they_begin() {
+    let para = |t: &str, start: Option<u32>| {
+        let mut p = Paragraph { runs: vec![Run::new(t)], ..Default::default() };
+        p.props.bullet = Some(match start {
+            Some(s) => Bullet::AutoNum { scheme: "arabicPeriod".into(), start_at: s },
+            None => Bullet::None,
+        });
+        p
+    };
+    let starts_written = |paras: Vec<Paragraph>| {
+        let shape = Shape {
+            xfrm: Some(Xfrm::new(50.0, 50.0, 300.0, 200.0)),
+            text_box: true,
+            text: Some(TextBody { paragraphs: paras, ..Default::default() }),
+            ..Default::default()
+        };
+        let xml = part(&deckcraft_odp::export(&deck_with(vec![shape])).unwrap(), "content.xml");
+        let page = &xml[xml.find("<draw:page ").unwrap()..];
+        page.match_indices("text:start-value=\"").map(|(i, m)| page[i + m.len()..].split('"').next().unwrap().to_string()).collect::<Vec<_>>()
+    };
+    assert_eq!(starts_written(vec![para("a", Some(3)), para("b", Some(3)), para("c", Some(3))]), ["3"]);
+    let mixed = vec![para("a", Some(1)), para("b", Some(1)), para("plain", None), para("c", Some(1)), para("d", Some(7)), para("e", Some(7))];
+    assert_eq!(starts_written(mixed), ["1", "1", "7"]);
+}
+
+/// Page names stay unique even when a slide's own name looks like another's numbered one.
+#[test]
+fn page_names_are_unique() {
+    let mut p = defaults::new_presentation(None);
+    let first = p.slides[0].clone();
+    p.slides = ["A (3)", "A", "A"]
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let mut s = (*first).clone();
+            s.id = deckcraft_model::SlideId(9000 + i as u32);
+            s.name = n.to_string();
+            Arc::new(s)
+        })
+        .collect();
+    p.fix_next_id();
+    let xml = part(&deckcraft_odp::export(&p).unwrap(), "content.xml");
+    let names: Vec<String> = tags(&xml)
+        .into_iter()
+        .filter(|(t, _)| t == "draw:page")
+        .filter_map(|(_, a)| a.into_iter().find(|(k, _)| k == "draw:name").map(|(_, v)| v))
+        .collect();
+    let unique: std::collections::HashSet<&String> = names.iter().collect();
+    assert_eq!((names.len(), unique.len()), (3, 3), "{names:?}");
 }
 
 /// A presentation without masters still writes a package LibreOffice opens.

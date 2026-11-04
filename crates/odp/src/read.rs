@@ -32,6 +32,8 @@ const MAX_SHAPES: usize = 250_000;
 const MAX_TABLE_SIDE: usize = 1000;
 /// Most cells read into one table.
 const MAX_TABLE_CELLS: usize = 65_536;
+/// Most text (bytes) a table's repeated cells and rows may copy.
+const MAX_TABLE_TEXT: usize = 4 << 20;
 
 /// A `*-repeated` count (at least 1).
 fn repeat(e: &El, k: &str) -> usize {
@@ -105,7 +107,8 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         p,
         shapes: 0,
         master_index: HashMap::new(),
-        page_names: vec![],
+        page_names: HashMap::new(),
+        package_media: HashMap::new(),
         targets: HashMap::new(),
         glue: vec![],
     };
@@ -172,7 +175,9 @@ struct Reader<'a> {
     /// Master page name → index in `p.masters`, with its footer placeholders.
     master_index: HashMap<String, usize>,
     /// Page names (`draw:name`) → slide ids, for `#name` links.
-    page_names: Vec<(String, SlideId)>,
+    page_names: HashMap<String, SlideId>,
+    /// Package parts already added as media, by reference: each part is copied once.
+    package_media: HashMap<String, MediaId>,
     /// Element ids on the page being read (shapes and paragraphs), for its animations.
     targets: crate::anim::Targets,
     /// Connectors on the page being read and the (element id, glue point) of each end.
@@ -226,7 +231,7 @@ impl Reader<'_> {
         for cs in kids(s, "presentation:show").take(256) {
             let name = attr(cs, "presentation:name").unwrap_or_default().to_string();
             let pages = attr(cs, "presentation:pages").unwrap_or("");
-            let slides = pages.split(',').filter_map(|n| self.page_names.iter().find(|(pn, _)| pn == n.trim()).map(|(_, id)| *id)).collect();
+            let slides = pages.split(',').take(self.page_names.len().max(1) * 4).filter_map(|n| self.page_names.get(n.trim()).copied()).collect();
             self.p.custom_shows.push(deckcraft_model::CustomShow { name, slides });
         }
     }
@@ -382,7 +387,7 @@ impl Reader<'_> {
         let ctx = Ctx { scope: Scope::Content, master: master_name, bg, title_slide };
         let mut slide = Slide { id, name: attr(page, "draw:name").unwrap_or("").to_string(), ..Default::default() };
         if let Some(n) = attr(page, "draw:name") {
-            self.page_names.push((n.to_string(), id));
+            self.page_names.entry(n.to_string()).or_insert(id);
         }
         slide.background = page_bg;
         if pp.get("presentation:background-visible").map(String::as_str) == Some("false") {
@@ -528,8 +533,8 @@ impl Reader<'_> {
             if let Action::Url { url } = &h.action
                 && let Some(name) = url.strip_prefix('#')
             {
-                match names.iter().find(|(n, _)| n == name) {
-                    Some((_, id)) => h.action = Action::Slide { slide: *id },
+                match names.get(name) {
+                    Some(id) => h.action = Action::Slide { slide: *id },
                     None => *l = None,
                 }
             }
@@ -809,8 +814,8 @@ impl Reader<'_> {
         let href = attr(pl, "xlink:href")?;
         let mime = attr(pl, "draw:mime-type").map(str::to_string).unwrap_or_else(|| media_mime(href).to_string());
         let name = href.rsplit('/').next().unwrap_or(href).to_string();
-        let media = match self.pkg.get(href) {
-            Some(data) => self.p.add_media(&name, &mime, data.to_vec())?,
+        let media = match self.package_media(href, &mime) {
+            Some(id) => id,
             None => {
                 // A linked file: kept as a link.
                 let id = self.p.add_media(&name, &mime, vec![])?;
@@ -968,12 +973,22 @@ impl Reader<'_> {
         None
     }
 
+    /// A package part as media, added once however many shapes refer to it.
+    fn package_media(&mut self, href: &str, mime: &str) -> Option<MediaId> {
+        if let Some(id) = self.package_media.get(href) {
+            return Some(*id);
+        }
+        let data = self.pkg.get(href)?;
+        let name = href.rsplit('/').next().unwrap_or(href);
+        let id = self.p.add_media(name, mime, data.to_vec())?;
+        self.package_media.insert(href.to_string(), id);
+        Some(id)
+    }
+
     fn image_media(&mut self, img: &El) -> Option<MediaId> {
         if let Some(href) = attr(img, "xlink:href").filter(|h| !h.is_empty() && !h.contains("://")) {
-            let data = self.pkg.get(href)?.to_vec();
-            let name = href.rsplit('/').next().unwrap_or(href).to_string();
-            let mime = attr(img, "draw:mime-type").map(str::to_string).unwrap_or_else(|| mime_for(&name).to_string());
-            return self.p.add_media(&name, &mime, data);
+            let mime = attr(img, "draw:mime-type").map(str::to_string).unwrap_or_else(|| mime_for(href).to_string());
+            return self.package_media(href, &mime);
         }
         let b64 = kid(img, "office:binary-data")?.text();
         let data = base64(&b64)?;
@@ -1015,6 +1030,12 @@ impl Reader<'_> {
             })
             .take(MAX_TABLE_SIDE)
             .collect();
+        // The table's width before any cell is read, so every row is budgeted at the width it
+        // will be padded to.
+        let is_cell = |c: &&El| c.name == "table:table-cell" || c.name == "table:covered-table-cell";
+        let row_width = |r: &El| r.elements().filter(is_cell).map(|c| repeat(c, "table:number-columns-repeated")).fold(0usize, usize::saturating_add);
+        let width = rows.iter().map(|r| row_width(r)).max().unwrap_or(0).max(table.cols.len()).clamp(1, MAX_TABLE_SIDE);
+        let mut text_budget = MAX_TABLE_TEXT;
         for row in rows {
             if table.rows.len() >= MAX_TABLE_SIDE {
                 break;
@@ -1029,18 +1050,29 @@ impl Reader<'_> {
             let h = if optimal && h <= 0.0 { 12.0 } else { h };
             let default_cell = attr(row, "table:default-cell-style-name");
             let mut cells: Vec<Cell> = vec![];
-            for c in row.elements().filter(|c| c.name == "table:table-cell" || c.name == "table:covered-table-cell") {
-                let n = repeat(c, "table:number-columns-repeated").min(MAX_TABLE_SIDE - cells.len());
+            for c in row.elements().filter(is_cell) {
+                let n = repeat(c, "table:number-columns-repeated").min(width - cells.len().min(width));
                 if n == 0 {
                     break;
                 }
-                // A repeated cell is read once.
+                // A repeated cell is read once; its copies keep their text while the budget lasts.
                 let cell = self.cell(c, ctx, default_cell);
-                cells.extend(std::iter::repeat_n(cell, n));
+                let size = cell.text.text().len();
+                for k in 0..n {
+                    if k == 0 || size <= text_budget {
+                        text_budget = text_budget.saturating_sub(if k == 0 { 0 } else { size });
+                        cells.push(cell.clone());
+                    } else {
+                        cells.push(Cell { text: Cell::new("").text, ..cell.clone() });
+                    }
+                }
             }
-            let read: usize = table.rows.iter().map(|r| r.cells.len()).sum();
-            let room = MAX_TABLE_CELLS.saturating_sub(read) / cells.len().max(1);
-            let n = repeat(row, "table:number-rows-repeated").min(MAX_TABLE_SIDE - table.rows.len()).min(room);
+            // Repeated rows cost the full width, and their text the budget.
+            let room = MAX_TABLE_CELLS.saturating_sub(table.rows.len() * width) / width;
+            let row_text: usize = cells.iter().map(|c| c.text.text().len()).sum();
+            let text_room = if row_text == 0 { usize::MAX } else { 1 + text_budget / row_text };
+            let n = repeat(row, "table:number-rows-repeated").min(MAX_TABLE_SIDE - table.rows.len()).min(room).min(text_room);
+            text_budget = text_budget.saturating_sub(row_text.saturating_mul(n.saturating_sub(1)));
             if n == 0 {
                 break;
             }
@@ -1147,7 +1179,8 @@ impl Reader<'_> {
         cell.fill = Some(self.fill(&g));
         let border = |k: &str| st.cell.get(k).or_else(|| st.cell.get("fo:border")).and_then(|b| border_line(b));
         // An unset border is none (not the table style's).
-        cell.borders = [border("fo:border-left"), border("fo:border-top"), border("fo:border-right"), border("fo:border-bottom")]
+        // The model's order: left, right, top, bottom.
+        cell.borders = [border("fo:border-left"), border("fo:border-right"), border("fo:border-top"), border("fo:border-bottom")]
             .map(|b| b.or_else(|| Some(Line::none())));
         let pad = |k: &str| st.cell.get(k).or_else(|| st.cell.get("fo:padding")).and_then(|v| units::length(v));
         if let (Some(l), Some(t), Some(r), Some(b)) =
@@ -1922,6 +1955,8 @@ mod tests {
         assert_eq!(units::clock("1.5s"), Some(1500));
         assert_eq!(units::clock("250ms"), Some(250));
         assert_eq!(units::clock("00:00:02"), Some(2000));
+        assert_eq!(units::clock("0.5min"), Some(30_000));
+        assert_eq!(units::clock("0.01h"), Some(36_000));
         assert_eq!(duration_iso("PT00H00M05S"), Some(5000));
         assert_eq!(duration_iso("PT1.5S"), Some(1500));
         assert_eq!(duration_iso("bogus"), None);

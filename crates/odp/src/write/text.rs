@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use deckcraft_color::Rgba;
 use deckcraft_model::resolve::{self, Ctx};
 use deckcraft_model::style::Fill;
-use deckcraft_model::text::{Action, Align, Bullet, Caps, LevelStyle, ParaProps, Run, RunKind, RunProps, Spacing, Strike, TextBody};
+use deckcraft_model::text::{Action, Align, Bullet, Caps, LevelStyle, ParaProps, Paragraph, Run, RunKind, RunProps, Spacing, Strike, TextBody};
 use deckcraft_model::{Shape, SlideId};
 
 use super::{Auto, PageCtx, Writer};
@@ -17,13 +17,15 @@ use crate::units::{cm, hex, pct, pt, trim};
 pub fn body(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, shape: &Shape, outline: bool) -> String {
     let Some(t) = &shape.text else { return String::new() };
     let mut out = String::new();
+    let mut numbering = Numbering::default();
     for (i, p) in t.paragraphs.iter().enumerate() {
         let pp = resolve::para(ctx, shape, p);
+        let starts = numbering.starts_run(p, pp.bullet.as_ref());
         let runs: Vec<(RunProps, &Run)> = p.runs.iter().map(|r| (resolve::run(ctx, shape, p, &r.props), r)).collect();
         let end = resolve::run(ctx, shape, p, &p.end_props);
         // A paragraph an animation targets carries an id.
         let id = pg.id(shape.id, Some(i as u32));
-        out.push_str(&paragraph(w, auto, Some(ctx), p.level, &pp, &end, &runs, outline, id, pg.is_master));
+        out.push_str(&paragraph(w, auto, Some(ctx), p.level, &pp, &end, &runs, outline, id, pg.is_master, starts));
     }
     out
 }
@@ -31,7 +33,9 @@ pub fn body(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, shape: &Sh
 /// Paragraphs with only their own formatting (notes, table cells resolved by the caller).
 pub fn plain_paragraphs(w: &mut Writer, auto: &mut Auto, t: &TextBody) -> String {
     let mut out = String::new();
+    let mut numbering = Numbering::default();
     for p in &t.paragraphs {
+        let starts = numbering.starts_run(p, p.props.bullet.as_ref());
         let mut end = p.end_props.clone();
         end.inherit(&p.def_props);
         let runs: Vec<(RunProps, &Run)> = p
@@ -43,9 +47,41 @@ pub fn plain_paragraphs(w: &mut Writer, auto: &mut Auto, t: &TextBody) -> String
                 (rp, r)
             })
             .collect();
-        out.push_str(&paragraph(w, auto, None, p.level, &p.props, &end, &runs, false, None, false));
+        out.push_str(&paragraph(w, auto, None, p.level, &p.props, &end, &runs, false, None, false, starts));
     }
     out
+}
+
+/// Where runs of auto-numbers begin, by the renderer's rules: a numbered paragraph whose start
+/// differs from its level's current run starts a new one; a paragraph without a number ends the
+/// runs at its level and below; numbered or not, it ends the runs below its level. Empty
+/// paragraphs change nothing.
+#[derive(Default)]
+struct Numbering {
+    run_start: [Option<u32>; 10],
+}
+
+impl Numbering {
+    fn starts_run(&mut self, p: &Paragraph, bullet: Option<&Bullet>) -> bool {
+        if p.runs.iter().all(|r| r.text.is_empty()) {
+            return false;
+        }
+        let lvl = usize::from(p.level).min(self.run_start.len() - 1);
+        let (keep, starts) = match bullet {
+            Some(Bullet::AutoNum { start_at, .. }) => {
+                let starts = self.run_start.get(lvl).copied().flatten() != Some(*start_at);
+                if let Some(slot) = self.run_start.get_mut(lvl) {
+                    *slot = Some(*start_at);
+                }
+                (lvl + 1, starts)
+            }
+            _ => (lvl, false),
+        };
+        for slot in self.run_start.iter_mut().skip(keep) {
+            *slot = None;
+        }
+        starts
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -60,6 +96,7 @@ fn paragraph(
     outline: bool,
     id: Option<String>,
     on_master: bool,
+    starts_run: bool,
 ) -> String {
     // The paragraph style carries its alignment, spacing and indents, and the text properties of
     // its end (so an empty paragraph has its height).
@@ -118,8 +155,9 @@ fn paragraph(
     let level_el = list_level(w, ctx, lv + 1, pp, &bullet, size, first);
     let lstyle = auto.list(&level_el);
     let item = if bulleted { "text:list-item" } else { "text:list-header" };
+    // Numbering continues from the paragraph before; a new run restarts at its own start.
     let start = match &bullet {
-        Bullet::AutoNum { start_at, .. } if *start_at != 1 => format!(r#" text:start-value="{start_at}""#),
+        Bullet::AutoNum { start_at, .. } if starts_run => format!(r#" text:start-value="{start_at}""#),
         _ => String::new(),
     };
     let mut open = format!(r#"<text:list text:style-name="{lstyle}" text:continue-numbering="true">"#);

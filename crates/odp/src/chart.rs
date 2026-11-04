@@ -48,11 +48,11 @@ impl Grid {
                 let n = repeat(c, "table:number-columns-repeated").min(budget.saturating_sub(cells.len()));
                 cells.extend(std::iter::repeat_n((text, num), n));
             }
-            let n = repeat(r, "table:number-rows-repeated").min(budget / cells.len().max(1));
-            for _ in 0..n {
-                budget -= cells.len();
-                g.rows.push(cells.clone());
-            }
+            // Every row costs at least one cell, so empty repeated rows run the budget down too.
+            let cost = cells.len().max(1);
+            let n = repeat(r, "table:number-rows-repeated").min(budget / cost);
+            budget -= n * cost;
+            g.rows.extend(std::iter::repeat_n(cells.clone(), n));
             g.width = g.width.max(cells.len());
             if budget == 0 {
                 break;
