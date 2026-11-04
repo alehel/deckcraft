@@ -304,15 +304,8 @@ pub fn hyperlink(href: &str) -> Option<Hyperlink> {
     if href.is_empty() {
         return None;
     }
-    let action = if let Some(name) = href.strip_prefix('#') {
-        // Resolved to a slide id by the reader once every page is known.
-        Action::Url { url: format!("#{name}") }
-    } else if deckcraft_model::text::safe_url(href) {
-        Action::Url { url: href.to_string() }
-    } else {
-        return None;
-    };
-    Some(link(action))
+    // A `#page` link is resolved to a slide by the reader once every page is known.
+    (href.starts_with('#') || deckcraft_model::text::safe_url(href)).then(|| link(Action::Url { url: href.to_string() }))
 }
 
 /// A plain link: an action, nothing else (no tooltip, sound or highlight).
@@ -340,23 +333,12 @@ pub fn complete(p: &mut ParaProps) {
 
 /// Our alignment of an `fo:text-align` value.
 pub fn align_of(v: &str) -> Option<Align> {
-    match v {
-        "start" | "left" => Some(Align::Left),
-        "end" | "right" => Some(Align::Right),
-        "center" => Some(Align::Center),
-        "justify" => Some(Align::Justify),
-        _ => None,
-    }
+    crate::vocab::read(crate::vocab::ALIGNS, v)
 }
 
-/// The `fo:text-align` value of our alignment (ODF has one justification).
+/// The `fo:text-align` value of our alignment.
 pub fn odf_align(a: Align) -> &'static str {
-    match a {
-        Align::Left => "start",
-        Align::Center => "center",
-        Align::Right => "end",
-        Align::Justify | Align::JustLow | Align::Distributed | Align::ThaiDistributed => "justify",
-    }
+    crate::vocab::write(crate::vocab::ALIGNS, &a).unwrap_or("start")
 }
 
 /// Paragraph properties from merged `style:paragraph-properties`.
@@ -508,26 +490,9 @@ pub fn run_props(store: &Store, t: &Props, auto: Rgba) -> RunProps {
         ..Default::default()
     };
     if let Some(u) = g("style:text-underline-style") {
-        rp.underline = Some(if u == "none" {
-            "none".into()
-        } else {
-            let double = g("style:text-underline-type") == Some("double");
-            let heavy = g("style:text-underline-width") == Some("bold");
-            match (u, double, heavy) {
-                (_, true, _) => "dbl",
-                ("dotted", _, true) => "dottedHeavy",
-                ("dotted", _, _) => "dotted",
-                ("dash", _, true) => "dashHeavy",
-                ("dash", _, _) => "dash",
-                ("long-dash", _, _) => "dashLong",
-                ("dot-dash", _, _) => "dotDash",
-                ("dot-dot-dash", _, _) => "dotDotDash",
-                ("wave", _, _) => "wavy",
-                (_, _, true) => "heavy",
-                _ => "sng",
-            }
-            .into()
-        });
+        let ty = g("style:text-underline-type").unwrap_or("single");
+        let width = if g("style:text-underline-width") == Some("bold") { "bold" } else { "auto" };
+        rp.underline = Some(crate::vocab::underline_of(u, ty, width).into());
         if let Some(c) = g("style:text-underline-color").and_then(units::color) {
             rp.underline_color = Some(ColorRef::rgb(c));
         }

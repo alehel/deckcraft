@@ -524,8 +524,8 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
     // The page style: background, transition, visibility, footers.
     let mut pp = String::new();
     if s.background.is_some() {
-        let (fill, ph) = resolve::background(&ctx, Some(s));
-        pp.push_str(&shapes::fill_attrs(w, &ctx, &fill, ph));
+        let (fill, ph) = &pg.background;
+        pp.push_str(&shapes::fill_attrs(w, &ctx, fill, *ph));
         pp.push_str(r#" draw:background-size="border""#);
     }
     if s.hidden {

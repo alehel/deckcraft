@@ -56,9 +56,9 @@ pub fn transform(s: &str) -> Option<Affine> {
     any.then_some(m)
 }
 
-/// Box (x, y, w, h), rotation clockwise in degrees and a vertical flip, for a shape of size
-/// `w`×`h` placed by `m` (a mirrored transform is a rotation plus a flip).
-pub fn placed_box(m: Affine, w: f64, h: f64) -> (f64, f64, f64, f64, f64, bool) {
+/// The box of a shape of size `w`×`h` placed by `m`: rotation clockwise in degrees, and a
+/// mirrored transform as a rotation plus a vertical flip.
+pub fn placed_box(m: Affine, w: f64, h: f64) -> deckcraft_model::Xfrm {
     let c = m * Point::new(w / 2.0, h / 2.0);
     let [a, b, c2, d, _, _] = m.as_coeffs();
     let sx = a.hypot(b);
@@ -68,7 +68,7 @@ pub fn placed_box(m: Affine, w: f64, h: f64) -> (f64, f64, f64, f64, f64, bool) 
     let rot = b.atan2(a).to_degrees();
     let rot = if rot.is_finite() { rot.rem_euclid(360.0) } else { 0.0 };
     let rot = if (rot - 360.0).abs() < 1e-9 { 0.0 } else { rot };
-    (c.x - w2 / 2.0, c.y - h2 / 2.0, w2, h2, rot, det < 0.0)
+    deckcraft_model::Xfrm { x: c.x - w2 / 2.0, y: c.y - h2 / 2.0, w: w2, h: h2, rot, flip_h: false, flip_v: det < 0.0 }
 }
 
 /// The shape's geometry (preset or custom) at its size, without the renderer.
@@ -898,7 +898,7 @@ mod tests {
     #[test]
     fn transform_rotates_counter_clockwise_then_translates() {
         let m = transform("rotate (0.523598775598299) translate (19.585cm 2.451cm)").unwrap();
-        let (x, y, w, h, rot, _) = placed_box(m, units::length("5cm").unwrap(), units::length("3cm").unwrap());
+        let deckcraft_model::Xfrm { x, y, w, h, rot, .. } = placed_box(m, units::length("5cm").unwrap(), units::length("3cm").unwrap());
         // 30° counter-clockwise is 330° clockwise; the centre lands at about (22.5cm, 2.5cm).
         assert!((rot - 330.0).abs() < 0.01, "{rot}");
         assert!(((x + w / 2.0) - units::length("22.5cm").unwrap()).abs() < 1.0);

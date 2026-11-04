@@ -318,8 +318,8 @@ fn position(x: &Xfrm) -> String {
 /// rotation adds the group's, and a mirroring group flips it.
 fn place_in(m: Affine, child: Xfrm) -> Xfrm {
     let unflipped = Xfrm { flip_h: false, flip_v: false, ..child };
-    let (x, y, w, h, rot, mirrored) = crate::geometry::placed_box(m * unflipped.affine(), child.w, child.h);
-    Xfrm { x, y, w, h, rot, flip_h: child.flip_h, flip_v: child.flip_v ^ mirrored }
+    let placed = crate::geometry::placed_box(m * unflipped.affine(), child.w, child.h);
+    Xfrm { flip_h: child.flip_h, flip_v: child.flip_v ^ placed.flip_v, ..placed }
 }
 
 /// `draw:enhanced-geometry` drawing the shape's outline in a view box of its size (1/100 mm).
@@ -855,8 +855,8 @@ pub fn master_page(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str, layou
     if let Some(l) = layout {
         pg.refer(w, &l.shapes, &[]);
     }
-    let (bg, ph) = resolve::background(ctx, None);
-    let bgx = fill_attrs(w, ctx, &bg, ph);
+    let (bg, ph) = &pg.background;
+    let bgx = fill_attrs(w, ctx, bg, *ph);
     let dp = auto.style("drawing-page", "dp", None, &format!(r#"<style:drawing-page-properties{bgx} draw:background-size="border"/>"#));
     let mut shapes_xml = String::new();
     let show_master = layout.is_none_or(|l| l.show_master_shapes);

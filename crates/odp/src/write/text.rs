@@ -424,18 +424,7 @@ pub fn text_attrs(w: &mut Writer, ctx: Option<&Ctx>, r: &RunProps) -> String {
         let _ = write!(a, r#" fo:font-style="{v}" style:font-style-asian="{v}" style:font-style-complex="{v}""#);
     }
     if let Some(u) = r.underline.as_deref() {
-        let (style, ty, width) = match u {
-            "none" => ("none", "single", "auto"),
-            "dbl" => ("solid", "double", "auto"),
-            "heavy" => ("solid", "single", "bold"),
-            "dotted" | "dottedHeavy" => ("dotted", "single", if u.ends_with("Heavy") { "bold" } else { "auto" }),
-            "dash" | "dashHeavy" => ("dash", "single", if u.ends_with("Heavy") { "bold" } else { "auto" }),
-            "dashLong" | "dashLongHeavy" => ("long-dash", "single", "auto"),
-            "dotDash" | "dotDashHeavy" => ("dot-dash", "single", "auto"),
-            "dotDotDash" | "dotDotDashHeavy" => ("dot-dot-dash", "single", "auto"),
-            "wavy" | "wavyHeavy" | "wavyDbl" => ("wave", if u == "wavyDbl" { "double" } else { "single" }, "auto"),
-            _ => ("solid", "single", "auto"),
-        };
+        let (style, ty, width) = crate::vocab::odf_underline(u);
         let _ = write!(a, r#" style:text-underline-style="{style}""#);
         if style != "none" {
             let color = match (&r.underline_color, ctx) {

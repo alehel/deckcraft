@@ -3,7 +3,7 @@
 //! with ours.
 
 use deckcraft_model::style::{LineCap, LineJoin};
-use deckcraft_model::text::{Anchor, TextDir};
+use deckcraft_model::text::{Align, Anchor, TextDir};
 
 pub const LINE_JOINS: &[(LineJoin, &str)] = &[(LineJoin::Miter, "miter"), (LineJoin::Bevel, "bevel"), (LineJoin::Round, "round")];
 
@@ -21,6 +21,60 @@ pub const WRITING_MODES: &[(TextDir, &str)] = &[
     (TextDir::MongolianVertical, "tb-rl"),
     (TextDir::Vertical270, "tb-lr"),
 ];
+
+/// `fo:text-align` (`left`/`right` are older names of `start`/`end`; ODF has one justification).
+pub const ALIGNS: &[(Align, &str)] = &[
+    (Align::Left, "start"),
+    (Align::Left, "left"),
+    (Align::Right, "end"),
+    (Align::Right, "right"),
+    (Align::Center, "center"),
+    (Align::Justify, "justify"),
+    (Align::JustLow, "justify"),
+    (Align::Distributed, "justify"),
+    (Align::ThaiDistributed, "justify"),
+];
+
+/// Our underline and `style:text-underline-style`, `-type` and `-width`.
+pub const UNDERLINES: &[(&str, &str, &str, &str)] = &[
+    ("none", "none", "single", "auto"),
+    ("sng", "solid", "single", "auto"),
+    ("dbl", "solid", "double", "auto"),
+    ("heavy", "solid", "single", "bold"),
+    ("dotted", "dotted", "single", "auto"),
+    ("dottedHeavy", "dotted", "single", "bold"),
+    ("dash", "dash", "single", "auto"),
+    ("dashHeavy", "dash", "single", "bold"),
+    ("dashLong", "long-dash", "single", "auto"),
+    ("dashLongHeavy", "long-dash", "single", "bold"),
+    ("dotDash", "dot-dash", "single", "auto"),
+    ("dotDashHeavy", "dot-dash", "single", "bold"),
+    ("dotDotDash", "dot-dot-dash", "single", "auto"),
+    ("dotDotDashHeavy", "dot-dot-dash", "single", "bold"),
+    ("wavy", "wave", "single", "auto"),
+    ("wavyHeavy", "wave", "single", "bold"),
+    ("wavyDbl", "wave", "double", "auto"),
+];
+
+/// Our underline for a file's style, type and width: the exact row, else one of the same style
+/// and type, else of the style, else a single line.
+pub fn underline_of(style: &str, ty: &str, width: &str) -> &'static str {
+    let rows = || UNDERLINES.iter();
+    rows()
+        .find(|u| (u.1, u.2, u.3) == (style, ty, width))
+        .or_else(|| rows().find(|u| (u.1, u.2) == (style, ty)))
+        .or_else(|| rows().find(|u| u.1 == style))
+        .map_or("sng", |u| u.0)
+}
+
+/// A file's underline style, type and width for ours.
+pub fn odf_underline(ours: &str) -> (&'static str, &'static str, &'static str) {
+    let u = UNDERLINES.iter().find(|u| u.0 == ours).or(UNDERLINES.get(1));
+    u.map_or(("solid", "single", "auto"), |u| (u.1, u.2, u.3))
+}
+
+/// Our chart legend position and `chart:legend-position`.
+pub const LEGEND: &[(&str, &str)] = &[("r", "end"), ("l", "start"), ("t", "top"), ("b", "bottom"), ("tr", "top-end")];
 
 /// Our tab stop alignment and `style:type`.
 pub const TAB_TYPES: &[(&str, &str)] = &[("l", "left"), ("r", "right"), ("ctr", "center"), ("dec", "char")];
@@ -96,6 +150,12 @@ mod tests {
         round_trips(ANCHORS, &[Anchor::Distributed]);
         round_trips(WRITING_MODES, &[TextDir::Vertical, TextDir::MongolianVertical]);
         round_trips(TAB_TYPES, &[]);
+        round_trips(ALIGNS, &[Align::JustLow, Align::Distributed, Align::ThaiDistributed]);
+        round_trips(LEGEND, &[]);
+        for (ours, ..) in UNDERLINES {
+            let (s, t, w) = odf_underline(ours);
+            assert_eq!(underline_of(s, t, w), *ours);
+        }
         for (ext, mime) in MEDIA_TYPES {
             assert_eq!(mime_for(&format!("a.{ext}")), *mime);
             assert_eq!(mime_for(&format!("a.{}", ext_for(mime))), *mime);

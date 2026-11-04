@@ -311,11 +311,9 @@ impl Reader<'_> {
             let kind = class.and_then(ph_kind);
             if let Some(kind) = kind {
                 // A master placeholder: move the default one to where this master has it.
-                if let Some(x) = self.xfrm(e)
-                    && let Some(target) = master
-                        .shapes
-                        .iter_mut()
-                        .find(|s| s.ph_type() == Some(kind) || (kind == PhType::SubTitle && s.ph_type() == Some(PhType::Body)))
+                let x = shape_xfrm(e);
+                if let Some(target) =
+                    master.shapes.iter_mut().find(|s| s.ph_type() == Some(kind) || (kind == PhType::SubTitle && s.ph_type() == Some(PhType::Body)))
                 {
                     target.xfrm = Some(x);
                     if kind.is_footer_kind()
@@ -380,17 +378,19 @@ impl Reader<'_> {
         let page_style = attr(page, "draw:style-name").map(|n| self.store.resolve(Scope::Content, "drawing-page", Some(n))).unwrap_or_default();
         let pp = &page_style.page;
         let master_bg = self.p.masters.get(mi).and_then(|m| m.background.as_ref()).and_then(background_rgb);
-        let page_bg = self.background(pp);
+        // The page's own background (white when it hides the master's), and the colour shapes'
+        // automatic text is judged against.
+        let page_bg = if pp.get("presentation:background-visible").map(String::as_str) == Some("false") {
+            Some(Background::Fill { fill: Fill::solid(ColorRef::rgb(Rgba::WHITE)) })
+        } else {
+            self.background(pp)
+        };
         let bg = page_bg.as_ref().and_then(background_rgb).or(master_bg).unwrap_or(Rgba::WHITE);
         let title_slide = page.elements().any(|e| attr(e, "presentation:class") == Some("subtitle"));
         let ctx = Ctx { scope: Scope::Content, master: master_name, bg, title_slide };
-        let mut slide = Slide { id, name: attr(page, "draw:name").unwrap_or("").to_string(), ..Default::default() };
+        let mut slide = Slide { id, name: attr(page, "draw:name").unwrap_or("").to_string(), background: page_bg, ..Default::default() };
         if let Some(n) = attr(page, "draw:name") {
             self.page_names.entry(n.to_string()).or_insert(id);
-        }
-        slide.background = page_bg;
-        if pp.get("presentation:background-visible").map(String::as_str) == Some("false") {
-            slide.background = Some(Background::Fill { fill: Fill::solid(ColorRef::rgb(Rgba::WHITE)) });
         }
         if pp.get("presentation:background-objects-visible").map(String::as_str) == Some("false") {
             slide.show_master_shapes = false;
@@ -529,7 +529,7 @@ impl Reader<'_> {
 
     /// `#page-name` links become slide links.
     fn resolve_links(&mut self) {
-        let names = self.page_names.clone();
+        let names = std::mem::take(&mut self.page_names);
         let fix = |l: &mut Option<deckcraft_model::text::Hyperlink>| {
             let Some(h) = l else { return };
             if let Action::Url { url } = &h.action
@@ -594,17 +594,6 @@ impl Reader<'_> {
     // -----------------------------------------------------------------------------------------
     // Shapes
 
-    fn xfrm(&self, e: &El) -> Option<Xfrm> {
-        let len = |k: &str| attr(e, k).and_then(units::length);
-        let w = len("svg:width").unwrap_or(0.0).max(0.0);
-        let h = len("svg:height").unwrap_or(0.0).max(0.0);
-        if let Some(m) = attr(e, "draw:transform").and_then(geometry::transform) {
-            let (x, y, w, h, rot, flip) = geometry::placed_box(m, w, h);
-            return Some(Xfrm { x, y, w, h, rot, flip_h: false, flip_v: flip });
-        }
-        Some(Xfrm::new(len("svg:x").unwrap_or(0.0), len("svg:y").unwrap_or(0.0), w, h))
-    }
-
     /// The resolved style of a shape, and whether it is a presentation style.
     fn shape_style(&self, e: &El, ctx: &Ctx) -> (Style, bool) {
         match attr(e, "presentation:style-name") {
@@ -625,7 +614,7 @@ impl Reader<'_> {
         let mut s = Shape {
             id: self.id(),
             name: attr(e, "draw:name").unwrap_or("").to_string(),
-            xfrm: self.xfrm(e),
+            xfrm: Some(shape_xfrm(e)),
             descr: kid(e, "svg:desc").map(|d| d.text()).unwrap_or_default(),
             title: kid(e, "svg:title").map(|d| d.text()).unwrap_or_default(),
             decorative: g.get("loext:decorative").map(String::as_str) == Some("true"),
@@ -754,7 +743,8 @@ impl Reader<'_> {
                 self.targets.insert(id, (s.id, Some(i as u32)));
             }
         }
-        // Empty text bodies on non-placeholders aren't kept.
+        // Empty text bodies are dropped from pictures, tables and the like; an autoshape keeps
+        // its (empty) body to type into, as a placeholder does.
         if s.ph.is_none() && s.text.as_ref().is_some_and(|t| t.paragraphs.iter().all(Paragraph::is_empty)) && !matches!(s.kind, ShapeKind::Shape) {
             s.text = None;
         }
@@ -959,10 +949,6 @@ impl Reader<'_> {
     /// The image of a `draw:frame` (the first `draw:image` we can read), as media.
     fn frame_image(&mut self, frame: &El) -> Option<MediaId> {
         let mut images: Vec<&El> = kids(frame, "draw:image").collect();
-        // An object's replacement image.
-        if images.is_empty() {
-            return None;
-        }
         // Prefer raster images the renderer reads directly over SVG and metafiles.
         images.sort_by_key(|i| {
             let h = attr(i, "xlink:href").unwrap_or("").to_ascii_lowercase();
@@ -1000,7 +986,7 @@ impl Reader<'_> {
     }
 
     fn table(&mut self, t: &El, ctx: &Ctx, x: Xfrm) -> Table {
-        let mut table = Table { first_row: false, band_row: false, style: String::new(), ..Default::default() };
+        let mut table = Table { style: String::new(), ..Default::default() };
         let flag = |k: &str| attr(t, k) == Some("true");
         table.first_row = flag("table:use-first-row-styles");
         table.last_row = flag("table:use-last-row-styles");
@@ -1118,11 +1104,10 @@ impl Reader<'_> {
         }
         // Unset, a cell is filled (the built-in default), as the slide shows it.
         cell.fill = Some(self.fill(&g));
-        let border = |k: &str| st.cell.get(k).or_else(|| st.cell.get("fo:border")).and_then(|b| border_line(b));
-        // An unset border is none (not the table style's).
-        // The model's order: left, right, top, bottom.
-        cell.borders = [border("fo:border-left"), border("fo:border-right"), border("fo:border-top"), border("fo:border-bottom")]
-            .map(|b| b.or_else(|| Some(Line::none())));
+        // An unset border is none (not the table style's). The model's order: left, right, top,
+        // bottom.
+        let border = |k: &str| Some(st.cell.get(k).or_else(|| st.cell.get("fo:border")).map_or_else(Line::none, |b| border_line(b)));
+        cell.borders = [border("fo:border-left"), border("fo:border-right"), border("fo:border-top"), border("fo:border-bottom")];
         let pad = |k: &str| st.cell.get(k).or_else(|| st.cell.get("fo:padding")).and_then(|v| units::length(v));
         if let (Some(l), Some(t), Some(r), Some(b)) =
             (pad("fo:padding-left"), pad("fo:padding-top"), pad("fo:padding-right"), pad("fo:padding-bottom"))
@@ -1166,7 +1151,8 @@ impl Reader<'_> {
 
     fn fill(&mut self, g: &Props) -> Fill {
         // An opacity gradient wins over a flat opacity.
-        let og = g.get("draw:opacity-name").and_then(|n| self.store.opacities.get(n)).cloned();
+        let store = std::rc::Rc::clone(&self.store);
+        let og = g.get("draw:opacity-name").and_then(|n| store.opacities.get(n));
         let alpha = match &og {
             Some(og) => {
                 let a = attr(og, "draw:start").and_then(units::percent).unwrap_or(1.0);
@@ -1222,7 +1208,7 @@ impl Reader<'_> {
                 }
             }
             "bitmap" => {
-                let media = g.get("draw:fill-image-name").and_then(|n| self.store.fill_images.get(n).cloned()).and_then(|img| self.image_media(&img));
+                let media = g.get("draw:fill-image-name").and_then(|n| store.fill_images.get(n)).and_then(|img| self.image_media(img));
                 match media {
                     Some(m) => {
                         let repeat = g.get("style:repeat").map(String::as_str).unwrap_or("repeat");
@@ -1261,7 +1247,7 @@ impl Reader<'_> {
         let end = |name: Option<&String>, w: Option<&String>| -> Option<LineEnd> {
             let n = name?;
             let m = self.store.markers.get(n);
-            let kind = marker_kind(n, m)?;
+            let kind = marker_kind(n, m);
             let mw = w.and_then(|v| units::length(v)).unwrap_or(0.3 * 72.0 / 2.54);
             let ratio = mw / width.max(0.75);
             let size = if ratio <= 2.5 {
@@ -1399,7 +1385,6 @@ fn line_xfrm(e: &El) -> Xfrm {
 /// the frame.
 fn fit_table(table: &mut Table, x: Xfrm) {
     let ncols = table.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0).max(table.cols.len()).max(1);
-    // Columns without a width share what's left of the frame.
     table.cols.resize(ncols, 0.0);
     let known: f64 = table.cols.iter().sum();
     let unknown = table.cols.iter().filter(|w| **w <= 0.0).count();
@@ -1432,9 +1417,7 @@ fn fit_table(table: &mut Table, x: Xfrm) {
 /// Spans: each anchor cell spans no further than the table, and the cells it covers are merged
 /// into it.
 fn merge_spans(table: &mut Table) {
-    let ncols = table.cols.len();
-    // Spans: the anchor cell spans (no further than the table), covered cells are merged into it.
-    let nrows = table.rows.len();
+    let (ncols, nrows) = (table.cols.len(), table.rows.len());
     for (ri, r) in table.rows.iter_mut().enumerate() {
         for (ci, c) in r.cells.iter_mut().enumerate() {
             c.grid_span = c.grid_span.min((ncols - ci) as u32).max(1);
@@ -1745,10 +1728,21 @@ fn dash(d: &El, width: f64) -> Dash {
 }
 
 /// A marker's DrawingML end type: by name, else by the shape of its path.
-fn marker_kind(name: &str, m: Option<&El>) -> Option<&'static str> {
+/// A shape's box: `svg:x/y/width/height`, placed by its `draw:transform` when it has one.
+fn shape_xfrm(e: &El) -> Xfrm {
+    let len = |k: &str| attr(e, k).and_then(units::length);
+    let w = len("svg:width").unwrap_or(0.0).max(0.0);
+    let h = len("svg:height").unwrap_or(0.0).max(0.0);
+    match attr(e, "draw:transform").and_then(geometry::transform) {
+        Some(m) => geometry::placed_box(m, w, h),
+        None => Xfrm::new(len("svg:x").unwrap_or(0.0), len("svg:y").unwrap_or(0.0), w, h),
+    }
+}
+
+fn marker_kind(name: &str, m: Option<&El>) -> &'static str {
     let n = name.to_ascii_lowercase();
     let d = m.and_then(|m| attr(m, "svg:d")).unwrap_or("");
-    Some(if n.contains("circle") || n.contains("oval") || d.contains('c') || d.contains('C') || d.contains('a') || d.contains('A') {
+    if n.contains("circle") || n.contains("oval") || d.contains('c') || d.contains('C') || d.contains('a') || d.contains('A') {
         "oval"
     } else if n.contains("square") || n.contains("diamond") {
         "diamond"
@@ -1758,13 +1752,13 @@ fn marker_kind(name: &str, m: Option<&El>) -> Option<&'static str> {
         "stealth"
     } else {
         "triangle"
-    })
+    }
 }
 
-fn border_line(b: &str) -> Option<Line> {
-    // `0.03cm solid #000000`
+/// A border (`0.03cm solid #000000`, `none`).
+fn border_line(b: &str) -> Line {
     if b.trim() == "none" || b.trim().is_empty() {
-        return Some(Line::none());
+        return Line::none();
     }
     let mut width = None;
     let mut color = Rgba::BLACK;
@@ -1784,13 +1778,13 @@ fn border_line(b: &str) -> Option<Line> {
         }
     }
     if style == "none" {
-        return Some(Line::none());
+        return Line::none();
     }
     let mut l = Line::solid(ColorRef::rgb(color), width.unwrap_or(0.75));
     if style != "solid" {
         l.dash = Some(Dash::Preset { name: style.into() });
     }
-    Some(l)
+    l
 }
 
 fn picture_adjust(g: &Props) -> PictureAdjust {
@@ -1925,8 +1919,8 @@ mod tests {
 
     #[test]
     fn borders_parse() {
-        let l = border_line("0.03cm solid #ff0000").unwrap();
+        let l = border_line("0.03cm solid #ff0000");
         assert!((l.width.unwrap() - 0.85).abs() < 0.01);
-        assert_eq!(border_line("none"), Some(Line::none()));
+        assert_eq!(border_line("none"), Line::none());
     }
 }

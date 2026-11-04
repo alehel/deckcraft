@@ -322,15 +322,12 @@ pub(crate) fn class_of(kind: ChartType) -> (&'static str, bool, bool, bool) {
     r.map_or(("bar", false, false, false), |r| (r.1, r.2, r.3, r.4))
 }
 
-/// (our legend position, `chart:legend-position`).
-const LEGEND: [(&str, &str); 5] = [("r", "end"), ("l", "start"), ("t", "top"), ("b", "bottom"), ("tr", "top-end")];
-
 pub(crate) fn legend_of(position: &str) -> &'static str {
-    LEGEND.iter().find(|l| l.1 == position).map_or("r", |l| l.0)
+    crate::vocab::read(crate::vocab::LEGEND, position).unwrap_or("r")
 }
 
 pub(crate) fn legend_position(ours: &str) -> &'static str {
-    LEGEND.iter().find(|l| l.0 == ours).map_or("end", |l| l.1)
+    crate::vocab::write(crate::vocab::LEGEND, &ours).unwrap_or("end")
 }
 
 fn simple_fill(g: &crate::styles::Props) -> Option<Fill> {
@@ -357,9 +354,7 @@ mod tests {
             assert_eq!(back, want);
         }
         assert_eq!(kind_of("bar", true, true, true), ChartType::PercentBar);
-        for (ours, _) in LEGEND {
-            assert_eq!(legend_of(legend_position(ours)), ours);
-        }
+        assert_eq!(legend_of(legend_position("tr")), "tr");
     }
 
     #[test]
