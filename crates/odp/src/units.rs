@@ -4,6 +4,9 @@ use deckcraft_color::Rgba;
 
 /// Hundredths of a millimetre (ODF's drawing unit) per point.
 pub const HMM_PER_PT: f64 = 2540.0 / 72.0;
+/// The largest magnitude a number is written with.
+const MAX_WRITTEN: f64 = 1e9;
+
 /// Points per centimetre.
 pub const PT_PER_CM: f64 = 72.0 / 2.54;
 
@@ -127,6 +130,9 @@ pub fn pct(fraction: f64) -> String {
 }
 
 pub fn trim(v: f64, places: usize) -> String {
+    // Saturated, so no number written is longer than a few characters (a huge coordinate in a
+    // hostile file would otherwise be written out to hundreds of digits).
+    let v = if v.is_finite() { v.clamp(-MAX_WRITTEN, MAX_WRITTEN) } else { 0.0 };
     let s = format!("{v:.places$}");
     let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s };
     if s == "-0" { "0".into() } else { s }

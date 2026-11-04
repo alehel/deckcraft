@@ -101,6 +101,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         fill_images: HashMap::new(),
         charts: HashMap::new(),
         formula_work: geometry::DOCUMENT_WORK,
+        cells_left: table::MAX_DOCUMENT_CELLS,
         package_media: parts,
         targets: HashMap::new(),
         glue: vec![],
@@ -196,6 +197,8 @@ struct Reader<'a> {
     charts: HashMap<String, Option<deckcraft_model::chart::Chart>>,
     /// Shape-formula steps the document has left ([`geometry::DOCUMENT_WORK`] in all).
     formula_work: usize,
+    /// Table cells the document has left ([`table::MAX_DOCUMENT_CELLS`] in all).
+    cells_left: usize,
     package_media: PartMedia,
     /// Element ids on the page being read (shapes and paragraphs), for its animations.
     targets: crate::anim::Targets,

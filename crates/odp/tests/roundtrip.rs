@@ -1405,3 +1405,32 @@ fn round_four_fixes_hold() {
     assert_eq!((back.show.show_type.as_str(), back.show.use_timings, back.show.without_animation), ("browsed", false, true));
     assert_eq!((back.props.revision, back.props.category.as_str(), back.props.company.as_str()), (7, "Science", "Aurora Ltd"));
 }
+
+/// Fuzzing, round 4: many big tables share one document budget of cells, and huge coordinates
+/// are written short enough to read back.
+#[test]
+fn tables_share_a_budget_and_huge_coordinates_round_trip() {
+    let table = r#"<draw:frame svg:width="10cm" svg:height="5cm"><table:table><table:table-row table:number-rows-repeated="1000"><table:table-cell table:number-columns-repeated="1000"/></table:table-row></table:table></draw:frame>"#;
+    let doc = |body: String| {
+        format!(
+            r#"<office:document {NS} office:mimetype="application/vnd.oasis.opendocument.presentation"><office:body><office:presentation><draw:page>{body}</draw:page></office:presentation></office:body></office:document>"#
+        )
+    };
+    let p = deckcraft_odp::import(doc(table.repeat(10)).as_bytes()).unwrap();
+    let mut cells = 0usize;
+    deckcraft_model::walk(&p.slides[0].shapes, &mut |sh, _| {
+        if let ShapeKind::Table(t) = &sh.kind {
+            cells += t.rows.iter().map(|r| r.cells.len()).sum::<usize>();
+        }
+    });
+    assert!(cells <= 262_144 + 10_000, "{cells}");
+    // Arcs with radii of 1e308.
+    let arcs = format!(
+        r#"<draw:custom-shape svg:width="1cm" svg:height="1cm"><draw:enhanced-geometry svg:viewBox="0 0 10 10" draw:enhanced-path="{}N"/></draw:custom-shape>"#,
+        "U 0 0 1e308 1e308 0 360 ".repeat(2000)
+    );
+    let p = deckcraft_odp::import(doc(arcs).as_bytes()).unwrap();
+    let bytes = deckcraft_odp::export(&p).unwrap();
+    assert!(part(&bytes, "content.xml").len() < 20 << 20);
+    deckcraft_odp::import(&bytes).unwrap();
+}

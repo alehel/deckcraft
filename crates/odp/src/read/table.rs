@@ -15,6 +15,8 @@ use crate::units;
 const MAX_TABLE_SIDE: usize = 1000;
 /// Most cells read into one table.
 const MAX_TABLE_CELLS: usize = 65_536;
+/// Most cells all of a document's tables hold together.
+pub(super) const MAX_DOCUMENT_CELLS: usize = 262_144;
 /// Most text (bytes) a table's repeated cells and rows may copy.
 const MAX_TABLE_TEXT: usize = 4 << 20;
 
@@ -91,7 +93,9 @@ impl Reader<'_> {
                 }
             }
             // Repeated rows cost the full width, and their text the budget.
-            let room = MAX_TABLE_CELLS.saturating_sub(table.rows.len() * width).checked_div(width).unwrap_or(0);
+            // A table's own budget, and what the document has left.
+            let budget = MAX_TABLE_CELLS.min(self.cells_left.saturating_add(table.rows.len() * width));
+            let room = budget.saturating_sub(table.rows.len() * width).checked_div(width).unwrap_or(0);
             let row_text: usize = cells.iter().map(|c| c.text.text().len()).sum();
             let text_room = text_budget.checked_div(row_text).map_or(usize::MAX, |r| r + 1);
             let n = repeat(row, "table:number-rows-repeated").min(MAX_TABLE_SIDE - table.rows.len()).min(room).min(text_room);
@@ -102,6 +106,8 @@ impl Reader<'_> {
             table.rows.extend(std::iter::repeat_n(Row { height: h, cells }, n));
         }
         fit_table(&mut table, x);
+        let read: usize = table.rows.iter().map(|r| r.cells.len()).sum();
+        self.cells_left = self.cells_left.saturating_sub(read);
         merge_spans(&mut table);
         table
     }
