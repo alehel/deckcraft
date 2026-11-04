@@ -130,8 +130,7 @@ fn paragraph(
                 } else if f.starts_with("datetime") {
                     // Times (`datetime10` on) are time fields.
                     let style = super::date_style(&f);
-                    let el =
-                        if ["datetime10", "datetime11", "datetime12", "datetime13"].contains(&style.as_str()) { "text:time" } else { "text:date" };
+                    let el = if crate::vocab::date_format(&style).is_some_and(crate::vocab::is_time) { "text:time" } else { "text:date" };
                     format!(r#"<{el} style:data-style-name="{style}">{}</{el}>"#, esc(&r.text))
                 } else if f == "slidecount" {
                     format!("<text:page-count>{}</text:page-count>", esc(&r.text))
@@ -241,31 +240,10 @@ fn list_level(w: &mut Writer, ctx: &Ctx, level: usize, pp: &ParaProps, bullet: &
     }
 }
 
-/// A DrawingML auto-number scheme as ODF number format, prefix and suffix.
+/// A DrawingML auto-number scheme as ODF number format, prefix and suffix
+/// ([`NUM_SCHEMES`](crate::vocab::NUM_SCHEMES); others as `1.`).
 pub fn num_format(scheme: &str) -> (&'static str, &'static str, &'static str) {
-    let fmt = if scheme.starts_with("alphaLc") {
-        "a"
-    } else if scheme.starts_with("alphaUc") {
-        "A"
-    } else if scheme.starts_with("romanLc") {
-        "i"
-    } else if scheme.starts_with("romanUc") {
-        "I"
-    } else {
-        "1"
-    };
-    let (pre, suf) = if scheme.ends_with("ParenBoth") {
-        ("(", ")")
-    } else if scheme.ends_with("ParenR") {
-        ("", ")")
-    } else if scheme.ends_with("Plain") {
-        ("", "")
-    } else if scheme.ends_with("Minus") {
-        ("", "-")
-    } else {
-        ("", ".")
-    };
-    (fmt, pre, suf)
+    crate::vocab::NUM_SCHEMES.iter().find(|r| r.0 == scheme).map_or(("1", "", "."), |r| (r.1, r.2, r.3))
 }
 
 fn link_href(w: &Writer, a: &Action) -> Option<String> {
@@ -289,8 +267,8 @@ pub fn text_content(s: &str) -> String {
         if *spaces == 0 {
             return;
         }
-        // The first space of a run is literal (unless the run starts the span); the rest are
-        // `text:s`, which white-space collapsing keeps.
+        // The first space of a run is literal (unless the run starts the span or ends a line);
+        // the rest are `text:s`, which white-space collapsing keeps.
         if at_start {
             let _ = write!(out, r#"<text:s text:c="{spaces}"/>"#);
         } else {
@@ -310,7 +288,8 @@ pub fn text_content(s: &str) -> String {
                 at_start = false;
             }
             '\n' | '\u{b}' => {
-                flush(&mut out, &mut spaces, at_start);
+                // Spaces before a break would be collapsed away, as at the end.
+                flush(&mut out, &mut spaces, true);
                 out.push_str("<text:line-break/>");
                 at_start = true;
             }
@@ -546,13 +525,18 @@ mod tests {
         assert_eq!(text_content(" a"), r#"<text:s text:c="1"/>a"#);
         assert_eq!(text_content("a\tb\u{b}c "), r#"a<text:tab/>b<text:line-break/>c<text:s text:c="1"/>"#);
         assert_eq!(text_content("<&>"), "&lt;&amp;&gt;");
+        // Regression: the space before a break was literal, and dropped on reading.
+        assert_eq!(text_content("a \nb"), r#"a<text:s text:c="1"/><text:line-break/>b"#);
     }
 
     #[test]
     fn number_formats_round_trip() {
-        for s in ["arabicPeriod", "alphaLcParenBoth", "romanUcParenR", "alphaUcPlain"] {
+        for (s, ..) in crate::vocab::NUM_SCHEMES {
             let (f, pre, suf) = num_format(s);
-            assert_eq!(crate::text::num_scheme(f, pre, suf), s);
+            assert_eq!(crate::text::num_scheme(f, pre, suf), *s);
         }
+        // Regression: `arabic2Minus` (Arabic letters) and `hebrew2Minus` were written as "1-".
+        assert_eq!(num_format("arabic2Minus"), ("1", "", "."));
+        assert_eq!(num_format("hebrew2Minus"), ("1", "", "."));
     }
 }

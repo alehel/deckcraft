@@ -128,12 +128,17 @@ pub struct Store {
     /// Picture bullets: `xlink:href` → the media read from the package.
     pub image_bullets: HashMap<String, deckcraft_model::MediaId>,
     pub page_layouts: HashMap<String, Props>,
+    /// Date and time number styles (`number:date-style`, `number:time-style`), by name.
+    pub data_styles: HashMap<String, El>,
     /// Display names, for writing styles back (`Default-title` etc. are plain already).
     pub common_names: Vec<(String, String)>,
     /// Spaces the document's `text:s` elements have expanded to so far (each one asks for up to
     /// a thousand), against [`MAX_EXPANDED_SPACES`].
     pub spaces_used: std::cell::Cell<usize>,
 }
+
+/// Most date and time styles read (a deck has a few).
+const MAX_DATA_STYLES: usize = 1024;
 
 /// Most spaces a document's `text:s` elements expand to in all.
 pub const MAX_EXPANDED_SPACES: usize = 1 << 22;
@@ -248,6 +253,9 @@ impl Store {
                 }
                 "draw:opacity" => {
                     self.opacities.insert(name, el.clone());
+                }
+                "number:date-style" | "number:time-style" if self.data_styles.len() < MAX_DATA_STYLES => {
+                    self.data_styles.insert(name, el.clone());
                 }
                 "style:page-layout" => {
                     let props = kid(el, "style:page-layout-properties").map(read_props).unwrap_or_default();

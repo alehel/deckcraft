@@ -142,11 +142,20 @@ Detail in [file-format-parity.md](file-format-parity.md).
   video autoplay; clicks that run a program; percentage paragraph spacing (written in points);
   shrink-to-fit line reduction; pattern fills read back as tiled pictures; a chart's secondary
   axis and its number formats; the notes page size; white outlined text (written hollow for
-  LibreOffice) reads back unfilled. LibreOffice itself draws every text shadow grey and re-saves it as `1pt 1pt`, shows filled outlined text filled
-  without its outline (white filled text is written hollow so it shows), drops link tooltips,
-  keeps the date footer's format only as its own `D1`–style formats, and shows a one-line
+  LibreOffice) reads back unfilled; gradient-filled text reads back in its first colour; double
+  and other compound lines read back as one line; slide sections; a show range's last slide (it
+  plays to the end) and kiosk mode; kerning thresholds (kerning is on or off, read back as from
+  1 pt); numbering other than Arabic, Latin letters and Roman numbers with `.`, `)` or `()` (for
+  example circled numbers, or other scripts) is written as `1.`; a single-colour pie that
+  recolours half its slices or more reads back as a varied one (files can't tell them apart).
+  LibreOffice itself draws every text shadow grey and re-saves it as `1pt 1pt`, shows filled
+  outlined text filled without its outline (white filled text is written hollow so it shows),
+  drops link tooltips and WebM audio, shows date and time fields in its locale's order of its own
+  formats (so `datetime3`, `4` and `6` look alike, `8` and `9` show the date only, and its
+  re-save keeps the nearest of `datetime1`, `2`, `3`, `5` and `10`–`13`), shows a one-line
   distributed paragraph left-aligned, and when it re-saves a list whose numbering restarts several
-  times it keeps only the first restart's start.
+  times it writes later restarts' starts twice (on the list level and the item), so it shows one
+  of `7` as `13` (DeckCraft reads it right).
 - **Impact:** a few unusual LibreOffice decks lose an object or a detail.
 - **Estimate:** 4–8 h (SVG rendering is its own renderer item).
 

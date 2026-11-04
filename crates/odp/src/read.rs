@@ -33,6 +33,12 @@ const MAX_SHAPES: usize = 250_000;
 /// Most pages read.
 const MAX_PAGES: usize = 10_000;
 
+/// Most comment text read from one file, in bytes; and from one comment paragraph, and the
+/// paragraphs of one comment.
+const MAX_COMMENT_TEXT: usize = 16 << 20;
+const MAX_COMMENT_PARAGRAPH: usize = 1 << 16;
+const MAX_COMMENT_PARAGRAPHS: usize = 1024;
+
 pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
     let pkg = Package::open(bytes)?;
     // A flat document is one tree holding content, styles and meta: parsed once and borrowed for
@@ -102,7 +108,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         charts: HashMap::new(),
         formula_work: geometry::DOCUMENT_WORK,
         cells_left: table::MAX_DOCUMENT_CELLS,
-        plain_left: 16 << 20,
+        plain_left: MAX_COMMENT_TEXT,
         package_media: parts,
         targets: HashMap::new(),
         glue: vec![],
@@ -121,7 +127,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
     let decls = Decls::read(body);
     // The date format, from a current-date declaration in one of our date styles (named after
     // the format).
-    if let Some(n) = decls.dates.values().filter(|d| d.0).find_map(|d| d.2.as_deref().and_then(text::date_format_of)) {
+    if let Some(n) = decls.dates.values().filter(|d| d.0).find_map(|d| d.2.as_deref().and_then(|s| text::date_format_of(&r.store, s))) {
         r.p.header_footer.date_format = format!("datetime{n}");
     }
     for (i, page) in kids(body, "draw:page").take(MAX_PAGES).enumerate() {
@@ -201,7 +207,7 @@ struct Reader<'a> {
     formula_work: usize,
     /// Table cells the document has left ([`table::MAX_DOCUMENT_CELLS`] in all).
     cells_left: usize,
-    /// Comment text the document has left, in bytes.
+    /// Comment text the document has left, in bytes ([`MAX_COMMENT_TEXT`] in all).
     plain_left: usize,
     package_media: PartMedia,
     /// Element ids on the page being read (shapes and paragraphs), for its animations.
@@ -849,7 +855,8 @@ impl Reader<'_> {
     /// Audio or video (`draw:plugin`), its poster picture and play settings.
     fn media_clip(&mut self, frame: &El, pl: &El) -> Option<deckcraft_model::MediaClip> {
         let href = attr(pl, "xlink:href")?;
-        let mime = attr(pl, "draw:mime-type").map(str::to_string).unwrap_or_else(|| vocab::mime_for(href).to_string());
+        // LibreOffice's generic media type (and none) leaves it to the file's extension.
+        let mime = attr(pl, "draw:mime-type").filter(|m| *m != "application/vnd.sun.star.media").unwrap_or_else(|| vocab::mime_for(href)).to_string();
         let name = part_name(href).to_string();
         let media = match self.package_media(href, &mime) {
             Some(id) => id,
@@ -1163,9 +1170,9 @@ fn comment(e: &El, budget: &mut usize) -> deckcraft_model::Comment {
         initials,
         date: t("dc:date"),
         text: kids(e, "text:p")
-            .take(1024)
+            .take(MAX_COMMENT_PARAGRAPHS)
             .map(|p| {
-                let t = text::plain_text(p, (*budget).min(1 << 16));
+                let t = text::plain_text(p, (*budget).min(MAX_COMMENT_PARAGRAPH));
                 *budget = budget.saturating_sub(t.len() + 1);
                 t
             })

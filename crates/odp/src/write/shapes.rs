@@ -14,7 +14,7 @@ use kurbo::{Affine, BezPath, Point};
 use super::text;
 use super::{Auto, PageCtx, Writer, rad};
 use crate::dom::esc;
-use crate::units::{HMM_PER_PT, cm, hex, pct, trim};
+use crate::units::{HMM_PER_PT, cm, coord, hex, pct, trim};
 use crate::vocab;
 
 const MAX_DEPTH: usize = 64;
@@ -121,7 +121,7 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
         }
         ShapeKind::Media(m) => {
             let Some(href) = w.media_path(m.media) else { return String::new() };
-            let mime = w.p.media(m.media).map(|i| i.content_type.clone()).unwrap_or_default();
+            let mime = w.p.media(m.media).map(|i| plugin_mime(&i.content_type)).unwrap_or_default();
             let poster = m.poster.and_then(|p| w.media_path(p)).map(|p| format!("<draw:image {}/>", embed(&p))).unwrap_or_default();
             let plugin = format!(
                 r#"<draw:plugin {} draw:mime-type="{}"><draw:param draw:name="Loop" draw:value="{}"/><draw:param draw:name="Mute" draw:value="{}"/><draw:param draw:name="VolumeDB" draw:value="{}"/><draw:param draw:name="Zoom" draw:value="fit"/></draw:plugin>{poster}"#,
@@ -369,21 +369,21 @@ fn enhanced_geometry(s: &Shape, x: &Xfrm) -> String {
     } else {
         format!(
             r#" draw:text-areas="{} {} {} {}""#,
-            crate::units::coord(tr.x0 * vw / w, 0),
-            crate::units::coord(tr.y0 * vh / h, 0),
-            crate::units::coord(tr.x1 * vw / w, 0),
-            crate::units::coord(tr.y1 * vh / h, 0)
+            coord(tr.x0 * vw / w, 0),
+            coord(tr.y0 * vh / h, 0),
+            coord(tr.x1 * vw / w, 0),
+            coord(tr.y1 * vh / h, 0)
         )
     };
     let (kind, modifiers) = match &s.geom {
-        Geom::Preset { name, adj } => (format!("ooxml-{name}"), adj.iter().map(|a| crate::units::coord(*a, 3)).collect::<Vec<_>>().join(" ")),
+        Geom::Preset { name, adj } => (format!("ooxml-{name}"), adj.iter().map(|a| coord(*a, 3)).collect::<Vec<_>>().join(" ")),
         Geom::Custom { .. } => ("non-primitive".to_string(), String::new()),
     };
     let mods = if modifiers.is_empty() { String::new() } else { format!(r#" draw:modifiers="{modifiers}""#) };
     format!(
         r#"<draw:enhanced-geometry svg:viewBox="0 0 {} {}"{ta} draw:type="{}"{mods} draw:mirror-horizontal="{}" draw:mirror-vertical="{}" draw:enhanced-path="{}"/>"#,
-        crate::units::coord(vw, 0),
-        crate::units::coord(vh, 0),
+        coord(vw, 0),
+        coord(vh, 0),
         esc(&kind),
         x.flip_h,
         x.flip_v,
@@ -406,9 +406,9 @@ fn path_element(bp: &BezPath, style: &str, inner: &str) -> String {
         cm(bb.y0),
         cm(bb.width().max(0.01)),
         cm(bb.height().max(0.01)),
-        trim((bb.width() * s).max(1.0), 0),
-        trim((bb.height() * s).max(1.0), 0),
-        esc(&p.to_svg())
+        coord((bb.width() * s).max(1.0), 0),
+        coord((bb.height() * s).max(1.0), 0),
+        crate::geometry::path_d_at(&p, 0)
     )
 }
 
@@ -763,12 +763,26 @@ fn event_listener(w: &Writer, a: &Action) -> String {
     )
 }
 
+/// A clip's `draw:mime-type`: LibreOffice drops a clip of a type it doesn't know by name (WAV as
+/// `audio/wav`, AIFF, M4A, WMA), so those are WAV's older name or its generic media type, which
+/// reads back by the file's extension. (WebM audio would read back as video; LibreOffice drops
+/// it.)
+fn plugin_mime(content_type: &str) -> String {
+    match content_type {
+        "audio/wav" | "audio/wave" | "audio/vnd.wave" => "audio/x-wav",
+        "audio/aiff" | "audio/x-aiff" | "audio/x-m4a" | "audio/x-ms-wma" => "application/vnd.sun.star.media",
+        t => t,
+    }
+    .to_string()
+}
+
 // ---------------------------------------------------------------------------------------------
 // Tables
 
 fn table(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, t: &Table) -> String {
-    // Which of the table style's parts apply.
-    let mut out = String::from("<table:table");
+    // Which of the table style's parts apply. LibreOffice keeps the flags through its saves only
+    // on a table with a template (its own `default` draws as the cells' own formatting does).
+    let mut out = String::from(r#"<table:table table:template-name="default""#);
     for (k, on) in [
         ("table:use-first-row-styles", t.first_row),
         ("table:use-last-row-styles", t.last_row),

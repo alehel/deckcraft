@@ -450,47 +450,38 @@ fn join_builds(read: Vec<(Animation, Option<&str>)>) -> Vec<Animation> {
 pub fn expand_builds(animations: &[Animation], shapes: &[deckcraft_model::Shape]) -> Vec<Effect> {
     let mut out = vec![];
     for (n, a) in animations.iter().enumerate() {
-        // Expanded effects share the page's effect budget; past it, a build plays as one block.
-        let room = out.len() < MAX_EFFECTS;
-        let text =
-            deckcraft_model::find_shape(shapes, a.shape).and_then(|s| s.text.as_ref()).filter(|_| room && a.text_build == TextBuild::ByParagraph);
+        let text = deckcraft_model::find_shape(shapes, a.shape).and_then(|s| s.text.as_ref()).filter(|_| a.text_build == TextBuild::ByParagraph);
         let Some(text) = text else {
             out.push(Effect { a: a.clone(), build: None });
             continue;
         };
-        let roles = deckcraft_model::anim::paragraph_build_roles(text);
         let mut tops = 0;
-        let limit = deckcraft_model::anim::MAX_BUILD_PARAGRAPHS.min(MAX_EFFECTS - out.len());
-        // A build that doesn't fit the budget whole plays as one block (not just its first part).
-        let needed = roles
+        let effects: Vec<Effect> = deckcraft_model::anim::paragraph_build_roles(text)
             .iter()
             .enumerate()
-            .filter(|(i, r)| **r == BuildRole::Top || text.paragraphs.get(*i).is_some_and(deckcraft_model::anim::build_filled))
-            .count();
-        if needed > limit {
-            out.push(Effect { a: Animation { text_build: TextBuild::AsOne, ..a.clone() }, build: None });
-            continue;
-        }
-        for (i, role) in roles.iter().enumerate().take(limit) {
-            let start = match role {
-                BuildRole::Top => {
-                    tops += 1;
-                    match (tops, a.start) {
-                        (1, s) | (_, s @ AnimStart::OnClick) => s,
-                        _ => AnimStart::AfterPrevious,
+            .filter_map(|(i, role)| {
+                let start = match role {
+                    BuildRole::Top => {
+                        tops += 1;
+                        match (tops, a.start) {
+                            (1, s) | (_, s @ AnimStart::OnClick) => s,
+                            _ => AnimStart::AfterPrevious,
+                        }
                     }
-                }
-                BuildRole::Member(_) if text.paragraphs.get(i).is_some_and(deckcraft_model::anim::build_filled) => AnimStart::WithPrevious,
-                _ => continue,
-            };
-            let paragraph = u32::try_from(i).ok();
-            out.push(Effect { a: Animation { start, paragraph, text_build: TextBuild::AsOne, ..a.clone() }, build: Some(n) });
-        }
-        // A build of one paragraph is an effect on the whole shape.
-        let mine = out.iter().filter(|e| e.build == Some(n)).count();
-        if mine <= 1 {
-            out.retain(|e| e.build != Some(n));
+                    BuildRole::Member(_) if text.paragraphs.get(i).is_some_and(deckcraft_model::anim::build_filled) => AnimStart::WithPrevious,
+                    _ => return None,
+                };
+                let paragraph = u32::try_from(i).ok();
+                Some(Effect { a: Animation { start, paragraph, text_build: TextBuild::AsOne, ..a.clone() }, build: Some(n) })
+            })
+            .collect();
+        // A build of one paragraph is an effect on the whole shape; so is one that doesn't fit the
+        // page's effect budget whole (rather than just its first part).
+        let limit = deckcraft_model::anim::MAX_BUILD_PARAGRAPHS.min(MAX_EFFECTS.saturating_sub(out.len()));
+        if effects.len() <= 1 || effects.len() > limit {
             out.push(Effect { a: Animation { text_build: TextBuild::AsOne, ..a.clone() }, build: None });
+        } else {
+            out.extend(effects);
         }
     }
     out
@@ -876,6 +867,16 @@ mod tests {
         let out = expand_builds(&[a], std::slice::from_ref(&shape));
         assert_eq!(out.len(), 1);
         assert_eq!((out[0].a.text_build, out[0].a.paragraph, out[0].build), (TextBuild::AsOne, None, None));
+        // Regression: the budget was checked in effects but spent in paragraphs, so blank ones
+        // (no effect of their own) cut the build short.
+        let texts = ["a", "b", "", "", "c"];
+        let paragraphs = texts.iter().map(|t| Paragraph { runs: vec![Run::new(*t)], ..Default::default() }).collect();
+        let shape = deckcraft_model::Shape { text: Some(TextBody { paragraphs, ..Default::default() }), ..Default::default() };
+        let mut anims = vec![Animation::default(); MAX_EFFECTS - 4];
+        anims.push(Animation { shape: shape.id, text_build: TextBuild::ByParagraph, ..Default::default() });
+        let out = expand_builds(&anims, std::slice::from_ref(&shape));
+        let built: Vec<Option<u32>> = out.iter().filter(|e| e.build.is_some()).map(|e| e.a.paragraph).collect();
+        assert_eq!(built, [Some(0), Some(1), Some(4)]);
     }
 
     #[test]

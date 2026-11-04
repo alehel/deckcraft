@@ -1392,7 +1392,8 @@ fn round_four_fixes_hold() {
     assert!(m.kern.is_some_and(|k| k > 0.0));
     let sp = &r.iter().find(|x| x.text == "2").unwrap().props;
     assert!(sp.size.is_some_and(|z| (z - 20.0).abs() < 0.2), "{:?}", sp.size);
-    assert!(matches!(&paras[2].props.bullet, Some(Bullet::AutoNum { scheme, .. }) if scheme == "arabic2Minus"));
+    // Arabic letters with a dash: ODF has no such format, so they come back as `1.`.
+    assert!(matches!(&paras[2].props.bullet, Some(Bullet::AutoNum { scheme, .. }) if scheme == "arabicPeriod"));
     assert_eq!(paras[3].text(), "a\u{b}  lead");
     let charts: Vec<&Chart> = s.iter().filter_map(|x| if let ShapeKind::Chart(c) = &x.kind { Some(&**c) } else { None }).collect();
     assert_eq!(
@@ -1503,4 +1504,78 @@ fn round_five_fixes_hold() {
     let paras = &s.iter().find_map(|x| x.text.as_ref()).unwrap().paragraphs;
     let caps: Vec<Option<Caps>> = paras[0].runs.iter().map(|r| r.props.caps).collect();
     assert_eq!(caps, [Some(Caps::Small), Some(Caps::All)]);
+}
+
+/// Review, round 6: date styles LibreOffice shows (in content.xml, times as time styles), WAV
+/// under the type LibreOffice plays, tables that keep their banding through LibreOffice, footer
+/// white space, a space before a line break, and a single-colour pie's slices.
+#[test]
+fn round_six_fixes_hold() {
+    use deckcraft_model::chart::{Chart, ChartType, Series};
+    use deckcraft_model::text::RunKind;
+    let mut p = sample();
+    let field = |f: &str| Run { kind: RunKind::Field { field: f.into() }, ..Run::new("x") };
+    let body = TextBody {
+        paragraphs: vec![
+            Paragraph { runs: vec![field("datetime2"), field("datetime12")], ..Default::default() },
+            Paragraph { runs: vec![Run::new("a b \nc")], ..Default::default() },
+        ],
+        ..Default::default()
+    };
+    let text = Shape { xfrm: Some(Xfrm::new(20.0, 20.0, 400.0, 100.0)), text_box: true, text: Some(body), ..Default::default() };
+    let green = Fill::solid(ColorRef::rgb(Rgba::rgb(0, 150, 0)));
+    let pie = Chart {
+        kind: ChartType::Pie,
+        vary_colors: false,
+        series: vec![Series {
+            name: "P".into(),
+            values: vec![Some(1.0), Some(2.0), Some(3.0)],
+            fill: Some(green.clone()),
+            point_fills: vec![(1, Fill::solid(ColorRef::rgb(Rgba::rgb(200, 0, 0)))), (2, Fill::solid(ColorRef::rgb(Rgba::rgb(0, 0, 200))))],
+            ..Default::default()
+        }],
+        categories: vec!["a".into(), "b".into(), "c".into()],
+        ..Default::default()
+    };
+    let chart = Shape { xfrm: Some(Xfrm::new(20.0, 150.0, 200.0, 100.0)), kind: ShapeKind::Chart(Box::new(pie)), ..Default::default() };
+    let wav = p.add_media("beep.wav", "audio/wav", vec![b'R', b'I', b'F', b'F']).unwrap();
+    let clip = Shape {
+        xfrm: Some(Xfrm::new(300.0, 150.0, 50.0, 50.0)),
+        kind: ShapeKind::Media(deckcraft_model::MediaClip { media: wav, ..Default::default() }),
+        ..Default::default()
+    };
+    let mut t = Table::new(2, 2, 200.0, 60.0);
+    (t.first_row, t.band_row, t.first_col) = (false, false, true);
+    let table = Shape { xfrm: Some(Xfrm::new(20.0, 300.0, 200.0, 60.0)), kind: ShapeKind::Table(t), ..Default::default() };
+    let s = Arc::make_mut(&mut p.slides[0]);
+    let ph = |kind: PhType| Shape {
+        xfrm: Some(Xfrm::new(20.0, 400.0, 100.0, 20.0)),
+        ph: Some(deckcraft_model::Placeholder { kind, ..Default::default() }),
+        ..Default::default()
+    };
+    s.shapes = vec![text, chart, clip, table, ph(PhType::Footer), ph(PhType::Date)];
+    let hf = &mut p.header_footer;
+    (hf.footer, hf.footer_text, hf.date, hf.date_text) = (true, "A  B\tC".into(), true, "  fixed  date".into());
+    let bytes = deckcraft_odp::export(&p).unwrap();
+    let content = part(&bytes, "content.xml");
+    assert!(content.contains(r#"<number:time-style style:name="datetime12">"#), "{content}");
+    assert!(content.contains(r#"draw:mime-type="audio/x-wav""#));
+    assert!(content.contains(r#"<table:table table:template-name="default" table:use-first-column-styles="true">"#));
+    let back = deckcraft_odp::import(&bytes).unwrap();
+    assert_eq!((back.header_footer.footer_text.as_str(), back.header_footer.date_text.as_str()), ("A  B\tC", "  fixed  date"));
+    let s = shapes_of(&back);
+    let paras = &s.iter().find_map(|x| x.text.as_ref()).unwrap().paragraphs;
+    let fields: Vec<String> =
+        paras[0].runs.iter().filter_map(|r| if let RunKind::Field { field } = &r.kind { Some(field.clone()) } else { None }).collect();
+    assert_eq!(fields, ["datetime2", "datetime12"]);
+    assert_eq!(paras[1].text(), "a b \u{b}c");
+    // Read back varied or not, every slice keeps its colour: slice 0 the series' green.
+    let c = s.iter().find_map(|x| if let ShapeKind::Chart(c) = &x.kind { Some(c) } else { None }).unwrap();
+    let s0 = &c.series[0];
+    let slice0 = s0.point_fills.iter().find(|(i, _)| *i == 0).map(|(_, f)| f).or(if c.vary_colors { None } else { s0.fill.as_ref() });
+    assert_eq!(slice0, Some(&green));
+    let clip = s.iter().find_map(|x| if let ShapeKind::Media(m) = &x.kind { Some(m) } else { None }).unwrap();
+    assert!(!clip.video);
+    let t = s.iter().find_map(|x| if let ShapeKind::Table(t) = &x.kind { Some(t) } else { None }).unwrap();
+    assert_eq!((t.first_row, t.band_row, t.first_col), (false, false, true));
 }

@@ -270,7 +270,7 @@ fn inline(cx: &TextCtx, el: &El, text_props: &Props, link: Option<&Hyperlink>, r
                 "text:page-number" | "text:page-count" | "text:date" | "text:time" | "presentation:date-time" => {
                     flush_space(runs, &props, st, link);
                     // A date's format from our date styles (named after it); a time is a time.
-                    let ours = attr(e, "style:data-style-name").and_then(date_format_of);
+                    let ours = attr(e, "style:data-style-name").and_then(|s| date_format_of(cx.store, s));
                     let field = match (e.name.as_str(), ours) {
                         ("text:page-number", _) => "slidenum".to_string(),
                         ("text:page-count", _) => "slidecount".to_string(),
@@ -307,12 +307,45 @@ fn inline(cx: &TextCtx, el: &El, text_props: &Props, link: Option<&Hyperlink>, r
     }
 }
 
-/// The PowerPoint date format (1–13) one of our date styles (`datetime4`) stands for.
-pub fn date_format_of(style: &str) -> Option<u8> {
-    let digits = style.strip_prefix("datetime")?;
-    let n = digits.parse::<u8>().ok().filter(|v| (1..=13).contains(v))?;
-    // Exactly as we write it (not `+5` or `07`).
-    (n.to_string() == digits).then_some(n)
+/// The PowerPoint date format (1–13) a data style stands for: ours by name (`datetime4`), else
+/// the format built the same way ([`DATE_FORMATS`](crate::vocab::DATE_FORMATS)), else the first
+/// with the same parts in another order, with other separators or another length of year (as
+/// LibreOffice re-saves ours, renamed `D1`…).
+pub fn date_format_of(store: &Store, style: &str) -> Option<u8> {
+    use crate::vocab::{DATE_FORMATS, DATE_PARTS};
+    if let Some(n) = crate::vocab::date_format(style) {
+        return Some(n);
+    }
+    let shape = date_shape(store.data_styles.get(style)?);
+    let parts = |s: &str| {
+        let mut p: Vec<char> = s.chars().filter(|c| DATE_PARTS.contains(*c)).map(|c| if c == 'y' { 'Y' } else { c }).collect();
+        p.sort_unstable();
+        p
+    };
+    let index = DATE_FORMATS.iter().position(|f| *f == shape).or_else(|| DATE_FORMATS.iter().position(|f| parts(f) == parts(&shape)));
+    index.and_then(|i| u8::try_from(i + 1).ok())
+}
+
+/// A date or time number style as a [`DATE_FORMATS`](crate::vocab::DATE_FORMATS) string.
+fn date_shape(el: &El) -> String {
+    let mut out = String::new();
+    for e in el.elements().take(64) {
+        let long = attr(e, "number:style") == Some("long");
+        match e.name.as_str() {
+            "number:month" if attr(e, "number:textual") == Some("true") => out.push(if long { 'N' } else { 'b' }),
+            "number:month" => out.push('M'),
+            "number:day" => out.push('D'),
+            "number:year" => out.push(if long { 'Y' } else { 'y' }),
+            "number:day-of-week" => out.push('W'),
+            "number:hours" => out.push('h'),
+            "number:minutes" => out.push('m'),
+            "number:seconds" => out.push('s'),
+            "number:am-pm" => out.push('a'),
+            "number:text" => out.push_str(&e.text()),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// The plain text of a paragraph-like element as ODF lays it out: white space collapsed to single
@@ -536,25 +569,14 @@ fn apply_list_level(store: &Store, pp: &mut ParaProps, level: Option<&El>, list:
     });
 }
 
-/// An ODF number format with prefix/suffix as the closest DrawingML auto-number scheme.
+/// An ODF number format with prefix/suffix as the closest DrawingML auto-number scheme
+/// ([`NUM_SCHEMES`](crate::vocab::NUM_SCHEMES)): the exact row, else the format's `Period` one.
 pub fn num_scheme(fmt: &str, prefix: &str, suffix: &str) -> String {
-    let core = match fmt {
-        "a" => "alphaLc",
-        "A" => "alphaUc",
-        "i" => "romanLc",
-        "I" => "romanUc",
-        _ => "arabic",
-    };
-    let tail = match (prefix.trim(), suffix.trim()) {
-        ("(", ")") => "ParenBoth",
-        (_, ")") => "ParenR",
-        (_, ".") => "Period",
-        // DrawingML has a minus suffix for arabic numbers only (`arabic2Minus`, "1-").
-        (_, "-") if core == "arabic" => return "arabic2Minus".into(),
-        (_, "") => "Plain",
-        _ => "Period",
-    };
-    format!("{core}{tail}")
+    use crate::vocab::NUM_SCHEMES;
+    let fmt = if ["a", "A", "i", "I"].contains(&fmt) { fmt } else { "1" };
+    let (prefix, suffix) = (prefix.trim(), suffix.trim());
+    let row = NUM_SCHEMES.iter().find(|r| (r.1, r.2, r.3) == (fmt, prefix, suffix)).or_else(|| NUM_SCHEMES.iter().find(|r| (r.1, r.3) == (fmt, ".")));
+    row.map_or("arabicPeriod", |r| r.0).to_string()
 }
 
 /// Run properties from merged `style:text-properties`.
@@ -662,7 +684,8 @@ pub fn run_props(store: &Store, t: &Props, auto: Rgba) -> RunProps {
         let part = |k: &str| g(k).filter(|v| !v.is_empty() && *v != "none").map(|v| format!("-{v}")).unwrap_or_default();
         rp.lang = Some(format!("{lang}{}{}", part("fo:script"), part("fo:country")));
     }
-    // Kerning on is kerning at every size (the model's 0 is off).
+    // ODF kerning is on or off: on reads as kerning from 1 pt up (the model's 0 is off), so a
+    // threshold (PowerPoint's 12 pt) comes back as 1 pt.
     match g("style:letter-kerning") {
         Some("true") => rp.kern = Some(1.0),
         Some("false") => rp.kern = Some(0.0),
@@ -687,23 +710,46 @@ mod tests {
     }
 
     #[test]
-    fn date_formats_are_read_only_as_written() {
-        assert_eq!(date_format_of("datetime4"), Some(4));
-        assert_eq!(date_format_of("datetime13"), Some(13));
+    fn date_formats_are_read_by_name_without_a_style() {
+        let store = Store::default();
+        assert_eq!(date_format_of(&store, "datetime4"), Some(4));
+        assert_eq!(date_format_of(&store, "datetime13"), Some(13));
         for bad in ["datetime0", "datetime14", "datetime+5", "datetime07", "datetime", "date4"] {
-            assert_eq!(date_format_of(bad), None, "{bad}");
+            assert_eq!(date_format_of(&store, bad), None, "{bad}");
         }
+    }
+
+    /// LibreOffice renames our date styles (`D1`…) and writes its own: they're read by what they
+    /// show.
+    #[test]
+    fn date_formats_are_read_by_their_parts() {
+        let x = br#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0"><office:automatic-styles>
+            <number:date-style style:name="D2" number:automatic-order="true"><number:day-of-week number:style="long"/><number:text>, </number:text><number:month number:textual="true" number:style="long"/><number:text> </number:text><number:day/><number:text>, </number:text><number:year number:style="long"/></number:date-style>
+            <number:time-style style:name="T1"><number:hours number:style="long"/><number:text>:</number:text><number:minutes number:style="long"/></number:time-style>
+            <number:date-style style:name="D3"><number:year number:style="long"/><number:text>.</number:text><number:month/><number:text>.</number:text><number:day/></number:date-style>
+            <number:date-style style:name="datetime6"><number:day/></number:date-style>
+            </office:automatic-styles></office:document-content>"#;
+        let mut store = Store::default();
+        store.add_document(&crate::dom::parse(x).unwrap(), Scope::Content);
+        assert_eq!(date_format_of(&store, "D2"), Some(2));
+        assert_eq!(date_format_of(&store, "T1"), Some(10));
+        // The same parts in another order.
+        assert_eq!(date_format_of(&store, "D3"), Some(1));
+        // Ours are read by name, however they're built.
+        assert_eq!(date_format_of(&store, "datetime6"), Some(6));
     }
 
     #[test]
     fn number_schemes() {
-        // Only arabic numbers have a minus suffix in DrawingML.
-        assert_eq!(num_scheme("1", "", "-"), "arabic2Minus");
+        // DrawingML has no "1-" (its `Minus` schemes are Arabic and Hebrew letters), and no
+        // unsuffixed letters or Roman numbers.
+        assert_eq!(num_scheme("1", "", "-"), "arabicPeriod");
         assert_eq!(num_scheme("a", "", "-"), "alphaLcPeriod");
+        assert_eq!(num_scheme("i", "", ""), "romanLcPeriod");
+        assert_eq!(num_scheme("1", "", ""), "arabicPlain");
         assert_eq!(num_scheme("1", "", "."), "arabicPeriod");
         assert_eq!(num_scheme("a", "(", ")"), "alphaLcParenBoth");
         assert_eq!(num_scheme("I", "", ")"), "romanUcParenR");
-        assert_eq!(num_scheme("i", "", ""), "romanLcPlain");
     }
 
     #[test]

@@ -218,17 +218,19 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
             .unwrap_or_else(|| format!("Series {}", i + 1));
         let mut series = Series { name, values: values.iter().map(|(_, n)| *n).collect(), ..Default::default() };
         // A scatter series' domain is its X values. A bubble series' values are its sizes, and
-        // its domains its Y values, then its X values.
+        // its domains its Y values, then its X values (with none, its values are Y and its
+        // bubbles one size, rather than nothing drawn).
         let domain = |k: usize| -> Option<Vec<Option<f64>>> {
             let a = kids(s, "chart:domain").nth(k).and_then(|d| attr(d, "table:cell-range-address"))?;
             Some(grid.range(a).iter().map(|(_, n)| *n).collect())
         };
-        if c.kind == ChartType::Bubble {
-            series.sizes = std::mem::take(&mut series.values);
-            series.values = domain(0).unwrap_or_default();
-            series.x_values = domain(1).unwrap_or_default();
-        } else if let Some(xs) = domain(0) {
-            series.x_values = xs;
+        match domain(0) {
+            Some(ys) if c.kind == ChartType::Bubble => {
+                series.sizes = std::mem::replace(&mut series.values, ys);
+                series.x_values = domain(1).unwrap_or_default();
+            }
+            Some(xs) => series.x_values = xs,
+            None => {}
         }
         if matches!(c.kind, ChartType::Line | ChartType::StackedLine | ChartType::Scatter | ChartType::Radar) {
             // Lines are drawn in their stroke colour.
@@ -247,22 +249,18 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
         series.fill = simple_fill(&ss.graphic);
         // Labels are a series' own.
         series.data_labels = Some(ss.chart_prop("chart:data-label-number").is_some_and(|v| v != "none"));
-        // Per-point overrides (pie slices), for the points the series has.
+        // Points with their own fill (pie slices), for the points the series has.
         let mut idx = 0usize;
-        let mut styled_same = 0usize;
+        let mut styled = vec![];
         for p in kids(s, "chart:data-point") {
             if idx >= series.values.len() {
                 break;
             }
             let rep = repeat(p, "chart:repeated").min(series.values.len() - idx);
-            let fill = attr(p, "chart:style-name").map(|n| store.resolve(Scope::Content, "chart", Some(n))).and_then(|st| simple_fill(&st.graphic));
-            if fill.is_some() && fill == series.fill {
-                styled_same += rep;
-            }
-            if let Some(f) = fill.filter(|f| series.fill.as_ref() != Some(f)) {
-                let n = rep.min(fills_left);
-                fills_left -= n;
-                series.point_fills.extend((idx..idx + n).map(|k| (k, f.clone())));
+            if let Some(f) =
+                attr(p, "chart:style-name").map(|n| store.resolve(Scope::Content, "chart", Some(n))).and_then(|st| simple_fill(&st.graphic))
+            {
+                styled.push((idx, rep, f));
             }
             idx += rep;
         }
@@ -276,8 +274,19 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
         }
         // A pie's slices take a colour each, unless most are styled in the series' colour (a
         // varied pie matches it on one slice at most; a single-colour one may recolour a few).
-        if i == 0 && matches!(c.kind, ChartType::Pie | ChartType::Doughnut) {
-            c.vary_colors = styled_same * 2 <= series.values.len();
+        // Files say no more (LibreOffice writes both kinds as styled points), so a varied pie
+        // keeps every styled slice's colour, and a single-colour one those not in its own.
+        let varied = i == 0 && matches!(c.kind, ChartType::Pie | ChartType::Doughnut) && {
+            let same: usize = styled.iter().filter(|(_, _, f)| series.fill.as_ref() == Some(f)).map(|(_, rep, _)| rep).sum();
+            c.vary_colors = same * 2 <= series.values.len();
+            c.vary_colors
+        };
+        for (at, rep, f) in styled {
+            if varied || series.fill.as_ref() != Some(&f) {
+                let n = rep.min(fills_left);
+                fills_left -= n;
+                series.point_fills.extend((at..at + n).map(|k| (k, f.clone())));
+            }
         }
         c.series.push(series);
     }
@@ -357,6 +366,16 @@ mod tests {
         }
         assert_eq!(kind_of("bar", true, true, true), ChartType::PercentBar);
         assert_eq!(legend_of(legend_position("tr")), "tr");
+    }
+
+    /// Regression: a bubble series without domains (no Y or X values) lost its values to the
+    /// sizes, and drew nothing.
+    #[test]
+    fn a_bubble_series_without_domains_keeps_its_values() {
+        let x = br#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:chart><chart:chart chart:class="chart:bubble"><chart:plot-area><chart:series chart:values-cell-range-address="local-table.$B$2:.$B$3"/></chart:plot-area><table:table table:name="local-table"><table:table-header-rows><table:table-row><table:table-cell/><table:table-cell office:value-type="string"><text:p>S</text:p></table:table-cell></table:table-row></table:table-header-rows><table:table-rows><table:table-row><table:table-cell office:value-type="string"><text:p>a</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="3"/></table:table-row><table:table-row><table:table-cell office:value-type="string"><text:p>b</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="5"/></table:table-row></table:table-rows></table:table></chart:chart></office:chart></office:body></office:document-content>"#;
+        let c = read(&crate::dom::parse(x).unwrap()).unwrap();
+        assert_eq!(c.kind, ChartType::Bubble);
+        assert_eq!((c.series[0].values.clone(), c.series[0].sizes.len()), (vec![Some(3.0), Some(5.0)], 0));
     }
 
     #[test]

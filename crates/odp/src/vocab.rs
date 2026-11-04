@@ -5,6 +5,77 @@
 use deckcraft_model::style::{LineCap, LineJoin};
 use deckcraft_model::text::{Align, Anchor, TextDir};
 
+/// The DrawingML auto-number schemes ODF can write: scheme, `style:num-format`, prefix and
+/// suffix. Others (other scripts, `-` suffixes, which DrawingML has only for Arabic and Hebrew
+/// letters) are written as `1.`; a format read with other affixes is its `Period` scheme.
+pub const NUM_SCHEMES: &[(&str, &str, &str, &str)] = &[
+    ("arabicPeriod", "1", "", "."),
+    ("arabicParenR", "1", "", ")"),
+    ("arabicParenBoth", "1", "(", ")"),
+    ("arabicPlain", "1", "", ""),
+    ("alphaLcPeriod", "a", "", "."),
+    ("alphaLcParenR", "a", "", ")"),
+    ("alphaLcParenBoth", "a", "(", ")"),
+    ("alphaUcPeriod", "A", "", "."),
+    ("alphaUcParenR", "A", "", ")"),
+    ("alphaUcParenBoth", "A", "(", ")"),
+    ("romanLcPeriod", "i", "", "."),
+    ("romanLcParenR", "i", "", ")"),
+    ("romanLcParenBoth", "i", "(", ")"),
+    ("romanUcPeriod", "I", "", "."),
+    ("romanUcParenR", "I", "", ")"),
+    ("romanUcParenBoth", "I", "(", ")"),
+];
+
+/// PowerPoint's date and time formats (`datetime1` … `datetime13`, in order) as the parts of a
+/// number style, one letter each (other characters are literal text): `M` month, `D` day, `Y`
+/// four-digit year, `y` two-digit year, `N` month name, `b` short month name, `W` weekday, `h`
+/// hours, `m` minutes, `s` seconds, `a` AM/PM. Written as styles named after the format; read
+/// back from any style built the same way (LibreOffice renames them).
+pub const DATE_FORMATS: [&str; 13] = [
+    // 11/4/2026
+    "M/D/Y",
+    // Wednesday, November 4, 2026
+    "W, N D, Y",
+    // 4 November 2026
+    "D N Y",
+    // November 4, 2026
+    "N D, Y",
+    // 4-Nov-26
+    "D-b-y",
+    // November 26
+    "N y",
+    // Nov-26
+    "b-y",
+    // 11/4/2026 9:30 AM
+    "M/D/Y h:m a",
+    // 11/4/2026 9:30:45 AM
+    "M/D/Y h:m:s a",
+    // 9:30
+    "h:m",
+    // 9:30:45
+    "h:m:s",
+    // 9:30 AM
+    "h:m a",
+    // 9:30:45 AM
+    "h:m:s a",
+];
+
+/// The format (1–13) a date field names, exactly as written (`datetime4`; not `datetime07`).
+pub fn date_format(field: &str) -> Option<u8> {
+    let digits = field.strip_prefix("datetime")?;
+    let n = digits.parse::<u8>().ok().filter(|n| (1..=DATE_FORMATS.len()).contains(&usize::from(*n)))?;
+    (n.to_string() == digits).then_some(n)
+}
+
+/// Whether a format is a time only (shown as a time field).
+pub fn is_time(n: u8) -> bool {
+    DATE_FORMATS.get(usize::from(n).wrapping_sub(1)).is_some_and(|f| f.starts_with('h'))
+}
+
+/// The letters of [`DATE_FORMATS`] that stand for a part.
+pub const DATE_PARTS: &str = "MDYyNbWhmsa";
+
 pub const LINE_JOINS: &[(LineJoin, &str)] = &[(LineJoin::Miter, "miter"), (LineJoin::Bevel, "bevel"), (LineJoin::Round, "round")];
 
 pub const LINE_CAPS: &[(LineCap, &str)] = &[(LineCap::Flat, "butt"), (LineCap::Round, "round"), (LineCap::Square, "square")];
@@ -120,6 +191,8 @@ const MEDIA_TYPES: &[(&str, &str)] = &[
     ("m4a", "audio/mp4"),
     ("aac", "audio/aac"),
     ("flac", "audio/flac"),
+    ("aif", "audio/aiff"),
+    ("aiff", "audio/aiff"),
     ("wma", "audio/x-ms-wma"),
 ];
 
