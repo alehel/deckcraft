@@ -1,6 +1,6 @@
 # DeckCraft architecture
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-18 · **Change:** minor (native chart payloads stored in bounded ZIP members; previous: minor, community PR wave 2026-10-14: 320 engine commands, 41 dialogs, the `metafile` crate, 1,641 tests; duplicated L2/L5/L6 rows and headers folded; previous: minor, transition frames) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-11-04 · **Change:** minor (the `odp` crate reads and writes OpenDocument presentations; previous: minor, native chart payloads stored in bounded ZIP members; previous: minor, community PR wave 2026-10-14: 320 engine commands, 41 dialogs, the `metafile` crate, 1,641 tests; duplicated L2/L5/L6 rows and headers folded; previous: minor, transition frames) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 How DeckCraft is built today. The binding rules (layering, everything is a command, thin UI, never
 break wasm, never crash) are in [AGENTS.md](../AGENTS.md) §3–§5; this document describes what
@@ -18,7 +18,7 @@ nothing below L6 uses egui, eframe, winit or rfd.
 | L0 | `geom`, `color`, `metafile`; standalone `bitstream`, `matroska`, `ogg`, `opus` | EMU/pt units, transforms, ~180 preset shape generators re-derived from ECMA-376, adjust handles, hit testing; RGB/HSL and DrawingML colour transforms; MKV/WebM and Ogg demuxers, the Opus decoder; EMF/WMF read into a neutral vector model (`metafile`) |
 | L1 | `model`, `fonts`; `h264`, `hevc`, `vp9`, `av1`, `isobmff` | Presentation, masters, layouts, slides, shapes, text, themes, tables, charts, transitions, animations, placeholder inheritance (`resolve`); font database (craft-fonts + system) with metric-compatible substitutes for Office fonts (Carlito for Calibri, Caladea for Cambria, Liberation for Arial/Times); video decoders and the MP4/MOV demuxer |
 | L2 | `text`, `anim`, `format`, `media` | Shaping (HarfRust), UAX #9 bidi, UAX #14 line breaking, autofit, caret hit testing; per-shape animation state over time, the show state machine, transition frame layouts, Morph matching; `.deckcraft` (zip + JSON + media) and outline text; media probing, decoding, mixer and clock |
-| L3 | `render`, `pptx` | `vello_cpu` raster of slides, masters and layouts (fills, outlines, effects, pictures, tables, charts, Morph frames); PPTX import/export from ECMA-376 |
+| L3 | `render`, `pptx`, `odp` | `vello_cpu` raster of slides, masters and layouts (fills, outlines, effects, pictures, tables, charts, Morph frames); PPTX import/export from ECMA-376; OpenDocument presentation import/export from OASIS ODF 1.3 (`odp` reads XML with the PPTX crate's bounded reader and table styles through `render`) |
 | L4 | `pdf` | App-owned export layout and rendering through the shared `craft-pdf` writer |
 | L5 | `engine` | Sessions, documents, selection, undo history on shared slide snapshots, the command registry (320 commands in `cmd/*`), pointer tools, keys, AutoRecover, the panic guard (`guard.rs`) |
 | L6 | `ui-egui`, `mcp` | The PowerPoint-style interface (ribbon with 10 tabs + contextual tabs, canvas, thumbnails, panes, 41 dialogs, show and presenter windows, the JSON control channel); the MCP server (JSON-RPC 2.0 over stdio), headless or connected to a running app |
@@ -64,6 +64,12 @@ overlays an invisible real-text layer with embedded font subsets.
 - **PPTX** (`crates/pptx`): lenient reader (unknown parts skipped, malformed parts logged and
   ignored, sizes and depths bounded, zip bombs capped), writer that PowerPoint opens without
   repair. Unknown elements round-trip through `Opaque` and `raw_ext` fields.
+- **OpenDocument** (`crates/odp`): `.odp`, `.otp` and flat `.fodp`. Styles are resolved through
+  their parent chains (default style → named parents → automatic style) into explicit model
+  formatting; custom-shape enhanced geometry (equations, modifiers, arcs) is evaluated into paths;
+  embedded chart documents become model charts. The writer resolves every shape through the
+  model's inheritance and writes it in automatic styles; each layout a slide uses becomes a master
+  page with the master's and layout's graphics.
 - **Native** (`crates/format`): zip with `mimetype`, `presentation.json`, `media/<id>` and
   `chart-parts/<index>`. Chart relationships and payload references stay in the manifest; binary
   chart parts use bounded ZIP reads and share the media byte/item budgets. Earlier inline chart

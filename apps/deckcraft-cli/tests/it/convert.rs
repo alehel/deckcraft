@@ -21,7 +21,7 @@ fn convert_rejects_output_formats_it_cannot_write() {
     let out = Command::new(env!("CARGO_BIN_EXE_deckcraft-cli")).args(["run", "--sample", "--export"]).arg(&input).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 
-    for name in ["out.odp", "out.bmp", "out.svg", "out.outline", "out"] {
+    for name in ["out.odt", "out.bmp", "out.svg", "out.outline", "out"] {
         let target = dir.join(name);
         let out = cli(&[Path::new("convert"), &input, &target]);
         assert!(!out.status.success(), "{name}: convert should fail");
@@ -31,6 +31,11 @@ fn convert_rejects_output_formats_it_cannot_write() {
     }
 
     let target = dir.join("out.deckcraft");
+    let out = cli(&[Path::new("convert"), &input, &target]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(std::fs::read(&target).unwrap().starts_with(b"PK\x03\x04"));
+
+    let target = dir.join("out.odp");
     let out = cli(&[Path::new("convert"), &input, &target]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(std::fs::read(&target).unwrap().starts_with(b"PK\x03\x04"));
@@ -47,10 +52,10 @@ fn convert_rejects_output_formats_it_cannot_write() {
 fn run_rejects_unsupported_save_and_export_paths_before_running() {
     let dir = temp_dir("run-unsupported");
     for flag in ["--save", "--export"] {
-        let target = dir.join("deck.odp");
+        let target = dir.join("deck.odt");
         let out = Command::new(env!("CARGO_BIN_EXE_deckcraft-cli")).args(["run", "--sample", flag]).arg(&target).output().unwrap();
         assert!(!out.status.success(), "{flag}: run should fail");
-        assert!(String::from_utf8_lossy(&out.stderr).contains("unsupported output format .odp"), "{flag}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("unsupported output format .odt"), "{flag}");
         assert!(!target.exists(), "{flag}: nothing is written");
     }
     let _ = std::fs::remove_dir_all(&dir);

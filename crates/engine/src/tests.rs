@@ -650,7 +650,9 @@ fn writable_format_for_path_rejects_formats_deckcraft_does_not_write() {
     assert_eq!(f("a.jpg"), Some("jpeg"));
     assert_eq!(f("a.txt"), Some("outline"));
     assert_eq!(f("a.gif"), Some("gif"));
-    for path in ["a.odp", "a.bmp", "a.svg", "a.outline", "a", "dir.v2/a"] {
+    assert_eq!(f("a.odp"), Some("odp"));
+    assert_eq!(f("dir/A.OTP"), Some("otp"));
+    for path in ["a.odt", "a.bmp", "a.svg", "a.outline", "a", "dir.v2/a"] {
         assert_eq!(f(path), None, "{path}");
     }
 }
@@ -6504,5 +6506,28 @@ fn save_to_image_path_is_an_error_not_zip_bytes() {
         assert!(!std::path::Path::new(&path).exists(), "{name} must not be written");
         assert_eq!(s.doc().unwrap().path, before);
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn opendocument_presentations_open_and_save() {
+    let mut s = Session::new();
+    sample::open_sample(&mut s).unwrap();
+    let n = s.doc().unwrap().doc.slides.len();
+    let data = s.execute("file.saveBytes", &json!({"format": "odp"})).unwrap()["data"].as_str().unwrap().to_string();
+    let bytes = crate::cmd::base64_decode(&data).unwrap();
+    assert!(deckcraft_odp::sniff(&bytes));
+    s.execute("file.openBytes", &json!({"name": "talk.odp", "data": data})).unwrap();
+    assert_eq!(s.doc().unwrap().doc.slides.len(), n);
+    let dir = std::env::temp_dir().join(format!("deckcraft-odp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("talk.odp").to_string_lossy().to_string();
+    s.execute("file.saveAs", &json!({"path": path})).unwrap();
+    // Saving an .odp keeps it OpenDocument, and it reopens in place.
+    let written = std::fs::read(&path).unwrap();
+    assert!(deckcraft_odp::sniff(&written));
+    let f = crate::cmd::file::read_presentation_file(&path).unwrap();
+    assert!(f.native);
+    assert_eq!(f.doc.slides.len(), n);
     let _ = std::fs::remove_dir_all(&dir);
 }

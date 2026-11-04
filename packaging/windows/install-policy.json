@@ -54,6 +54,18 @@
     ],
     [
       "-1",
+      "Software\\Classes\\Applications\\deckcraft.exe\\SupportedTypes",
+      ".odp",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\Applications\\deckcraft.exe\\SupportedTypes",
+      ".otp",
+      ""
+    ],
+    [
+      "-1",
       "Software\\Classes\\.pptx\\OpenWithProgids",
       "DeckCraft.Presentation",
       ""
@@ -67,6 +79,18 @@
     [
       "-1",
       "Software\\Classes\\.ppsx\\OpenWithProgids",
+      "DeckCraft.Presentation",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\.odp\\OpenWithProgids",
+      "DeckCraft.Presentation",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\.otp\\OpenWithProgids",
       "DeckCraft.Presentation",
       ""
     ],

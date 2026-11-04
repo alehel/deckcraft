@@ -1058,6 +1058,7 @@ dependencies = [
  "deckcraft-geom",
  "deckcraft-media",
  "deckcraft-model",
+ "deckcraft-odp",
  "deckcraft-pdf",
  "deckcraft-pptx",
  "deckcraft-render",
@@ -1182,6 +1183,22 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "deckcraft-odp"
+version = "0.15.0"
+dependencies = [
+ "deckcraft-color",
+ "deckcraft-engine",
+ "deckcraft-geom",
+ "deckcraft-model",
+ "deckcraft-pptx",
+ "deckcraft-render",
+ "kurbo",
+ "log",
+ "thiserror 2.0.21",
+ "zip 3.0.0",
 ]
 
 [[package]]

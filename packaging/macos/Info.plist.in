@@ -114,6 +114,38 @@
       <key>CFBundleTypeMIMETypes</key>
       <array><string>application/vnd.openxmlformats-officedocument.presentationml.slideshow</string></array>
     </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>OpenDocument Presentation</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>org.oasis-open.opendocument.presentation</string>
+      </array>
+      <key>CFBundleTypeExtensions</key>
+      <array><string>odp</string></array>
+      <key>CFBundleTypeMIMETypes</key>
+      <array><string>application/vnd.oasis.opendocument.presentation</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>OpenDocument Presentation Template</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>org.oasis-open.opendocument.presentation-template</string>
+      </array>
+      <key>CFBundleTypeExtensions</key>
+      <array><string>otp</string></array>
+      <key>CFBundleTypeMIMETypes</key>
+      <array><string>application/vnd.oasis.opendocument.presentation-template</string></array>
+    </dict>
   </array>
 
   <!-- DeckCraft's own format: a zip of a JSON manifest plus media. -->

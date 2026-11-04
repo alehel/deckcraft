@@ -116,9 +116,10 @@ fn services() -> Services {
                 "video" => d.add_filter("Video", &["mp4", "m4v", "mov", "webm", "mkv", "wmv"]),
                 "theme" => d.add_filter("Themes and presentations", &["thmx", "pptx", "potx", "ppsx"]).add_filter("Office Theme", &["thmx"]),
                 _ => d
-                    .add_filter("Presentations", &["deckcraft", "pptx", "potx", "ppsx"])
+                    .add_filter("Presentations", &["deckcraft", "pptx", "potx", "ppsx", "odp", "otp", "fodp"])
                     .add_filter("DeckCraft", &["deckcraft"])
                     .add_filter("PowerPoint", &["pptx", "potx", "ppsx"])
+                    .add_filter("OpenDocument", &["odp", "otp", "fodp"])
                     .add_filter("Outline", &["txt", "md"]),
             };
             d.pick_file().map(|p| p.to_string_lossy().to_string())
@@ -417,6 +418,8 @@ mod tests {
             "application/vnd.openxmlformats-officedocument.presentationml.presentation" => Some("pptx"),
             "application/vnd.openxmlformats-officedocument.presentationml.template" => Some("potx"),
             "application/vnd.openxmlformats-officedocument.presentationml.slideshow" => Some("ppsx"),
+            "application/vnd.oasis.opendocument.presentation" => Some("odp"),
+            "application/vnd.oasis.opendocument.presentation-template" => Some("otp"),
             _ => None,
         };
         let mut linux: Vec<String> = desktop

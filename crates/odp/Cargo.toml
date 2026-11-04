@@ -1,0 +1,24 @@
+[package]
+name = "deckcraft-odp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DeckCraft ODP: OpenDocument presentation (.odp / .otp) import and export, written from the public OASIS OpenDocument standard"
+
+[lints]
+workspace = true
+
+[dependencies]
+deckcraft-model = { workspace = true }
+deckcraft-geom = { workspace = true }
+deckcraft-color = { workspace = true }
+deckcraft-pptx = { workspace = true }
+deckcraft-render = { workspace = true }
+zip = { workspace = true }
+kurbo = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+zip = { workspace = true }
+deckcraft-engine = { workspace = true }

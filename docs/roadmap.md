@@ -1,6 +1,6 @@
 # DeckCraft roadmap: milestones and what's next
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-22 · **Change:** trivial (beta item 9 drops Play From, now in; previous: minor, native chart payloads stored in bounded ZIP members; previous: major, community PR wave 2026-10-14: PPTX corpus, presenter and show controls, review navigation, starter decks, Grid Options and New Window, WordArt gallery and handles, pen pressure; beta items 9 and 10 narrowed; duplicated rows and headers folded; previous: minor, core-workflow alpha gate added) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-11-04 · **Change:** trivial (after beta: `.odp` is in, its animations remain; previous: trivial, beta item 9 drops Play From, now in; previous: minor, native chart payloads stored in bounded ZIP members; previous: major, community PR wave 2026-10-14: PPTX corpus, presenter and show controls, review navigation, starter decks, Grid Options and New Window, WordArt gallery and handles, pen pressure; beta items 9 and 10 narrowed; duplicated rows and headers folded; previous: minor, core-workflow alpha gate added) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 Forward-looking: where DeckCraft is going and in what order. The one-page summary is
 [ROADMAP.md](../ROADMAP.md); every shortfall is in [gaps.md](gaps.md); numbers are in
@@ -63,7 +63,7 @@ reference renders, a Windows tester with the affected GPUs, native speakers to r
 
 SmartArt depth, the remaining animation effects and motion paths, edit-point segment types and
 3-D depth, bundled proofing dictionaries, Zoom depth, recording, video export, legacy `.ppt` import
-and `.odp` (owner decision), GPU rasterization, hardware video decode, pen tilt (pressure already
+(owner decision), `.odp` animations, GPU rasterization, hardware video decode, pen tilt (pressure already
 scales ink width) and pinch zoom, the other 21 languages with RTL mirroring, a larger template
 gallery (six original starters ship), and local AI features (owner decision on models). Itemized
 with hours in [gaps.md](gaps.md).

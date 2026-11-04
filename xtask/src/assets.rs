@@ -38,6 +38,8 @@ const ASSET_EXT: &[&str] = &[
     "pptx",
     "potx",
     "ppsx",
+    "odp",
+    "otp",
     "thmx",
     "mp4",
     "mov",

@@ -56,6 +56,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("format", Class::Layer(2)),
     ("render", Class::Layer(3)),
     ("pptx", Class::Layer(3)),
+    // OpenDocument presentations: reads parts with the PPTX crate's bounded XML reader.
+    ("odp", Class::Layer(3)),
     ("pdf", Class::Layer(4)),
     ("engine", Class::Layer(5)),
     ("ui-egui", Class::Layer(6)),
@@ -70,10 +72,10 @@ pub const TABLE: &[(&str, Class)] = &[
 
 /// Upward dev-dependencies allowed for integration tests: the PPTX round-trip tests drive the
 /// engine (build a deck with commands, export, re-import).
-pub const DEV_EXCEPTIONS: &[(&str, &str)] = &[("pptx", "engine")];
+pub const DEV_EXCEPTIONS: &[(&str, &str)] = &[("pptx", "engine"), ("odp", "engine")];
 
 /// Explicit orderings *within* a layer (earlier may be used by later).
-pub const INTRA_LAYER_ORDER: &[&[&str]] = &[];
+pub const INTRA_LAYER_ORDER: &[&[&str]] = &[&["pptx", "render", "odp"]];
 
 fn intra_layer_allowed(from: &str, to: &str) -> bool {
     let (from, to) = (short_name(from), short_name(to));

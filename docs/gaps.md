@@ -1,6 +1,6 @@
 # Where DeckCraft falls short of PowerPoint
 
-> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-11-03 · **Change:** trivial (run alternate language and reflection transforms survive saves; reused slide contents scale to the destination, picker thumbnails remain a gap; previous: trivial (locked No Fill and no-outline click-through regression coverage added; No Fill hit-testing follows resolved fill instead of the presence of a style (#1621); scores unchanged)) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-11-04 · **Change:** minor (OpenDocument `.odp` opens and saves; its remaining gaps replace the missing-format entry; previous: trivial, run alternate language and reflection transforms survive saves; reused slide contents scale to the destination, picker thumbnails remain a gap; previous: trivial (locked No Fill and no-outline click-through regression coverage added; No Fill hit-testing follows resolved fill instead of the presence of a style (#1621); scores unchanged)) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 Every known shortfall, one entry each, ranked by how much it stops someone who presents with
 PowerPoint from switching. This is the work list: pick from the top. Numbers are summarized in
@@ -124,10 +124,16 @@ Detail in [file-format-parity.md](file-format-parity.md).
 - **Estimate:** 20–35 h (import only, from the public [MS-PPT] spec). Owner decision whether it's
   worth it.
 
-### No OpenDocument `.odp`
-- **Evidence:** PowerPoint opens and saves `.odp`.
-- **Impact:** LibreOffice users and public-sector exchange.
-- **Estimate:** 12–20 h (read and write the common subset).
+### OpenDocument `.odp`: animations and a few fills
+- **Evidence:** `.odp`, `.otp` and `.fodp` open and `.odp`/`.otp` save (`crates/odp`), at ~95% pixel
+  similarity to LibreOffice 24.2 on its bundled templates. Not yet: object animations
+  (`anim:par` effects) are neither read nor written; hatches become the nearest DrawingML pattern
+  rather than lines at their angle and spacing; picture crop (`fo:clip`) is ignored; StarView
+  (`.svm`) and EMF previews of objects other than charts don't show; connectors aren't glued to
+  shapes; custom shapes are written as fixed outlines (their handles don't survive into
+  LibreOffice); comments aren't read.
+- **Impact:** animated LibreOffice decks lose their builds; some fills look different.
+- **Estimate:** 8–14 h.
 
 ### PDF export rasterizes slide artwork
 - **Evidence:** `crates/pdf` places each slide as an image under a selectable text layer, links and

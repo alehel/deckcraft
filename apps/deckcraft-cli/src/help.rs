@@ -10,7 +10,7 @@ pub const SUBCOMMANDS: &[Subcommand] = &[
         name: "info",
         usage: "info FILE",
         summary: "print a presentation's slides, layouts and theme as JSON",
-        details: "Prints FILE (.deckcraft or .pptx) as JSON: its slides (index, id, title, layout, how many shapes,
+        details: "Prints FILE (.deckcraft, .pptx or .odp) as JSON: its slides (index, id, title, layout, how many shapes,
 notes, transition), its layouts, theme fonts, sections and slide size.
 
 The shapes of one slide, with their ids, boxes and text, come from the slide.inspect command:
@@ -50,8 +50,8 @@ OUT-t0.250.png and so on. Prints each image's path, size, transition and time.
         name: "convert",
         usage: "convert IN OUT",
         summary: "save a presentation in the format OUT's extension names",
-        details: "Opens IN (.deckcraft or .pptx) and writes it to OUT, in the format OUT's extension names:
-.deckcraft, .pptx, .pdf, .txt or .md for the outline, .png or .jpg for the first slide, .gif for an
+        details: "Opens IN (.deckcraft, .pptx or .odp) and writes it to OUT, in the format OUT's extension names:
+.deckcraft, .pptx, .odp, .pdf, .txt or .md for the outline, .png or .jpg for the first slide, .gif for an
 animated GIF with one frame per slide. Other extensions are refused. Prints OUT.
 
   deckcraft-cli convert deck.deckcraft deck.pptx",
@@ -62,7 +62,7 @@ animated GIF with one frame per slide. Other extensions are refused. Prints OUT.
         summary: "run commands on a presentation, then save or export it",
         details: "Runs commands, in order, on one presentation: FILE with --in, the sample presentation with --sample,
 else a new one with an empty title slide. Then --save writes the presentation: .deckcraft keeps
-everything; .pptx, .pdf and .md (the outline) are written as convert writes them. --export writes the
+everything; .pptx, .odp, .pdf and .md (the outline) are written as convert writes them. --export writes the
 current slide as .png or .jpg, or the presentation as .pdf, .pptx or an animated .gif (one frame per
 slide). --export-params passes file.export options as one JSON object, such as
 '{\"width\": \"large\", \"secondsPerSlide\": 3, \"loop\": false, \"slides\": [0, 1, 2]}' for a GIF
@@ -180,7 +180,7 @@ pub fn overview() -> String {
     let list: Vec<String> =
         SUBCOMMANDS.iter().map(|s| format!("  {:<width$}  {}", s.usage.split(' ').next().unwrap_or_default(), s.summary)).collect();
     format!(
-        "deckcraft-cli works on DeckCraft presentations (.deckcraft, .pptx) without a window.
+        "deckcraft-cli works on DeckCraft presentations (.deckcraft, .pptx, .odp) without a window.
 
 {}
 

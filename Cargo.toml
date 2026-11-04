@@ -21,6 +21,7 @@ deckcraft-text = { path = "crates/text" }
 deckcraft-render = { path = "crates/render" }
 deckcraft-pdf = { path = "crates/pdf" }
 deckcraft-pptx = { path = "crates/pptx" }
+deckcraft-odp = { path = "crates/odp" }
 deckcraft-format = { path = "crates/format" }
 deckcraft-anim = { path = "crates/anim" }
 deckcraft-engine = { path = "crates/engine" }

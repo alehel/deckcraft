@@ -79,6 +79,9 @@ fn is_presentation_name(lower: &str) -> bool {
         || lower.ends_with(".pptx")
         || lower.ends_with(".potx")
         || lower.ends_with(".ppsx")
+        || lower.ends_with(".odp")
+        || lower.ends_with(".otp")
+        || lower.ends_with(".fodp")
 }
 
 /// File → Open keeps the requested operation: a presentation opens, an outline becomes slides.
@@ -194,6 +197,7 @@ impl SlideApp {
             "pngAll" => ("png", "png", true),
             "jpeg" | "jpg" => ("jpg", "jpeg", false),
             "pptx" => ("pptx", "pptx", false),
+            "odp" => ("odp", "odp", false),
             "outline" | "txt" => ("txt", "outline", false),
             "rtf" => ("rtf", "rtf", false),
             "deckcraft" => ("deckcraft", "deckcraft", false),
@@ -449,7 +453,11 @@ impl SlideApp {
 
     pub fn save_as_dialog(&mut self, format: &str) {
         let name = self.session.active().map(|d| d.title()).unwrap_or_else(|| "Presentation".into());
-        let ext = if format == "pptx" { "pptx" } else { "deckcraft" };
+        let ext = match format {
+            "pptx" => "pptx",
+            "odp" => "odp",
+            _ => "deckcraft",
+        };
         let suggested = format!("{name}.{ext}");
         if let Some(pick) = self.services.pick_save.as_mut() {
             if let Some(path) = pick(&suggested) {
