@@ -81,6 +81,18 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
             format!("<draw:g{common}>{inner}{desc}{events}</draw:g>")
         }
         ShapeKind::Picture { fill } => {
+            // A picture in an outline other than its box (an ellipse, a star): that outline,
+            // filled with the picture (an ODF frame is always a box). An uncropped one only: a
+            // fill has no crop.
+            let boxed = matches!(&s.geom, Geom::Preset { name, .. } if name == "rect");
+            if !boxed && fill.crop.iter().all(|c| *c == 0.0) {
+                let filled = Shape {
+                    kind: ShapeKind::Shape,
+                    fill: Some(Fill::Picture(PictureFill { mode: PictureMode::Stretch { fill_rect: [0.0; 4] }, ..fill.clone() })),
+                    ..s.clone()
+                };
+                return geometric(w, auto, ctx, pg, &filled, &x, &common, &desc, &events);
+            }
             let Some(href) = w.media_path(fill.media) else { return String::new() };
             let (line, ph_line) = resolve::line(ctx, s);
             let mut g = line_attrs(w, ctx, &line, ph_line);

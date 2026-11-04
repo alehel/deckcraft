@@ -1175,3 +1175,30 @@ fn text_details_dates_and_slide_names_round_trip() {
     assert_eq!(sh.color, ColorRef::rgb(Rgba::rgb(255, 0, 0)));
     assert!((sh.dist - 3.0).abs() < 0.05 && (sh.dir - 45.0).abs() < 0.5 && (sh.blur - 2.0).abs() < 0.05, "{sh:?}");
 }
+
+/// A picture in an ellipse is written as an ellipse filled with the picture (an ODF picture frame
+/// is a box), and keeps its outline.
+#[test]
+fn pictures_keep_their_outline() {
+    let png: Vec<u8> = vec![
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15,
+        0xc4, 0x89, 0, 0, 0, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0, 0x05, 0, 0x01, 0xff, 0x89, 0x99, 0x3d,
+        0x1d, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    let mut p = deck_with(vec![]);
+    let media = p.add_media("dot.png", "image/png", png).unwrap();
+    let pic = Shape {
+        id: ShapeId(p.alloc_id().unwrap()),
+        xfrm: Some(Xfrm::new(50.0, 50.0, 200.0, 100.0)),
+        geom: Geom::preset("ellipse"),
+        kind: ShapeKind::Picture { fill: deckcraft_model::style::PictureFill { media, ..Default::default() } },
+        ..Default::default()
+    };
+    Arc::make_mut(&mut p.slides[0]).shapes.push(pic);
+    let bytes = deckcraft_odp::export(&p).unwrap();
+    assert!(part(&bytes, "content.xml").contains(r#"draw:fill="bitmap""#));
+    let back = deckcraft_odp::import(&bytes).unwrap();
+    let s = shapes_of(&back);
+    assert_eq!(s[0].geom.preset_name(), Some("ellipse"));
+    assert!(matches!(s[0].fill, Some(Fill::Picture(_))), "{:?}", s[0].fill);
+}
