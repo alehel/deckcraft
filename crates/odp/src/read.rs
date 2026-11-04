@@ -161,6 +161,8 @@ struct Reader<'a> {
 struct Ctx {
     scope: Scope,
     master: String,
+    /// The background colour behind shapes, for automatic text colour.
+    bg: Rgba,
 }
 
 impl Reader<'_> {
@@ -237,8 +239,8 @@ impl Reader<'_> {
         }
         let title_style = self.store.resolve(scope, "presentation", Some(&format!("{name}-title")));
         let outline_style = self.store.resolve(scope, "presentation", Some(&format!("{name}-outline1")));
-        let title_rp = text::run_props(&self.store, &title_style.text);
-        let body_rp = text::run_props(&self.store, &outline_style.text);
+        let title_rp = text::run_props(&self.store, &title_style.text, Rgba::BLACK);
+        let body_rp = text::run_props(&self.store, &outline_style.text, Rgba::BLACK);
         if let Some(f) = &title_rp.font {
             theme.fonts.major.latin.clone_from(f);
         }
@@ -269,7 +271,8 @@ impl Reader<'_> {
             }
             master.body_style.set(lv, self.level_style(&s, scope, lv, true));
         }
-        let ctx = Ctx { scope, master: name.clone() };
+        let bg = master.background.as_ref().and_then(background_rgb).unwrap_or(Rgba::WHITE);
+        let ctx = Ctx { scope, master: name.clone(), bg };
         let mut decorations = vec![];
         for e in m.elements() {
             let class = attr(e, "presentation:class");
@@ -325,7 +328,16 @@ impl Reader<'_> {
 
     /// One level of a master text style from a resolved presentation style.
     fn level_style(&self, s: &Style, scope: Scope, level: u8, in_list: bool) -> LevelStyle {
-        let cx = TextCtx { store: &self.store, scope, base: s.clone(), outline_master: None, own: None, shape_para: None, slide_links: false };
+        let cx = TextCtx {
+            store: &self.store,
+            scope,
+            base: s.clone(),
+            outline_master: None,
+            own: None,
+            shape_para: None,
+            slide_links: false,
+            auto_color: Rgba::BLACK,
+        };
         // Read a one-paragraph list at this level to get the bullet and indents the style gives.
         let mut xml = String::from("<b xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\">");
         let wraps = if in_list { usize::from(level) + 1 } else { 0 };
@@ -358,14 +370,17 @@ impl Reader<'_> {
         } else {
             self.master_index.iter().find(|(_, i)| **i == 0).map(|(n, _)| n.clone()).unwrap_or_default()
         };
-        let ctx = Ctx { scope: Scope::Content, master: master_name };
         let page_style = attr(page, "draw:style-name").map(|n| self.store.resolve(Scope::Content, "drawing-page", Some(n))).unwrap_or_default();
         let pp = &page_style.page;
+        let master_bg = self.p.masters.get(mi).and_then(|m| m.background.as_ref()).and_then(background_rgb);
+        let page_bg = self.background(pp, Scope::Content);
+        let bg = page_bg.as_ref().and_then(background_rgb).or(master_bg).unwrap_or(Rgba::WHITE);
+        let ctx = Ctx { scope: Scope::Content, master: master_name, bg };
         let mut slide = Slide { id, name: attr(page, "draw:name").unwrap_or("").to_string(), ..Default::default() };
         if let Some(n) = attr(page, "draw:name") {
             self.page_names.push((n.to_string(), id));
         }
-        slide.background = self.background(pp, Scope::Content);
+        slide.background = page_bg;
         if pp.get("presentation:background-visible").map(String::as_str) == Some("false") {
             slide.background = Some(Background::Fill { fill: Fill::solid(ColorRef::rgb(Rgba::WHITE)) });
         }
@@ -590,6 +605,7 @@ impl Reader<'_> {
         let shape_para = attr(e, "draw:text-style-name").map(|n| self.store.chain(ctx.scope, "paragraph", n));
         let outline = class == Some("outline");
         let store = std::rc::Rc::clone(&self.store);
+        let behind = s.fill.as_ref().and_then(fill_rgb).unwrap_or(ctx.bg);
         let tcx = TextCtx {
             store: &store,
             scope: ctx.scope,
@@ -598,6 +614,7 @@ impl Reader<'_> {
             own,
             shape_para,
             slide_links: true,
+            auto_color: text::auto_text_color(behind),
         };
         let name = e.name.as_str();
         match name {
@@ -1102,7 +1119,17 @@ impl Reader<'_> {
         let mut base = st.clone();
         base.list = None;
         let store = std::rc::Rc::clone(&self.store);
-        let tcx = TextCtx { store: &store, scope: ctx.scope, base, outline_master: None, own: None, shape_para: None, slide_links: true };
+        let behind = cell.fill.as_ref().and_then(fill_rgb).unwrap_or(ctx.bg);
+        let tcx = TextCtx {
+            store: &store,
+            scope: ctx.scope,
+            base,
+            outline_master: None,
+            own: None,
+            shape_para: None,
+            slide_links: true,
+            auto_color: text::auto_text_color(behind),
+        };
         let mut paragraphs = text::paragraphs(&tcx, c);
         for p in &mut paragraphs {
             complete_para(&mut p.props);
@@ -1236,10 +1263,12 @@ impl Reader<'_> {
             "butt" => Some(LineCap::Flat),
             _ => None,
         });
-        if stroke == "dash"
-            && let Some(d) = g.get("draw:stroke-dash").and_then(|n| self.store.dashes.get(n))
-        {
-            l.dash = Some(dash(d, width));
+        if stroke == "dash" {
+            // A dash with no definition is LibreOffice's default dashing.
+            l.dash = Some(match g.get("draw:stroke-dash").and_then(|n| self.store.dashes.get(n)) {
+                Some(d) => dash(d, width),
+                None => Dash::Preset { name: "dash".into() },
+            });
         }
         let end = |name: Option<&String>, w: Option<&String>| -> Option<LineEnd> {
             let n = name?;
@@ -1358,6 +1387,28 @@ fn comment(e: &El) -> deckcraft_model::Comment {
     }
 }
 
+/// The colour a fill mostly shows (for automatic text colour): `None` for no fill or a picture.
+fn fill_rgb(f: &Fill) -> Option<Rgba> {
+    match f {
+        Fill::Solid { color } if color.alpha() > 0.3 => Some(color.resolve(&deckcraft_model::Theme::default().colors, None)),
+        Fill::Gradient(g) => {
+            let (a, b) = (g.stops.first()?, g.stops.last()?);
+            let scheme = deckcraft_model::Theme::default().colors;
+            let (a, b) = (a.color.resolve(&scheme, None), b.color.resolve(&scheme, None));
+            let mix = |x: u8, y: u8| ((u16::from(x) + u16::from(y)) / 2) as u8;
+            Some(Rgba::rgb(mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b)))
+        }
+        _ => None,
+    }
+}
+
+fn background_rgb(b: &Background) -> Option<Rgba> {
+    match b {
+        Background::Fill { fill } => fill_rgb(fill),
+        Background::Ref { .. } => None,
+    }
+}
+
 /// The box of a line from its end points (rotated by `draw:transform`, if any).
 fn line_xfrm(e: &El) -> Xfrm {
     let len = |k: &str| attr(e, k).and_then(units::length).unwrap_or(0.0);
@@ -1468,7 +1519,8 @@ fn custom_geom(eg: &geometry::Enhanced) -> Geom {
         _ => {}
     }
     if eg.paths.is_empty() {
-        return Geom::preset("rect");
+        // No path draws nothing (the text, if any, still shows).
+        return Geom::Custom { paths: vec![] };
     }
     Geom::Custom { paths: eg.paths.clone() }
 }

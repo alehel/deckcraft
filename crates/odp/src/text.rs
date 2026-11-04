@@ -29,6 +29,8 @@ pub struct TextCtx<'a> {
     pub shape_para: Option<Style>,
     /// Hyperlinks whose target is a page name (`#page2`): resolved by the reader afterwards.
     pub slide_links: bool,
+    /// The colour of automatic text: black, or white over a dark fill or background.
+    pub auto_color: Rgba,
 }
 
 struct ListCtx<'a> {
@@ -166,7 +168,7 @@ fn merge_style(base: &mut Style, over: &Style) {
 fn paragraph(cx: &TextCtx, p: &El, list: &ListCtx) -> Paragraph {
     let style = para_style(cx, list.depth, attr(p, "text:style-name"));
     let mut props = para_props(cx.store, &style.paragraph, style.tabs.as_ref());
-    let base_run = run_props(cx.store, &style.text);
+    let base_run = run_props(cx.store, &style.text, cx.auto_color);
     let level_el = if list.in_list { list.style.and_then(|l| level_style(l, list.depth)) } else { None };
     // A paragraph style may name its own list style (`style:list-style-name`) when it's in a list.
     let level_el = level_el.or_else(|| {
@@ -247,7 +249,7 @@ fn inline(cx: &TextCtx, el: &El, text_props: &Props, link: Option<&Hyperlink>, r
     if depth > 32 {
         return;
     }
-    let props = run_props(cx.store, text_props);
+    let props = run_props(cx.store, text_props, cx.auto_color);
     for node in &el.children {
         match node {
             deckcraft_pptx::XmlNode::Text(t) => push_text(runs, &props, t, st, link),
@@ -335,6 +337,12 @@ pub fn hyperlink(href: &str, slide_links: bool) -> Option<Hyperlink> {
         return None;
     };
     Some(Hyperlink { action, tooltip: String::new(), highlight_click: false, sound: None, stop_sound: false, zoom_return: None })
+}
+
+/// Automatic text colour over `behind`: white on a dark colour, else black (LibreOffice's rule).
+pub fn auto_text_color(behind: Rgba) -> Rgba {
+    let lum = 0.299 * f64::from(behind.r) + 0.587 * f64::from(behind.g) + 0.114 * f64::from(behind.b);
+    if lum <= 156.0 { Rgba::WHITE } else { Rgba::BLACK }
 }
 
 /// Paragraph properties from merged `style:paragraph-properties`.
@@ -486,7 +494,7 @@ pub fn num_scheme(fmt: &str, prefix: &str, suffix: &str) -> String {
 }
 
 /// Run properties from merged `style:text-properties`.
-pub fn run_props(store: &Store, t: &Props) -> RunProps {
+pub fn run_props(store: &Store, t: &Props, auto: Rgba) -> RunProps {
     let g = |k: &str| t.get(k).map(String::as_str);
     let font = g("style:font-name").map(|n| store.font_family(n)).or_else(|| g("fo:font-family").map(unquote)).filter(|f| !f.is_empty());
     let mut rp = RunProps {
@@ -542,7 +550,7 @@ pub fn run_props(store: &Store, t: &Props) -> RunProps {
         }
         rp.fill = Some(Fill::solid(cr));
     } else if g("style:use-window-font-color") == Some("true") {
-        rp.fill = Some(Fill::solid(ColorRef::rgb(Rgba::BLACK)));
+        rp.fill = Some(Fill::solid(ColorRef::rgb(auto)));
     }
     if let Some(pos) = g("style:text-position") {
         let mut it = pos.split_whitespace();
