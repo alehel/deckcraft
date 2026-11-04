@@ -134,7 +134,10 @@ Detail in [file-format-parity.md](file-format-parity.md).
   aren't re-routed when a shape moves; custom shapes are written as fixed outlines (LibreOffice
   shows them but loses their handles); LibreOffice animation presets without a DeckCraft effect
   play as the closest one; comment replies are written as separate comments; font weights other
-  than regular and bold (`style:font-adornments="Black"`) read as one of the two.
+  than regular and bold (`style:font-adornments="Black"`) read as one of the two; PowerPoint
+  transitions without an ODF filter (Vortex, Ripple, Honeycomb, Cube and the other 3-D ones) are
+  written as a fade; a text block pushed to the right of its frame reads as right-aligned lines;
+  triple hatches keep their spacing to within 0.5%.
 - **Impact:** a few unusual LibreOffice decks lose an object or a detail.
 - **Estimate:** 4–8 h (SVG rendering is its own renderer item).
 
