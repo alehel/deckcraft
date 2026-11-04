@@ -12,6 +12,7 @@ mod anim;
 mod chart;
 mod dom;
 mod geometry;
+mod hatch;
 mod package;
 mod read;
 mod styles;

@@ -1195,6 +1195,7 @@ dependencies = [
  "deckcraft-model",
  "deckcraft-pptx",
  "deckcraft-render",
+ "image",
  "kurbo",
  "log",
  "thiserror 2.0.21",

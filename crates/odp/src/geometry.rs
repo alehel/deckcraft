@@ -106,11 +106,13 @@ pub fn svg_path(d: &str, vb: [f64; 4], closed_fill: bool) -> Option<CustomPath> 
     }
     let mut p = BezPath::from_svg(d).ok()?;
     p.apply_affine(Affine::translate((-vb[0], -vb[1])));
+    // An open path (no close) is a curve: it is never filled.
+    let closed = d.contains(['z', 'Z']);
     Some(CustomPath {
         w: vb[2].abs().max(1e-6),
         h: vb[3].abs().max(1e-6),
         d: path_d(&p),
-        fill: if closed_fill { FillMode::Norm } else { FillMode::None },
+        fill: if closed_fill && closed { FillMode::Norm } else { FillMode::None },
         stroke: true,
     })
 }
@@ -404,9 +406,56 @@ pub fn enhanced(g: &El, w: f64, h: f64) -> Option<Enhanced> {
         }
     }
     let mut ev = Eval { vb, modifiers: &modifiers, formulas, cache: HashMap::new() };
-    let _ = (w, h);
     let path = attr(g, "draw:enhanced-path").unwrap_or("");
-    let paths = eval_path(path, &mut ev);
+    let mut paths = eval_path(path, &mut ev);
+    // Stretch points: past them the path moves instead of stretching, so corners keep their
+    // shape when the box's proportions differ from the view box's.
+    let sx = attr(g, "draw:path-stretchpoint-x").map(|v| ev.param(v, 0));
+    let sy = attr(g, "draw:path-stretchpoint-y").map(|v| ev.param(v, 0));
+    if (sx.is_some() || sy.is_some()) && w > 0.0 && h > 0.0 {
+        let (kx, ky) = (w / vb[2], h / vb[3]);
+        let k = kx.min(ky);
+        let map = |p: Point| -> Point {
+            let (x, y) = (p.x, p.y);
+            let nx = match sx {
+                Some(s) if kx > k => {
+                    if x + vb[0] <= s {
+                        x * k
+                    } else {
+                        x * k + (w - vb[2] * k)
+                    }
+                }
+                _ => x * kx,
+            };
+            let ny = match sy {
+                Some(s) if ky > k => {
+                    if y + vb[1] <= s {
+                        y * k
+                    } else {
+                        y * k + (h - vb[3] * k)
+                    }
+                }
+                _ => y * ky,
+            };
+            Point::new(nx, ny)
+        };
+        for cp in &mut paths {
+            let Ok(bp) = BezPath::from_svg(&cp.d) else { continue };
+            let mut out = BezPath::new();
+            for el in bp.elements() {
+                out.push(match *el {
+                    PathEl::MoveTo(a) => PathEl::MoveTo(map(a)),
+                    PathEl::LineTo(a) => PathEl::LineTo(map(a)),
+                    PathEl::QuadTo(a, b) => PathEl::QuadTo(map(a), map(b)),
+                    PathEl::CurveTo(a, b, c) => PathEl::CurveTo(map(a), map(b), map(c)),
+                    PathEl::ClosePath => PathEl::ClosePath,
+                });
+            }
+            cp.d = path_d(&out);
+            cp.w = w;
+            cp.h = h;
+        }
+    }
     let text_area = attr(g, "draw:text-areas").and_then(|t| {
         let toks: Vec<&str> = t.split_whitespace().take(4).collect();
         if toks.len() < 4 {

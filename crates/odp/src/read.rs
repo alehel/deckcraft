@@ -708,7 +708,15 @@ impl Reader<'_> {
                 ShapeKind::Opaque { xml: String::new(), preview: Some(pic), label: "OLE object".into(), parts: vec![] }
             } else {
                 ShapeKind::Picture {
-                    fill: PictureFill { media: pic, crop: [0.0; 4], mode: PictureMode::default(), alpha, adjust, upright: false, artistic: None },
+                    fill: PictureFill {
+                        media: pic,
+                        crop: self.crop(g, pic),
+                        mode: PictureMode::default(),
+                        alpha,
+                        adjust,
+                        upright: false,
+                        artistic: None,
+                    },
                 }
             };
             s.ph = None;
@@ -733,6 +741,21 @@ impl Reader<'_> {
             self.pkg.xml(&format!("{href}/content.xml"))?
         };
         crate::chart::read(&content)
+    }
+
+    /// `fo:clip="rect(top, right, bottom, left)"`, lengths at the picture's own size, as the
+    /// crop fractions (left, top, right, bottom).
+    fn crop(&self, g: &Props, media: MediaId) -> [f64; 4] {
+        let Some(clip) = g.get("fo:clip").and_then(|c| c.trim().strip_prefix("rect(")).and_then(|c| c.strip_suffix(')')) else { return [0.0; 4] };
+        let v: Vec<f64> = clip.split([',', ' ']).filter(|t| !t.is_empty()).map(|t| units::length(t).unwrap_or(0.0)).collect();
+        let [top, right, bottom, left] = v.as_slice() else { return [0.0; 4] };
+        let Some((w, h)) = self.p.media(media).and_then(|m| deckcraft_render::image_natural_size(&m.data)) else { return [0.0; 4] };
+        // Natural size is in 96-dpi pixels; points are three quarters of those.
+        let (w, h) = (w * 0.75, h * 0.75);
+        if w <= 0.0 || h <= 0.0 {
+            return [0.0; 4];
+        }
+        [left / w, top / h, right / w, bottom / h].map(|f| if f.is_finite() { f.clamp(-1.0, 0.99) } else { 0.0 })
     }
 
     /// A `draw:custom-shape`: its enhanced geometry as a preset or a custom path.
@@ -1090,11 +1113,34 @@ impl Reader<'_> {
                 .map(|gr| Fill::Gradient(gradient(gr, &with_alpha, None)))
                 .unwrap_or_else(|| Fill::solid(with_alpha(color))),
             "hatch" => {
-                let h = g.get("draw:fill-hatch-name").and_then(|n| self.store.hatches.get(n));
-                let hc = h.and_then(|h| attr(h, "draw:color")).and_then(units::color).unwrap_or(Rgba::BLACK);
+                let h = g.get("draw:fill-hatch-name").and_then(|n| self.store.hatches.get(n)).cloned();
+                let hc = h.as_ref().and_then(|h| attr(h, "draw:color")).and_then(units::color).unwrap_or(Rgba::BLACK);
                 let solid = g.get("draw:fill-hatch-solid").map(String::as_str) == Some("true");
-                let bg = if solid { with_alpha(color) } else { ColorRef::rgb(Rgba::WHITE).with(ColorTransform::Alpha(0)) };
-                Fill::Pattern(PatternFill { preset: hatch_preset(h), fg: with_alpha(hc), bg })
+                // Lines at the hatch's angle and spacing, as a tile picture.
+                let hatch = crate::hatch::Hatch {
+                    style: h.as_ref().and_then(|h| attr(h, "draw:style")).unwrap_or("single").to_string(),
+                    color: hc,
+                    distance: h.as_ref().and_then(|h| attr(h, "draw:distance")).and_then(units::length).unwrap_or(5.0),
+                    rotation: h.as_ref().and_then(|h| attr(h, "draw:rotation")).and_then(|a| units::angle(a, true)).unwrap_or(0.0),
+                    background: solid.then_some(color),
+                };
+                let tile = hatch.tile().and_then(|(png, t)| {
+                    let px = (!png.is_empty()).then(|| (t * 4.0).round().clamp(4.0, 512.0))?;
+                    let id = self.p.add_media(&hatch.media_name(), "image/png", png)?;
+                    Some((id, t / (0.75 * px)))
+                });
+                match tile {
+                    Some((media, s)) => Fill::Picture(PictureFill {
+                        media,
+                        mode: PictureMode::Tile { tx: 0.0, ty: 0.0, sx: s, sy: s, flip: "none".into(), align: "tl".into() },
+                        alpha: alpha.filter(|a| *a < 1.0),
+                        ..Default::default()
+                    }),
+                    None => {
+                        let bg = if solid { with_alpha(color) } else { ColorRef::rgb(Rgba::WHITE).with(ColorTransform::Alpha(0)) };
+                        Fill::Pattern(PatternFill { preset: hatch_preset(h.as_ref()), fg: with_alpha(hc), bg })
+                    }
+                }
             }
             "bitmap" => {
                 let media = g.get("draw:fill-image-name").and_then(|n| self.store.fill_images.get(n).cloned()).and_then(|img| self.image_media(&img));

@@ -64,7 +64,7 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, depth: usize
             let (line, _) = resolve::line(ctx, s);
             let mut g = line_attrs(w, ctx, &line, None);
             g.push_str(r#" draw:fill="none""#);
-            g.push_str(&picture_attrs(fill));
+            g.push_str(&picture_attrs(w, fill));
             if x.flip_h || x.flip_v {
                 let m = match (x.flip_h, x.flip_v) {
                     (true, true) => "horizontal vertical",
@@ -441,6 +441,26 @@ pub fn fill_attrs(w: &mut Writer, ctx: &Ctx, f: &Fill, ph: Option<Rgba>, page: b
             s
         }
         Fill::Picture(pf) => {
+            // A hatch read from a file: the hatch again.
+            if let Some(h) = w.p.media(pf.media).and_then(|m| crate::hatch::Hatch::from_media_name(&m.name)) {
+                let name = w.named.def(
+                    "draw:hatch",
+                    "Hatch",
+                    &format!(
+                        r#"draw:style="{}" draw:color="{}" draw:distance="{}" draw:rotation="{}""#,
+                        esc(&h.style),
+                        hex(h.color),
+                        cm(h.distance),
+                        trim(h.rotation * 10.0, 0)
+                    ),
+                    "",
+                );
+                let mut s = format!(r#" draw:fill="hatch" draw:fill-hatch-name="{name}" draw:fill-hatch-solid="{}""#, h.background.is_some());
+                if let Some(bg) = h.background {
+                    let _ = write!(s, r#" draw:fill-color="{}""#, hex(bg));
+                }
+                return s;
+            }
             let Some(href) = w.media_path(pf.media) else { return r#" draw:fill="none""#.into() };
             let name = w.named.def(
                 "draw:fill-image",
@@ -641,8 +661,15 @@ fn body_attrs(b: &BodyProps) -> String {
     s
 }
 
-fn picture_attrs(pf: &PictureFill) -> String {
+fn picture_attrs(w: &Writer, pf: &PictureFill) -> String {
     let mut s = String::new();
+    if pf.crop.iter().any(|c| *c != 0.0)
+        && let Some((iw, ih)) = w.p.media(pf.media).and_then(|m| deckcraft_render::image_natural_size(&m.data))
+    {
+        let (iw, ih) = (iw * 0.75, ih * 0.75);
+        let [l, t, r, b] = pf.crop;
+        let _ = write!(s, r#" fo:clip="rect({}, {}, {}, {})""#, cm(t * ih), cm(r * iw), cm(b * ih), cm(l * iw));
+    }
     if let Some(a) = pf.alpha.filter(|a| *a < 1.0) {
         let _ = write!(s, r#" draw:image-opacity="{}""#, pct(a.clamp(0.0, 1.0)));
     }

@@ -16,6 +16,7 @@ deckcraft-pptx = { workspace = true }
 deckcraft-render = { workspace = true }
 zip = { workspace = true }
 kurbo = { workspace = true }
+image = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 
