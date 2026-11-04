@@ -270,7 +270,7 @@ impl Reader<'_> {
         let first = self.p.next_id.max(1);
         let (mut master, next) = defaults::build_master(self.p.slide_size, theme, first);
         self.p.next_id = next.max(self.p.next_id);
-        master.name = attr(m, "style:display-name").unwrap_or(&name).to_string();
+        master.name = attr(m, "style:display-name").map_or_else(|| unescape_style_name(&name), str::to_string);
         let page_style = attr(m, "draw:style-name").map(|n| self.store.resolve(scope, "drawing-page", Some(n))).unwrap_or_default();
         // The page style's fill, else the master's background presentation style (older files).
         // Its colour may come from the defaults below it, but only a fill it sets itself counts.
@@ -519,6 +519,10 @@ impl Reader<'_> {
             if let Action::Url { url } = &h.action
                 && let Some(name) = url.strip_prefix('#')
             {
+                if let Some(jump) = vocab::read(vocab::JUMPS, url) {
+                    h.action = jump;
+                    return;
+                }
                 match names.get(name) {
                     Some(id) => h.action = Action::Slide { slide: *id },
                     None => *l = None,
@@ -602,7 +606,8 @@ impl Reader<'_> {
             descr: kid(e, "svg:desc").map(|d| d.text()).unwrap_or_default(),
             title: kid(e, "svg:title").map(|d| d.text()).unwrap_or_default(),
             decorative: g.get("loext:decorative").map(String::as_str) == Some("true"),
-            hidden: attr(e, "draw:display") == Some("none") || attr(e, "presentation:display") == Some("none"),
+            // LibreOffice re-saves `draw:display` as `drawooo:display`.
+            hidden: ["draw:display", "presentation:display", "drawooo:display"].iter().any(|k| attr(e, k) == Some("none")),
             ..Default::default()
         };
         let class = attr(e, "presentation:class");
@@ -661,20 +666,14 @@ impl Reader<'_> {
                 let glue = |k: &str, g: &str| attr(e, k).map(|id| (id.to_string(), attr(e, g).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0)));
                 self.glue.push((s.id, glue("draw:start-shape", "draw:start-glue-point"), glue("draw:end-shape", "draw:end-glue-point")));
                 let d = attr(e, "svg:d").filter(|_| attr(e, "draw:type") != Some("line"));
-                match (d, attr(e, "svg:viewBox")) {
-                    // Straight: its end points.
-                    (None, _) => {
-                        s.xfrm = Some(line_xfrm(e));
-                        s.geom = Geom::preset("straightConnector1");
-                    }
-                    // A routed path in page coordinates (no view box of its own).
-                    (Some(_), None) => return self.connector_from_page_path(s, e),
-                    (Some(d), Some(vb)) => {
-                        let x = s.xfrm.unwrap_or_default();
-                        let vb = geometry::view_box(Some(vb)).unwrap_or([0.0, 0.0, x.w.max(1e-6), x.h.max(1e-6)]);
-                        s.geom = Geom::Custom { paths: vec![geometry::svg_path(d, vb, false)?] };
-                    }
+                if d.is_some() {
+                    // A routed path: always in page coordinates (a connector has no box of its
+                    // own, whatever view box it names).
+                    return self.connector_from_page_path(s, e);
                 }
+                // Straight: its end points.
+                s.xfrm = Some(line_xfrm(e));
+                s.geom = Geom::preset("straightConnector1");
                 s.text = Some(self.text_body(&tcx, e, g));
             }
             "draw:polyline" | "draw:polygon" | "draw:path" => {
@@ -983,6 +982,32 @@ impl PartMedia {
     }
 }
 
+/// A style name with its `_xx_` escapes (hexadecimal character codes, `_20_` a space) undone.
+fn unescape_style_name(name: &str) -> String {
+    let mut out = String::new();
+    let mut rest = name;
+    while let Some(i) = rest.find('_') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        let code = after.find('_').filter(|n| (1..=6).contains(n)).and_then(|n| {
+            let c = u32::from_str_radix(&after[..n], 16).ok().and_then(char::from_u32)?;
+            Some((c, n))
+        });
+        match code {
+            Some((c, n)) => {
+                out.push(c);
+                rest = &after[n + 1..];
+            }
+            None => {
+                out.push('_');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// A part's file name (`Pictures/a.png` → `a.png`).
 fn part_name(href: &str) -> &str {
     href.rsplit('/').next().unwrap_or(href)
@@ -1108,7 +1133,9 @@ fn body_props(g: &Props, custom_shape: bool) -> BodyProps {
     if g.get("style:shrink-to-fit").map(String::as_str) == Some("true") || g.get("draw:fit-to-size").is_some_and(|v| v == "shrink-to-fit") {
         b.autofit = Some(AutoFit::Shrink { font_scale: None, line_reduction: 0.0 });
     }
-    if let Some(v) = g.get("style:writing-mode").and_then(|m| vocab::read(vocab::WRITING_MODES, m)) {
+    // LibreOffice's own modes (rotated text) first, then ODF's.
+    let loext = g.get("loext:writing-mode").and_then(|m| vocab::read(vocab::LOEXT_WRITING_MODES, m));
+    if let Some(v) = loext.or_else(|| g.get("style:writing-mode").and_then(|m| vocab::read(vocab::WRITING_MODES, m))) {
         b.vert = Some(v);
     }
     b

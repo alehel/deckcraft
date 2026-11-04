@@ -40,6 +40,7 @@ pub(crate) const NS: &str = concat!(
     r#"xmlns:smil="urn:oasis:names:tc:opendocument:xmlns:smil-compatible:1.0" "#,
     r#"xmlns:anim="urn:oasis:names:tc:opendocument:xmlns:animation:1.0" "#,
     r#"xmlns:script="urn:oasis:names:tc:opendocument:xmlns:script:1.0" "#,
+    r#"xmlns:dom="http://www.w3.org/2001/xml-events" "#,
     r#"xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" "#,
     r#"xmlns:officeooo="http://openoffice.org/2009/office" "#,
     r#"office:version="1.3""#
@@ -211,6 +212,8 @@ impl PageCtx {
 /// A master page to write: a master and one of its layouts.
 struct Page {
     name: String,
+    /// The name people see (the style name is escaped).
+    display: String,
     master: usize,
     layout: Option<LayoutId>,
 }
@@ -250,14 +253,16 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         let Some(m) = p.masters.get(mi) else { return String::new() };
         let lname = layout.and_then(|l| m.layout(l)).map(|l| l.name.clone()).unwrap_or_default();
         let base = if lname.is_empty() { m.name.clone() } else { format!("{} {}", m.name, lname) };
-        let base = style_name(if base.trim().is_empty() { "Default" } else { &base });
-        let mut name = base.clone();
+        let shown = if base.trim().is_empty() { "Default".to_string() } else { base };
+        let base = style_name(&shown);
+        let (mut name, mut display) = (base.clone(), shown.clone());
         let mut k = 1;
         while pages.iter().any(|pg| pg.name == name) {
             k += 1;
             name = format!("{base}_{k}");
+            display = format!("{shown} {k}");
         }
-        pages.push(Page { name: name.clone(), master: mi, layout });
+        pages.push(Page { name: name.clone(), display, master: mi, layout });
         page_of.insert((mi, layout), name.clone());
         name
     };
@@ -287,7 +292,7 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
             None => Ctx::for_master(p, m),
         };
         common.push_str(&shapes::presentation_styles(&mut w, &ctx, &pg.name));
-        masters.push_str(&shapes::master_page(&mut w, &mut sauto, &ctx, &pg.name, layout));
+        masters.push_str(&shapes::master_page(&mut w, &mut sauto, &ctx, &pg.name, &pg.display, layout));
     }
 
     // content.xml
@@ -587,8 +592,9 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
         let notes = text::plain_paragraphs(w, auto, &ctx, &s.notes);
         let _ = write!(
             out,
-            r#"<presentation:notes><draw:page-thumbnail draw:page-number="{}" presentation:class="page" svg:x="1.5cm" svg:y="2cm" svg:width="18cm" svg:height="10cm"/><draw:frame presentation:class="notes" svg:x="2cm" svg:y="13.5cm" svg:width="17cm" svg:height="13cm"><draw:text-box>{notes}</draw:text-box></draw:frame></presentation:notes>"#,
-            i + 1
+            r#"<presentation:notes><draw:page-thumbnail draw:page-number="{}" presentation:class="page" svg:x="1.5cm" svg:y="2cm" svg:width="18cm" svg:height="10cm"/><draw:frame presentation:style-name="{}-notes" presentation:class="notes" svg:x="2cm" svg:y="13.5cm" svg:width="17cm" svg:height="13cm"><draw:text-box>{notes}</draw:text-box></draw:frame></presentation:notes>"#,
+            i + 1,
+            esc(master_name)
         );
     }
     out.push_str("</draw:page>");

@@ -138,13 +138,15 @@ fn paragraph(
             RunKind::Math { .. } => text_content(&r.text),
             RunKind::Text => text_content(&r.text),
         };
-        let span = format!(r#"<text:span text:style-name="{tstyle}">{content}</text:span>"#);
-        match rp.link.as_ref().and_then(|l| link_href(w, &l.action)) {
-            Some(href) => {
-                let _ = write!(inner, r#"<text:a xlink:type="simple" xlink:href="{}">{span}</text:a>"#, esc(&href));
+        // A link sits inside its span (LibreOffice shows no text for a span inside a link).
+        let content = match rp.link.as_ref().and_then(|l| link_href(w, &l.action).map(|h| (h, l))) {
+            Some((href, l)) => {
+                let title = if l.tooltip.is_empty() { String::new() } else { format!(r#" office:title="{}""#, esc(&l.tooltip)) };
+                format!(r#"<text:a xlink:type="simple" xlink:href="{}"{title}>{content}</text:a>"#, esc(&href))
             }
-            None => inner.push_str(&span),
-        }
+            None => content,
+        };
+        let _ = write!(inner, r#"<text:span text:style-name="{tstyle}">{content}</text:span>"#);
     }
     let id = id.map(|i| format!(r#" xml:id="{i}" text:id="{i}""#)).unwrap_or_default();
     let p = format!(r#"<text:p{id} text:style-name="{pstyle}">{inner}</text:p>"#);
@@ -217,10 +219,11 @@ fn list_level(w: &mut Writer, ctx: &Ctx, level: usize, pp: &ParaProps, bullet: &
                 esc(&c)
             )
         }
-        Bullet::AutoNum { scheme, .. } => {
+        Bullet::AutoNum { scheme, start_at } => {
+            // The start is also the list item's; LibreOffice keeps only this one when it saves.
             let (fmt, prefix, suffix) = num_format(scheme);
             format!(
-                r#"<text:list-level-style-number text:level="{level}" style:num-format="{fmt}" style:num-prefix="{prefix}" style:num-suffix="{suffix}">{props}<style:text-properties{tp}/></text:list-level-style-number>"#
+                r#"<text:list-level-style-number text:level="{level}" style:num-format="{fmt}" style:num-prefix="{prefix}" style:num-suffix="{suffix}" text:start-value="{start_at}">{props}<style:text-properties{tp}/></text:list-level-style-number>"#
             )
         }
         Bullet::Picture { .. } => match picture {
@@ -266,7 +269,7 @@ fn link_href(w: &Writer, a: &Action) -> Option<String> {
     match a {
         Action::Url { url } if deckcraft_model::text::safe_url(url) => Some(url.clone()),
         Action::Slide { slide } => slide_href(w, *slide),
-        _ => None,
+        a => crate::vocab::write(crate::vocab::JUMPS, a).map(str::to_string),
     }
 }
 
@@ -435,7 +438,11 @@ pub fn text_attrs(w: &mut Writer, ctx: &Ctx, r: &RunProps) -> String {
     let color = match &r.fill {
         Some(Fill::Solid { color }) => Some((ctx.color(color, None), color.alpha())),
         Some(Fill::Gradient(g)) => g.stops.first().map(|s| (ctx.color(&s.color, None), s.color.alpha())),
-        Some(Fill::None) => Some((Rgba::BLACK, 0.0)),
+        // Unfilled: an outline shows in the outline's colour, else nothing shows.
+        Some(Fill::None) => match r.outline.as_ref().and_then(|o| o.fill.as_ref()) {
+            Some(Fill::Solid { color }) => Some((ctx.color(color, None), 1.0)),
+            _ => Some((Rgba::BLACK, 0.0)),
+        },
         _ => Some((resolve::text_color(ctx, r), 1.0)),
     };
     if let Some((c, alpha)) = color {
@@ -461,7 +468,9 @@ pub fn text_attrs(w: &mut Writer, ctx: &Ctx, r: &RunProps) -> String {
     if r.shadow.is_some() {
         a.push_str(r#" fo:text-shadow="1pt 1pt""#);
     }
-    if r.outline.is_some() && matches!(r.fill, Some(Fill::None)) {
+    // ODF outlines text in the text's colour, hollow: filled outlined text shows as an outline
+    // of its fill's colour (the nearest it has), unfilled text in the outline's.
+    if r.outline.is_some() {
         a.push_str(r#" style:text-outline="true""#);
     }
     if let Some(lang) = r.lang.as_deref().filter(|l| !l.is_empty()) {

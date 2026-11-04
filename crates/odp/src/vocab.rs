@@ -76,6 +76,18 @@ pub fn odf_underline(ours: &str) -> (&'static str, &'static str, &'static str) {
 /// Our chart legend position and `chart:legend-position`.
 pub const LEGEND: &[(&str, &str)] = &[("r", "end"), ("l", "start"), ("t", "top"), ("b", "bottom"), ("tr", "top-end")];
 
+/// Show-navigation link targets as LibreOffice writes them (`#action?jump=…`).
+pub const JUMPS: &[(deckcraft_model::text::Action, &str)] = &[
+    (deckcraft_model::text::Action::NextSlide, "#action?jump=nextslide"),
+    (deckcraft_model::text::Action::PreviousSlide, "#action?jump=previousslide"),
+    (deckcraft_model::text::Action::FirstSlide, "#action?jump=firstslide"),
+    (deckcraft_model::text::Action::LastSlide, "#action?jump=lastslide"),
+    (deckcraft_model::text::Action::EndShow, "#action?jump=endshow"),
+];
+
+/// `loext:writing-mode`: LibreOffice's text rotated a quarter turn either way.
+pub const LOEXT_WRITING_MODES: &[(TextDir, &str)] = &[(TextDir::Vertical, "tb-rl90"), (TextDir::Vertical270, "bt-lr")];
+
 /// Our tab stop alignment and `style:type`.
 pub const TAB_TYPES: &[(&str, &str)] = &[("l", "left"), ("r", "right"), ("ctr", "center"), ("dec", "char")];
 
@@ -123,8 +135,8 @@ pub fn ext_for(mime: &str) -> &'static str {
 }
 
 /// Our value for a file's.
-pub fn read<T: Copy>(table: &[(T, &str)], odf: &str) -> Option<T> {
-    table.iter().find(|r| r.1 == odf).map(|r| r.0)
+pub fn read<T: Clone>(table: &[(T, &str)], odf: &str) -> Option<T> {
+    table.iter().find(|r| r.1 == odf).map(|r| r.0.clone())
 }
 
 /// The file's value for ours.

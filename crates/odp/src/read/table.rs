@@ -140,9 +140,14 @@ impl Reader<'_> {
         cell.fill = Some(self.fill(&g));
         // An unset border is none (not the table style's). The model's order: left, right, top,
         // bottom.
-        let border = |k: &str| Some(st.cell.get(k).or_else(|| st.cell.get("fo:border")).map_or_else(Line::none, |b| border_line(b)));
+        // LibreOffice keeps a cell's borders in its paragraph properties, and its padding in its
+        // graphic properties.
+        let prop = |p: &'_ crate::styles::Props, k: &str, all: &str| p.get(k).or_else(|| p.get(all)).cloned();
+        let border = |k: &str| {
+            Some(prop(&st.cell, k, "fo:border").or_else(|| prop(&st.paragraph, k, "fo:border")).map_or_else(Line::none, |b| border_line(&b)))
+        };
         cell.borders = [border("fo:border-left"), border("fo:border-right"), border("fo:border-top"), border("fo:border-bottom")];
-        let pad = |k: &str| st.cell.get(k).or_else(|| st.cell.get("fo:padding")).and_then(|v| units::length(v));
+        let pad = |k: &str| prop(&st.cell, k, "fo:padding").or_else(|| prop(&st.graphic, k, "fo:padding")).and_then(|v| units::length(&v));
         if let (Some(l), Some(t), Some(r), Some(b)) =
             (pad("fo:padding-left"), pad("fo:padding-top"), pad("fo:padding-right"), pad("fo:padding-bottom"))
         {

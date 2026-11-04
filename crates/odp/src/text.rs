@@ -239,7 +239,10 @@ fn inline(cx: &TextCtx, el: &El, text_props: &Props, link: Option<&Hyperlink>, r
                 }
                 "text:a" => {
                     let href = attr(e, "xlink:href").unwrap_or("");
-                    let l = hyperlink(href);
+                    let l = hyperlink(href).map(|mut l| {
+                        l.tooltip = attr(e, "office:title").unwrap_or_default().to_string();
+                        l
+                    });
                     inline(cx, e, text_props, l.as_ref().or(link), runs, st, depth + 1);
                 }
                 "text:s" => {
@@ -558,7 +561,9 @@ pub fn run_props(store: &Store, t: &Props, auto: Rgba) -> RunProps {
         });
     }
     if g("style:text-outline") == Some("true") {
-        rp.outline = Some(Line::solid(ColorRef::rgb(Rgba::BLACK), 0.75));
+        // Hollow letters outlined in the text's colour.
+        let color = g("fo:color").and_then(units::color).unwrap_or(Rgba::BLACK);
+        rp.outline = Some(Line::solid(ColorRef::rgb(color), 0.75));
         rp.fill = Some(Fill::None);
     }
     if let Some(lang) = g("fo:language").filter(|l| *l != "zxx" && *l != "none") {

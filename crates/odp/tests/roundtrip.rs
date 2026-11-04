@@ -939,3 +939,70 @@ fn group_and_background_fills_are_written_as_they_show() {
     assert_eq!(children[0].fill, Some(red));
     assert_eq!(s[1].fill, Some(green));
 }
+
+/// What LibreOffice needs to keep our links, notes, starts and vertical text, and what it
+/// writes back for them.
+#[test]
+fn links_notes_numbering_and_vertical_text_survive_libreoffice() {
+    use deckcraft_model::text::{Action, Hyperlink, TextDir};
+    let link =
+        |action: Action| Hyperlink { action, tooltip: "tip".into(), highlight_click: false, sound: None, stop_sound: false, zoom_return: None };
+    let mut web = Run::new("web");
+    web.props.link = Some(link(Action::Url { url: "https://example.org".into() }));
+    let mut next = Run::new("next");
+    next.props.link = Some(link(Action::NextSlide));
+    let mut numbered = Paragraph { runs: vec![Run::new("three")], ..Default::default() };
+    numbered.props.bullet = Some(Bullet::AutoNum { scheme: "arabicPeriod".into(), start_at: 3 });
+    let shape = Shape {
+        xfrm: Some(Xfrm::new(50.0, 50.0, 300.0, 200.0)),
+        text_box: true,
+        text: Some(TextBody { paragraphs: vec![Paragraph { runs: vec![web, next], ..Default::default() }, numbered], ..Default::default() }),
+        ..Default::default()
+    };
+    let mut vertical =
+        Shape { xfrm: Some(Xfrm::new(400.0, 50.0, 100.0, 300.0)), text_box: true, text: Some(TextBody::from_text("up")), ..Default::default() };
+    if let Some(t) = vertical.text.as_mut() {
+        t.body.vert = Some(TextDir::Vertical270);
+    }
+    let mut p = deck_with(vec![shape, vertical]);
+    Arc::make_mut(&mut p.slides[0]).notes = TextBody::from_text("say this");
+    let bytes = deckcraft_odp::export(&p).unwrap();
+    let xml = part(&bytes, "content.xml");
+    // The link inside its span, with its tooltip; the jump as LibreOffice names it.
+    assert!(xml.contains(r#"<text:a xlink:type="simple" xlink:href="https://example.org" office:title="tip">web</text:a></text:span>"#), "{xml}");
+    assert!(xml.contains("#action?jump=nextslide"));
+    assert!(xml.contains(r#"xmlns:dom="http://www.w3.org/2001/xml-events""#));
+    assert!(xml.contains(r#"-notes" presentation:class="notes""#));
+    assert!(xml.contains(r#"text:start-value="3">"#) && xml.contains(r#"loext:writing-mode="bt-lr""#));
+    let back = deckcraft_odp::import(&bytes).unwrap();
+    let s = shapes_of(&back);
+    let runs = &s[0].text.as_ref().unwrap().paragraphs[0].runs;
+    assert_eq!(runs[0].props.link.as_ref().map(|l| l.tooltip.as_str()), Some("tip"));
+    assert_eq!(runs.iter().find(|r| r.text == "next").and_then(|r| r.props.link.as_ref()).map(|l| l.action.clone()), Some(Action::NextSlide));
+    assert_eq!(s[1].text.as_ref().unwrap().body.vert, Some(TextDir::Vertical270));
+    assert_eq!(back.slides[0].notes.text().trim(), "say this");
+}
+
+/// LibreOffice's own forms: connectors routed in page coordinates under a view box, cell
+/// borders in paragraph properties, hidden shapes as `drawooo:display`, masters by their
+/// escaped style name only.
+#[test]
+fn libreoffice_saved_forms_read() {
+    let doc = format!(
+        r#"<office:document {NS} xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0" xmlns:drawooo="http://openoffice.org/2010/draw" office:mimetype="application/vnd.oasis.opendocument.presentation"><office:automatic-styles><style:style style:name="ce1" style:family="table-cell"><style:paragraph-properties fo:border="0.05cm solid #ff0000"/></style:style></office:automatic-styles><office:master-styles><style:master-page style:name="My_20_Master"/></office:master-styles><office:body><office:presentation><draw:page draw:master-page-name="My_20_Master">
+<draw:connector draw:type="standard" svg:x1="10cm" svg:y1="5cm" svg:x2="17cm" svg:y2="8.5cm" svg:viewBox="0 0 7056 3528" svg:d="M10000 5000h3500v3500h3500"/>
+<draw:frame svg:x="1cm" svg:y="10cm" svg:width="8cm" svg:height="2cm"><table:table><table:table-column/><table:table-row><table:table-cell table:style-name="ce1"><text:p>x</text:p></table:table-cell></table:table-row></table:table></draw:frame>
+<draw:custom-shape drawooo:display="none" svg:x="1cm" svg:y="1cm" svg:width="1cm" svg:height="1cm"><draw:enhanced-geometry svg:viewBox="0 0 10 10" draw:enhanced-path="M 0 0 L 10 10 N"/></draw:custom-shape>
+</draw:page></office:presentation></office:body></office:document>"#
+    );
+    let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+    assert_eq!(p.masters[0].name, "My Master");
+    let sh = &p.slides[0].shapes;
+    let conn = sh.iter().find(|s| matches!(s.kind, ShapeKind::Connector { .. })).unwrap();
+    let x = conn.xfrm.unwrap();
+    assert!(x.w > 100.0 && x.h > 50.0, "{x:?}");
+    let table = sh.iter().find_map(|s| if let ShapeKind::Table(t) = &s.kind { Some(t) } else { None }).unwrap();
+    let left = table.rows[0].cells[0].borders[0].as_ref().unwrap();
+    assert_eq!(left.fill, Some(Fill::solid(ColorRef::rgb(Rgba::rgb(255, 0, 0)))));
+    assert!(sh.iter().any(|s| s.hidden));
+}

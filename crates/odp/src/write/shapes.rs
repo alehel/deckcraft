@@ -634,6 +634,9 @@ fn body_attrs(b: &BodyProps) -> String {
     }
     if let Some(m) = b.vert.as_ref().and_then(|v| vocab::write(vocab::WRITING_MODES, v)) {
         let _ = write!(s, r#" style:writing-mode="{m}""#);
+        if let Some(lo) = b.vert.as_ref().and_then(|v| vocab::write(vocab::LOEXT_WRITING_MODES, v)) {
+            let _ = write!(s, r#" loext:writing-mode="{lo}""#);
+        }
     }
     s
 }
@@ -816,7 +819,7 @@ pub fn presentation_styles(w: &mut Writer, ctx: &Ctx, name: &str) -> String {
 }
 
 /// A master page: background, the master's and layout's graphics, and the placeholders.
-pub fn master_page(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str, layout: Option<&Layout>) -> String {
+pub fn master_page(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str, display: &str, layout: Option<&Layout>) -> String {
     let mut pg = PageCtx::new(name, format!("{name}-"), true, resolve::background(ctx, None));
     // Connectors on the master and the layout glue to shapes there.
     pg.refer(w, &ctx.master.shapes, &[]);
@@ -888,7 +891,8 @@ pub fn master_page(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str, layou
         }
     }
     format!(
-        r#"<style:master-page style:name="{name}" style:page-layout-name="PM1" draw:style-name="{dp}">{shapes_xml}<presentation:notes style:page-layout-name="PM2"/></style:master-page>"#
+        r#"<style:master-page style:name="{name}" style:display-name="{}" style:page-layout-name="PM1" draw:style-name="{dp}">{shapes_xml}<presentation:notes style:page-layout-name="PM2"/></style:master-page>"#,
+        esc(display)
     )
 }
 
