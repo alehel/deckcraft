@@ -1006,3 +1006,61 @@ fn libreoffice_saved_forms_read() {
     assert_eq!(left.fill, Some(Fill::solid(ColorRef::rgb(Rgba::rgb(255, 0, 0)))));
     assert!(sh.iter().any(|s| s.hidden));
 }
+
+/// What one definition costs is paid once, not once per use: a long footer on many pages, a
+/// hatch on many shapes, many connectors, many namespace declarations, many custom shapes whose
+/// formulas use their whole budget, and a list style with thousands of levels.
+#[test]
+fn shared_definitions_cost_once() {
+    let ns = r#"xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0""#;
+    let flat = |styles: &str, body: String| {
+        format!(
+            r#"<office:document {NS} {ns} office:mimetype="application/vnd.oasis.opendocument.presentation"><office:styles>{styles}</office:styles><office:automatic-styles><style:style style:name="dp" style:family="drawing-page"><style:drawing-page-properties presentation:display-footer="true"/></style:style></office:automatic-styles><office:body><office:presentation>{body}</office:presentation></office:body></office:document>"#
+        )
+    };
+    let time = |name: &str, doc: String| {
+        let started = std::time::Instant::now();
+        let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+        assert!(started.elapsed().as_secs() < 20, "{name}: {:?}", started.elapsed());
+        p
+    };
+    // A 1 MB footer on 300 pages keeps a short copy on each.
+    let pages = r#"<draw:page draw:style-name="dp" presentation:use-footer-name="f"/>"#.repeat(300);
+    let footer = format!(r#"<presentation:footer-decl presentation:name="f">{}</presentation:footer-decl>{pages}"#, "a".repeat(1 << 20));
+    let p = time("footer", flat("", footer));
+    assert!(p.header_footer.footer_text.len() <= 1024);
+    // One hatch on 300 shapes is drawn once.
+    let hatch = r#"<draw:hatch draw:name="h" draw:style="triple" draw:distance="150pt"/><style:style style:name="g" style:family="graphic"><style:graphic-properties draw:fill="hatch" draw:fill-hatch-name="h"/></style:style>"#;
+    let rects = format!("<draw:page>{}</draw:page>", r#"<draw:rect draw:style-name="g" svg:width="1cm" svg:height="1cm"/>"#.repeat(300));
+    let p = time("hatch", flat(hatch, rects));
+    assert!(p.media.len() <= 2, "{}", p.media.len());
+    // 20 000 connectors glued to one shape.
+    let glue = format!(
+        r#"<draw:page>{}<draw:rect xml:id="t" svg:width="1cm" svg:height="1cm"/></draw:page>"#,
+        r#"<draw:connector draw:start-shape="t" draw:end-shape="t"/>"#.repeat(20_000)
+    );
+    time("glue", flat("", glue));
+    // 300 custom shapes whose formulas are one long cycle.
+    let eqs: String = (0..24).map(|i| format!(r#"<draw:equation draw:name="f{i}" draw:formula="?f{0}+?f{0}"/>"#, (i + 1) % 24)).collect();
+    let shape = format!(
+        r#"<draw:custom-shape svg:width="1cm" svg:height="1cm"><draw:enhanced-geometry svg:viewBox="0 0 10 10" draw:enhanced-path="M ?f0 0 L 10 10 N">{eqs}</draw:enhanced-geometry></draw:custom-shape>"#
+    );
+    time("formulas", flat("", format!("<draw:page>{}</draw:page>", shape.repeat(300))));
+    // A list style of 20 000 levels, used by 5 000 paragraphs.
+    let levels = r#"<text:list-level-style-bullet text:level="99"/>"#.repeat(20_000);
+    let list = format!(
+        r#"<style:style style:name="g" style:family="graphic"><style:graphic-properties><text:list-style>{levels}</text:list-style></style:graphic-properties></style:style>"#
+    );
+    let paras = format!(
+        r#"<draw:page><draw:frame draw:style-name="g" svg:width="1cm" svg:height="1cm"><draw:text-box>{}</draw:text-box></draw:frame></draw:page>"#,
+        "<text:p>x</text:p>".repeat(5_000)
+    );
+    time("list", flat(&list, paras));
+    // 20 000 namespace declarations over 100 000 elements.
+    let decls: String = (0..20_000).map(|i| format!(r#" xmlns:p{i}="urn:x""#)).collect();
+    let many = format!(
+        r#"<office:document {NS}{decls}><office:body><office:presentation><draw:page>{}</draw:page></office:presentation></office:body></office:document>"#,
+        "<a/>".repeat(100_000)
+    );
+    time("namespaces", many);
+}

@@ -44,7 +44,7 @@ const FOREIGN: &str = "foreign-ns";
 pub fn parse(bytes: &[u8]) -> Result<El, OdpError> {
     let doc = deckcraft_pptx::parse_xml(bytes).map_err(|e| OdpError::Xml(e.to_string()))?;
     let mut root = doc.root;
-    canonicalise(&mut root, &mut Vec::new(), 0);
+    canonicalise(&mut root, &mut Scope::new(), 0);
     Ok(root)
 }
 
@@ -58,7 +58,11 @@ fn is_canonical(prefix: &str) -> bool {
 
 /// A prefix binding in scope: the prefix as the file wrote it (`""` for the default namespace) and
 /// the prefix its names are rewritten to (`None`: left as written).
-type Binding = (String, Option<&'static str>);
+type Binding = Option<&'static str>;
+
+/// The bindings in scope: each prefix's, innermost last, so a lookup is one map access however
+/// many prefixes a document declares.
+type Scope = std::collections::HashMap<String, Vec<Binding>>;
 
 /// What a namespace declaration binds its prefix to.
 fn target(prefix: &str, uri: &str) -> Option<&'static str> {
@@ -74,27 +78,26 @@ fn target(prefix: &str, uri: &str) -> Option<&'static str> {
 
 /// A name's new spelling under `scope` (innermost binding last), if it changes. Element names take
 /// the default namespace; unprefixed attributes have none. `xmlns` and `xml` are never rewritten.
-fn renamed(name: &str, scope: &[Binding], element: bool) -> Option<String> {
+fn renamed(name: &str, scope: &Scope, element: bool) -> Option<String> {
     let (p, l) = match name.split_once(':') {
         Some(("xmlns" | "xml", _)) => return None,
         Some(pl) => pl,
         None if element => ("", name),
         None => return None,
     };
-    let c = scope.iter().rev().find(|(q, _)| q == p)?.1?;
+    let c = (*scope.get(p)?.last()?)?;
     (c != p).then(|| format!("{c}:{l}"))
 }
 
 /// Rewrite prefixes in scope (declared on this element or an ancestor) to the canonical ones.
 ///
-/// The bindings live on one stack, innermost last: an element pushes its own declarations and
-/// truncates them away when done, so the only allocations are one per declaration and one per
-/// name that actually changes (no map is copied per element).
-fn canonicalise(el: &mut El, scope: &mut Vec<Binding>, depth: usize) {
+/// An element pushes its own declarations onto their prefixes' stacks and pops them when done,
+/// so no map is copied per element.
+fn canonicalise(el: &mut El, scope: &mut Scope, depth: usize) {
     if depth > crate::read::MAX_DEPTH {
         return;
     }
-    let outer = scope.len();
+    let mut declared: Vec<String> = vec![];
     for (k, v) in &el.attrs {
         let prefix = if k == "xmlns" {
             ""
@@ -103,7 +106,8 @@ fn canonicalise(el: &mut El, scope: &mut Vec<Binding>, depth: usize) {
         } else {
             continue;
         };
-        scope.push((prefix.to_string(), target(prefix, v)));
+        scope.entry(prefix.to_string()).or_default().push(target(prefix, v));
+        declared.push(prefix.to_string());
     }
     if let Some(n) = renamed(&el.name, scope, true) {
         el.name = n;
@@ -118,7 +122,11 @@ fn canonicalise(el: &mut El, scope: &mut Vec<Binding>, depth: usize) {
             canonicalise(e, scope, depth + 1);
         }
     }
-    scope.truncate(outer);
+    for p in declared {
+        if let Some(stack) = scope.get_mut(&p) {
+            stack.pop();
+        }
+    }
 }
 
 /// Exact-name attribute lookup.

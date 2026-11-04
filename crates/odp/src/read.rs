@@ -97,6 +97,10 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         master_index: HashMap::new(),
         page_names: HashMap::new(),
         para_ids: vec![],
+        hatch_tiles: HashMap::new(),
+        fill_images: HashMap::new(),
+        charts: HashMap::new(),
+        formula_work: geometry::DOCUMENT_WORK,
         package_media: parts,
         targets: HashMap::new(),
         glue: vec![],
@@ -134,20 +138,30 @@ struct Decls {
     dates: HashMap<String, (bool, String)>,
 }
 
+/// Longest footer, header or date text kept (each page that shows it gets a copy).
+const MAX_DECL_TEXT: usize = 1024;
+
 impl Decls {
     fn read(body: &El) -> Self {
         let mut d = Decls::default();
         for e in body.elements() {
             let name = attr(e, "presentation:name").unwrap_or_default().to_string();
+            let text = || {
+                let mut t = e.text();
+                if let Some((i, _)) = t.char_indices().nth(MAX_DECL_TEXT) {
+                    t.truncate(i);
+                }
+                t
+            };
             match e.name.as_str() {
                 "presentation:footer-decl" => {
-                    d.footers.insert(name, e.text());
+                    d.footers.insert(name, text());
                 }
                 "presentation:header-decl" => {
-                    d.headers.insert(name, e.text());
+                    d.headers.insert(name, text());
                 }
                 "presentation:date-time-decl" => {
-                    d.dates.insert(name, (attr(e, "presentation:source") == Some("current-date"), e.text()));
+                    d.dates.insert(name, (attr(e, "presentation:source") == Some("current-date"), text()));
                 }
                 _ => {}
             }
@@ -167,6 +181,13 @@ struct Reader<'a> {
     page_names: HashMap<String, SlideId>,
     /// The ids of the paragraphs of the text body read last.
     para_ids: Vec<Option<String>>,
+    /// What many shapes may share, worked out once: hatch tiles (by hatch) and fill images and
+    /// embedded charts (by name).
+    hatch_tiles: HashMap<String, Option<(MediaId, f64)>>,
+    fill_images: HashMap<String, Option<MediaId>>,
+    charts: HashMap<String, Option<deckcraft_model::chart::Chart>>,
+    /// Shape-formula steps the document has left ([`geometry::DOCUMENT_WORK`] in all).
+    formula_work: usize,
     package_media: PartMedia,
     /// Element ids on the page being read (shapes and paragraphs), for its animations.
     targets: crate::anim::Targets,
@@ -417,20 +438,21 @@ impl Reader<'_> {
             }
         }
         // Glued connector ends, now that every shape on the page has its id.
-        for (cid, start, end) in std::mem::take(&mut self.glue) {
+        let glue = std::mem::take(&mut self.glue);
+        if !glue.is_empty() {
+            // Every shape by id, once (not a search of the page per connector).
+            let mut by_id: HashMap<ShapeId, &Shape> = HashMap::new();
+            deckcraft_model::walk(&shapes, &mut |s, _| {
+                by_id.insert(s.id, s);
+            });
             let resolve = |g: &Option<(String, u32)>| {
                 let (id, pt) = g.as_ref()?;
                 let (sid, _) = self.targets.get(id)?;
                 // The target's connection site nearest LibreOffice's glue point.
-                Some((*sid, geometry::site_of_glue_point(deckcraft_model::find_shape(&shapes, *sid), *pt)))
+                Some((*sid, geometry::site_of_glue_point(by_id.get(sid).copied(), *pt)))
             };
-            let (a, b) = (resolve(&start), resolve(&end));
-            if let Some(c) = deckcraft_model::find_shape_mut(&mut shapes, cid)
-                && let ShapeKind::Connector { start, end } = &mut c.kind
-            {
-                *start = a;
-                *end = b;
-            }
+            let ends: HashMap<ShapeId, Ends> = glue.iter().map(|(cid, start, end)| (*cid, (resolve(start), resolve(end)))).collect();
+            set_connector_ends(&mut shapes, &ends, 0);
         }
         if let Some(t) = timing {
             let page_id = attr(page, "xml:id").or_else(|| attr(page, "draw:id"));
@@ -822,13 +844,19 @@ impl Reader<'_> {
     }
 
     /// The chart an embedded object holds (`Object 1/content.xml`), if it is a chart.
-    fn object_chart(&self, o: &El) -> Option<deckcraft_model::chart::Chart> {
+    fn object_chart(&mut self, o: &El) -> Option<deckcraft_model::chart::Chart> {
         let href = attr(o, "xlink:href")?.trim_start_matches("./").trim_end_matches('/');
         if href.is_empty() {
             // An inline chart document (flat files), read in place.
             return crate::chart::read(kid(o, "office:document")?);
         }
-        crate::chart::read(&self.pkg.xml(&format!("{href}/content.xml"))?)
+        // A package's chart document is read once, however many frames show it.
+        if let Some(c) = self.charts.get(href) {
+            return c.clone();
+        }
+        let chart = self.pkg.xml(&format!("{href}/content.xml")).and_then(|d| crate::chart::read(&d));
+        self.charts.insert(href.to_string(), chart.clone());
+        chart
     }
 
     /// `fo:clip="rect(top, right, bottom, left)"`, lengths at the picture's own size, as the
@@ -849,7 +877,7 @@ impl Reader<'_> {
     /// A `draw:custom-shape`: its enhanced geometry as a preset or a custom path.
     fn custom_shape(&mut self, e: &El, s: &mut Shape, tcx: &TextCtx, g: &Props) {
         let x = s.xfrm.unwrap_or_default();
-        let Some(eg) = kid(e, "draw:enhanced-geometry").and_then(|eg| geometry::enhanced(eg, x.w, x.h)) else {
+        let Some(eg) = kid(e, "draw:enhanced-geometry").and_then(|eg| geometry::enhanced(eg, x.w, x.h, &mut self.formula_work)) else {
             s.text = Some(self.text_body(tcx, e, g));
             return;
         };
@@ -958,7 +986,7 @@ impl Reader<'_> {
         let b64 = kid(img, "office:binary-data")?.text();
         let data = crate::package::base64(&b64)?;
         let mime = crate::package::sniff_image(&data);
-        self.p.add_media(&format!("image.{}", mime.1), mime.0, data)
+        self.package_media.add_bytes(&mut self.p, &format!("image.{}", mime.1), mime.0, data)
     }
 
     // -----------------------------------------------------------------------------------------
@@ -968,17 +996,59 @@ impl Reader<'_> {
 /// Package parts already added as media, by reference: each part is copied once, whether it's
 /// a picture, a bullet, a clip or a font.
 #[derive(Default)]
-struct PartMedia(HashMap<String, MediaId>);
+struct PartMedia {
+    by_part: HashMap<String, MediaId>,
+    /// Everything added, by size and content hash: an identical picture is stored once without
+    /// comparing it to every other one.
+    by_content: HashMap<(usize, u64), Vec<MediaId>>,
+}
 
 impl PartMedia {
     fn add(&mut self, pkg: &Package, p: &mut Presentation, href: &str, mime: &str) -> Option<MediaId> {
-        if let Some(id) = self.0.get(href) {
+        // By the part's own name, so differently spelled references share it.
+        let (key, data) = pkg.part(href)?;
+        if let Some(id) = self.by_part.get(key) {
             return Some(*id);
         }
-        let data = pkg.get(href)?;
-        let id = p.add_media(part_name(href), mime, data.to_vec())?;
-        self.0.insert(href.to_string(), id);
+        let id = self.add_bytes(p, part_name(key), mime, data.to_vec())?;
+        self.by_part.insert(key.to_string(), id);
         Some(id)
+    }
+
+    /// Media from anywhere (a package part, inline data, a drawn tile), once per content.
+    fn add_bytes(&mut self, p: &mut Presentation, name: &str, mime: &str, data: Vec<u8>) -> Option<MediaId> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        data.hash(&mut h);
+        let key = (data.len(), h.finish());
+        let same = self.by_content.get(&key).and_then(|ids| ids.iter().copied().find(|id| p.media(*id).is_some_and(|m| *m.data == data)));
+        if let Some(id) = same {
+            return Some(id);
+        }
+        let id = p.add_new_media(name, mime, data)?;
+        self.by_content.entry(key).or_default().push(id);
+        Some(id)
+    }
+}
+
+/// A connector's glued ends: (shape, connection site) at its start and its end.
+type Ends = (Option<(ShapeId, u32)>, Option<(ShapeId, u32)>);
+
+/// Set the ends of the connectors among `shapes` (and in their groups) that `ends` names.
+fn set_connector_ends(shapes: &mut [Shape], ends: &HashMap<ShapeId, Ends>, depth: usize) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    for s in shapes {
+        match &mut s.kind {
+            ShapeKind::Connector { start, end } => {
+                if let Some((a, b)) = ends.get(&s.id) {
+                    (*start, *end) = (*a, *b);
+                }
+            }
+            ShapeKind::Group { children, .. } => set_connector_ends(children, ends, depth + 1),
+            _ => {}
+        }
     }
 }
 

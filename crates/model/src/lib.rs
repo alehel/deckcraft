@@ -1096,6 +1096,11 @@ impl Presentation {
         if let Some(m) = self.media.iter().find(|m| m.data.len() == data.len() && *m.data == data) {
             return Some(m.id);
         }
+        self.add_new_media(name, content_type, data)
+    }
+    /// Add media the caller knows isn't here yet (an importer that indexes what it added), without
+    /// [`Presentation::add_media`]'s search of every item.
+    pub fn add_new_media(&mut self, name: &str, content_type: &str, data: Vec<u8>) -> Option<MediaId> {
         let id = MediaId(self.alloc_id()?);
         self.media.push(MediaItem { id, name: name.into(), content_type: content_type.into(), data: Arc::new(data), link: None });
         Some(id)

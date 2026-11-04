@@ -206,11 +206,13 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
     let header_rows = 1usize;
     let style = |el: &El| attr(el, "chart:style-name").map(|n| store.resolve(Scope::Content, "chart", Some(n))).unwrap_or_default();
     let series_els: Vec<&El> = kids(plot, "chart:series").take(256).collect();
+    // Points with their own fill, across the chart's series.
+    let mut fills_left = MAX_GRID_CELLS;
     for (i, s) in series_els.iter().enumerate() {
         let ss = style(s);
         let values = attr(s, "chart:values-cell-range-address").map(|a| grid.range(a)).unwrap_or_else(|| {
             // No address: the (i+1)th column below the header row.
-            grid.rows.iter().skip(header_rows).map(|r| r.get(i + 1).cloned().unwrap_or_default()).collect()
+            grid.rows.iter().skip(header_rows).take(MAX_CELLS).map(|r| r.get(i + 1).cloned().unwrap_or_default()).collect()
         });
         let name = attr(s, "chart:label-cell-address")
             .and_then(|a| grid.range(a).into_iter().next())
@@ -261,7 +263,9 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
             let rep = repeat(p, "chart:repeated").min(series.values.len() - idx);
             let fill = attr(p, "chart:style-name").map(|n| store.resolve(Scope::Content, "chart", Some(n))).and_then(|st| simple_fill(&st.graphic));
             if let Some(f) = fill.filter(|f| series.fill.as_ref() != Some(f)) {
-                series.point_fills.extend((idx..idx + rep).map(|k| (k, f.clone())));
+                let n = rep.min(fills_left);
+                fills_left -= n;
+                series.point_fills.extend((idx..idx + n).map(|k| (k, f.clone())));
             }
             idx += rep;
         }

@@ -52,7 +52,7 @@ pub fn paragraphs(cx: &TextCtx, container: &El) -> Vec<Paragraph> {
 /// [`paragraphs`], each with its id.
 pub fn paragraphs_with_ids(cx: &TextCtx, container: &El) -> Vec<IdParagraph> {
     let mut out = vec![];
-    let shape_list = cx.levels.first().and_then(|s| s.list.as_ref());
+    let shape_list = cx.levels.first().and_then(|s| s.list.as_deref());
     walk(cx, container, &ListCtx { style: shape_list, depth: 0, bulleted: false, in_list: false, start: None }, &mut out, 0);
     out
 }
@@ -130,7 +130,7 @@ fn para_style(cx: &TextCtx, depth: usize, p_style: Option<&str>) -> Style {
 
 /// The paragraph and text formatting a style gives a paragraph at this list position.
 fn props_at<'a>(cx: &TextCtx<'a>, style: &Style, list: &ListCtx<'a>) -> (ParaProps, RunProps) {
-    let mut props = para_props(&style.paragraph, style.tabs.as_ref());
+    let mut props = para_props(&style.paragraph, style.tabs.as_deref());
     let run = run_props(cx.store, &style.text, cx.auto_color);
     // The list's level, else the one the paragraph style names (`style:list-style-name`).
     let at_depth = |l: &'a El| level_style(l, list.depth);
@@ -144,7 +144,7 @@ fn props_at<'a>(cx: &TextCtx<'a>, style: &Style, list: &ListCtx<'a>) -> (ParaPro
 /// `style` alone.
 pub fn level_props(store: &Store, scope: Scope, style: &Style, depth: usize, in_list: bool) -> (ParaProps, RunProps) {
     let cx = TextCtx { store, scope, levels: vec![style.clone()], shape_para: None, auto_color: Rgba::BLACK, inherit: false };
-    let list = ListCtx { style: style.list.as_ref(), depth: depth.min(MAX_LIST_DEPTH - 1), bulleted: in_list, in_list, start: None };
+    let list = ListCtx { style: style.list.as_deref(), depth: depth.min(MAX_LIST_DEPTH - 1), bulleted: in_list, in_list, start: None };
     props_at(&cx, style, &list)
 }
 

@@ -156,8 +156,9 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
         let varied = c.vary_colors && matches!(c.kind, ChartType::Pie | ChartType::Doughnut);
         let mut points = String::new();
         let mut plain = 0usize;
+        let own_fills: std::collections::HashMap<usize, &Fill> = s.point_fills.iter().map(|(k, f)| (*k, f)).collect();
         for p in 0..s.values.len().min(MAX) {
-            let own = s.point_fills.iter().find(|(k, _)| *k == p).map(|(_, f)| f);
+            let own = own_fills.get(&p).copied();
             if own.is_none() && !varied {
                 plain += 1;
                 continue;

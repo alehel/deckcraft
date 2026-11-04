@@ -189,18 +189,21 @@ impl PageCtx {
     pub fn refer(&mut self, w: &Writer, shapes: &[deckcraft_model::Shape], animations: &[deckcraft_model::Animation]) {
         let mut wanted: Vec<(deckcraft_model::ShapeId, Option<u32>)> =
             animations.iter().flat_map(|a| [Some((a.shape, a.paragraph)), a.trigger.map(|t| (t, None))]).flatten().collect();
+        // Every shape by id, once (not a search of the page per reference).
         let mut ends = vec![];
+        let mut by_id: HashMap<deckcraft_model::ShapeId, &deckcraft_model::Shape> = HashMap::new();
         deckcraft_model::walk(shapes, &mut |sh, _| {
+            by_id.insert(sh.id, sh);
             if let ShapeKind::Connector { start, end } = &sh.kind {
                 ends.extend([start, end].into_iter().flatten().copied());
             }
         });
         for (id, site) in ends {
             wanted.push((id, None));
-            self.glue.insert((id.0, site), crate::geometry::glue_point_of_site(deckcraft_model::find_shape(shapes, id), site));
+            self.glue.insert((id.0, site), crate::geometry::glue_point_of_site(by_id.get(&id).copied(), site));
         }
         for (id, para) in wanted {
-            let Some(sh) = deckcraft_model::find_shape(shapes, id) else { continue };
+            let Some(sh) = by_id.get(&id).copied() else { continue };
             let para_ok = para.is_none_or(|i| sh.text.as_ref().is_some_and(|t| (i as usize) < t.paragraphs.len()));
             if shapes::writes_element(w, sh, !self.is_master) && para_ok {
                 self.ids.insert((id.0, para));

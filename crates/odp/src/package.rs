@@ -112,11 +112,18 @@ impl Package {
     /// A part by its path in the package (`Pictures/a.png`, `./Pictures/a.png`). Lookup falls back
     /// to a case-insensitive match, as some writers disagree with their own manifest.
     pub fn get(&self, name: &str) -> Option<&[u8]> {
+        self.part(name).map(|(_, d)| d)
+    }
+
+    /// A part and its name as the package spells it: every way of naming one part finds the same
+    /// name.
+    pub fn part(&self, name: &str) -> Option<(&str, &[u8])> {
         let n = name.trim_start_matches("./").trim_start_matches('/');
-        if let Some(d) = self.parts.get(n) {
-            return Some(d);
+        if let Some((k, d)) = self.parts.get_key_value(n) {
+            return Some((k.as_str(), d.as_slice()));
         }
-        self.lower.get(&n.to_ascii_lowercase()).and_then(|k| self.parts.get(k)).map(Vec::as_slice)
+        let k = self.lower.get(&n.to_ascii_lowercase())?;
+        self.parts.get_key_value(k).map(|(k, d)| (k.as_str(), d.as_slice()))
     }
 
     pub fn xml(&self, name: &str) -> Option<crate::dom::El> {

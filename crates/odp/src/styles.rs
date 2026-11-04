@@ -37,9 +37,9 @@ pub struct Style {
     pub table: Props,
     pub chart: Props,
     /// A list style embedded in `style:graphic-properties` (presentation and graphic styles).
-    pub list: Option<El>,
+    pub list: Option<std::rc::Rc<El>>,
     /// `style:tab-stops` of the paragraph properties.
-    pub tabs: Option<El>,
+    pub tabs: Option<std::rc::Rc<El>>,
 }
 
 impl Style {
@@ -158,7 +158,7 @@ fn read_style(el: &El) -> Style {
                     s.graphic.extend(read_props(p));
                 }
                 if let Some(l) = kid(p, "text:list-style") {
-                    s.list = Some(l.clone());
+                    s.list = Some(std::rc::Rc::new(list_levels(l)));
                 }
                 // Text columns (`style:columns`), kept with the graphic properties.
                 if let Some(c) = kid(p, "style:columns") {
@@ -172,7 +172,7 @@ fn read_style(el: &El) -> Style {
             "style:paragraph-properties" => {
                 s.paragraph.extend(read_props(p));
                 if let Some(t) = kid(p, "style:tab-stops") {
-                    s.tabs = Some(t.clone());
+                    s.tabs = Some(std::rc::Rc::new(t.clone()));
                 }
             }
             "style:text-properties" => s.text.extend(read_props(p)),
@@ -229,7 +229,7 @@ impl Store {
                     self.defaults.insert(s.family.clone(), s);
                 }
                 "text:list-style" => {
-                    self.layer_mut(auto).lists.insert(name, el.clone());
+                    self.layer_mut(auto).lists.insert(name, list_levels(el));
                 }
                 "draw:gradient" | "svg:linearGradient" | "svg:radialGradient" => {
                     self.gradients.insert(name, el.clone());
@@ -371,13 +371,28 @@ impl Store {
     pub fn all_lists(&self) -> Vec<&El> {
         let layers = [&self.common, &self.auto_styles, &self.auto_content];
         let standalone = layers.iter().flat_map(|l| l.lists.values());
-        let in_styles = layers.iter().flat_map(|l| l.styles.values()).filter_map(|s| s.list.as_ref());
+        let in_styles = layers.iter().flat_map(|l| l.styles.values()).filter_map(|s| s.list.as_deref());
         standalone.chain(in_styles).collect()
     }
 
     pub fn list_style(&self, scope: Scope, name: &str) -> Option<&El> {
         self.layer(Some(scope)).lists.get(name).or_else(|| self.common.lists.get(name))
     }
+}
+
+/// A list style with at most its ten levels (ODF has ten; a file may list thousands, and
+/// each paragraph looks through them).
+fn list_levels(l: &El) -> El {
+    let mut out = l.clone();
+    let mut kept = 0;
+    out.children.retain(|c| match c {
+        deckcraft_pptx::XmlNode::El(e) if e.name.starts_with("text:list-level-style") => {
+            kept += 1;
+            kept <= 10
+        }
+        _ => true,
+    });
+    out
 }
 
 /// A colour at an opacity (0–1; opaque when `None` or 1).

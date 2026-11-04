@@ -1,10 +1,10 @@
 //! Fills, lines, shadows and backgrounds of graphic styles.
 
 use deckcraft_color::{ColorTransform, Rgba};
-use deckcraft_model::Background;
 use deckcraft_model::style::{
     ColorRef, Dash, Effects, Fill, Gradient, GradientShape, GradientStop, Line, LineEnd, PatternFill, PictureAdjust, PictureFill, PictureMode, Shadow,
 };
+use deckcraft_model::{Background, MediaId};
 
 use super::Reader;
 use crate::dom::{El, attr, kids};
@@ -63,11 +63,20 @@ impl Reader<'_> {
                     ha("draw:rotation").and_then(|a| units::angle(a, true)).unwrap_or(0.0),
                     solid.then_some(color),
                 );
-                let tile = hatch.tile().and_then(|tile| {
-                    let px = f64::from(tile.px);
-                    let id = self.p.add_media(&hatch.media_name(), "image/png", tile.png)?;
-                    Some((id, tile.edge_pt / (0.75 * px)))
-                });
+                // Drawn once per hatch, however many shapes use it.
+                let key = hatch.media_name();
+                let tile = match self.hatch_tiles.get(&key) {
+                    Some(t) => *t,
+                    None => {
+                        let t = hatch.tile().and_then(|tile| {
+                            let px = f64::from(tile.px);
+                            let id = self.package_media.add_bytes(&mut self.p, &key, "image/png", tile.png)?;
+                            Some((id, tile.edge_pt / (0.75 * px)))
+                        });
+                        self.hatch_tiles.insert(key, t);
+                        t
+                    }
+                };
                 match tile {
                     Some((media, s)) => Fill::Picture(PictureFill {
                         media,
@@ -82,7 +91,7 @@ impl Reader<'_> {
                 }
             }
             "bitmap" => {
-                let media = g.get("draw:fill-image-name").and_then(|n| store.fill_images.get(n)).and_then(|img| self.image_media(img));
+                let media = g.get("draw:fill-image-name").and_then(|n| self.fill_image(&store, n));
                 match media {
                     Some(m) => {
                         let repeat = g.get("style:repeat").map(String::as_str).unwrap_or("repeat");
@@ -98,6 +107,16 @@ impl Reader<'_> {
             }
             _ => Fill::None,
         }
+    }
+
+    /// A named fill image as media, decoded once however many shapes use it.
+    fn fill_image(&mut self, store: &crate::styles::Store, name: &str) -> Option<MediaId> {
+        if let Some(m) = self.fill_images.get(name) {
+            return *m;
+        }
+        let m = store.fill_images.get(name).and_then(|img| self.image_media(img));
+        self.fill_images.insert(name.to_string(), m);
+        m
     }
 
     pub(super) fn line(&self, g: &Props) -> Line {

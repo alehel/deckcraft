@@ -225,6 +225,8 @@ const MAX_DEPTH: usize = 256;
 /// Steps (equations entered, expressions read) one shape's evaluation may take in total, over all
 /// its equations, path parameters and text areas.
 const MAX_WORK: usize = 1_000_000;
+/// Steps all the shapes of one document may take together.
+pub const DOCUMENT_WORK: usize = 50_000_000;
 /// 1/100 mm per point (`logwidth`/`logheight` are in 1/100 mm).
 /// [`Eval::low`] when the value being computed depends on nothing unfinished.
 const COMPLETE: usize = usize::MAX;
@@ -250,8 +252,9 @@ struct Eval<'a> {
     slots: HashMap<&'a str, Slot>,
     /// Current nesting, shared by every equation and sub-expression.
     depth: usize,
-    /// Steps taken so far, shared by the whole evaluation.
+    /// Steps taken so far, shared by the whole evaluation, and the most it may take.
     work: usize,
+    max_work: usize,
     /// The shallowest depth of an unfinished equation the value being computed has read (a
     /// cycle), 0 if a depth or work cut-off fired, [`COMPLETE`] otherwise. Only values whose
     /// own evaluation leaves this at or below their depth are cached.
@@ -261,7 +264,18 @@ struct Eval<'a> {
 impl<'a> Eval<'a> {
     fn new(vb: [f64; 4], size: (f64, f64), stretch: [Option<f64>; 2], modifiers: &'a [f64], formulas: &'a HashMap<&'a str, Vec<Tok>>) -> Self {
         let log = |v: f64| if v.is_finite() && v > 0.0 { v * units::HMM_PER_PT } else { 0.0 };
-        Eval { vb, log: [log(size.0), log(size.1)], stretch, modifiers, formulas, slots: HashMap::new(), depth: 0, work: 0, low: COMPLETE }
+        Eval {
+            vb,
+            log: [log(size.0), log(size.1)],
+            stretch,
+            modifiers,
+            formulas,
+            slots: HashMap::new(),
+            depth: 0,
+            work: 0,
+            max_work: MAX_WORK,
+            low: COMPLETE,
+        }
     }
 
     /// The identifiers of ODF 1.3 §19.171 (`draw:formula`), also the constants of handle
@@ -293,7 +307,7 @@ impl<'a> Eval<'a> {
     /// shared depth or work budget.
     fn enter(&mut self) -> bool {
         self.work = self.work.saturating_add(1);
-        if self.depth >= MAX_DEPTH || self.work > MAX_WORK {
+        if self.depth >= MAX_DEPTH || self.work > self.max_work {
             self.low = 0;
             return false;
         }
@@ -618,8 +632,12 @@ fn arity(cmd: char) -> Option<usize> {
     })
 }
 
-/// Read a `draw:enhanced-geometry` for a shape of `w`×`h` points.
-pub fn enhanced(g: &El, w: f64, h: f64) -> Option<Enhanced> {
+/// Read a `draw:enhanced-geometry` for a shape of `w`×`h` points, its formulas' steps taken from
+/// the document's `budget` (none left: `None`, the shape is its box).
+pub fn enhanced(g: &El, w: f64, h: f64, budget: &mut usize) -> Option<Enhanced> {
+    if *budget == 0 {
+        return None;
+    }
     let kind = attr(g, "draw:type").unwrap_or("non-primitive").to_string();
     let vb = view_box(attr(g, "svg:viewBox")).filter(|v| v[2] > 0.0 && v[3] > 0.0).unwrap_or([0.0, 0.0, 21600.0, 21600.0]);
     let modifiers: Vec<f64> = attr(g, "draw:modifiers").unwrap_or("").split_whitespace().take(64).map(|t| parse_number(t).unwrap_or(0.0)).collect();
@@ -634,6 +652,7 @@ pub fn enhanced(g: &El, w: f64, h: f64) -> Option<Enhanced> {
     // Stretch points are plain numbers (data type double).
     let stretch = ["draw:path-stretchpoint-x", "draw:path-stretchpoint-y"].map(|k| attr(g, k).and_then(parse_number));
     let mut ev = Eval::new(vb, (w, h), stretch, &modifiers, &formulas);
+    ev.max_work = MAX_WORK.min(*budget);
     // In document order first, so chains of equations that build on earlier ones are computed
     // one link at a time instead of all at once from the deepest reference.
     for n in order {
@@ -646,6 +665,7 @@ pub fn enhanced(g: &El, w: f64, h: f64) -> Option<Enhanced> {
         let [l, t, r, b] = toks.as_slice() else { return None };
         Some(frame.fractions([l, t, r, b].map(|p| ev.param(p))))
     });
+    *budget = budget.saturating_sub(ev.work);
     Some(Enhanced {
         kind,
         modifiers,
@@ -872,6 +892,11 @@ fn arc_end(arc: &Arc) -> Point {
 mod tests {
     use super::*;
 
+    /// A whole document's formula budget, for one shape.
+    fn budget() -> usize {
+        DOCUMENT_WORK
+    }
+
     fn geom(xml: &str) -> El {
         let wrapped = format!(
             r#"<r xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0">{xml}</r>"#
@@ -896,7 +921,7 @@ mod tests {
         let g = geom(
             r#"<draw:enhanced-geometry svg:viewBox="0 0 21600 21600" draw:modifiers="10800" draw:enhanced-path="M ?f0 0 L 21600 21600 0 21600 Z N" draw:text-areas="?f1 10800 ?f2 18000"><draw:equation draw:name="f0" draw:formula="$0 "/><draw:equation draw:name="f1" draw:formula="$0 /2"/><draw:equation draw:name="f2" draw:formula="?f1 +10800"/></draw:enhanced-geometry>"#,
         );
-        let e = enhanced(&g, 100.0, 100.0).unwrap();
+        let e = enhanced(&g, 100.0, 100.0, &mut budget()).unwrap();
         assert_eq!(e.paths.len(), 1);
         assert_eq!(e.paths[0].d, "M 10800 0 L 21600 21600 L 0 21600 Z");
         let ta = e.text_area.unwrap();
@@ -908,7 +933,7 @@ mod tests {
         let g = geom(
             r#"<draw:enhanced-geometry svg:viewBox="0 0 100 100" draw:enhanced-path="M ?a ?b L ?c 0 N"><draw:equation draw:name="a" draw:formula="if(-1, 5, max(10, 20)) + sqrt(16)*cos(0)"/><draw:equation draw:name="b" draw:formula="?b + 1"/><draw:equation draw:name="c" draw:formula="width/2 + 3/0"/></draw:enhanced-geometry>"#,
         );
-        let e = enhanced(&g, 10.0, 10.0).unwrap();
+        let e = enhanced(&g, 10.0, 10.0, &mut budget()).unwrap();
         assert!(e.paths[0].d.starts_with("M 24 "), "{}", e.paths[0].d);
         assert!(e.paths[0].d.contains("L 50 0"));
     }
@@ -918,7 +943,7 @@ mod tests {
         let g = geom(
             r#"<draw:enhanced-geometry svg:viewBox="0 0 21600 21600" draw:enhanced-path="U 10800 10800 10800 10800 0 360 Z N F M 0 0 L 1 1 N"/>"#,
         );
-        let e = enhanced(&g, 10.0, 10.0).unwrap();
+        let e = enhanced(&g, 10.0, 10.0, &mut budget()).unwrap();
         assert_eq!(e.paths.len(), 2);
         assert!(e.paths[0].d.contains('C'));
         assert_eq!(e.paths[1].fill, FillMode::None);
@@ -964,7 +989,7 @@ mod tests {
         let g = geom(
             r#"<draw:enhanced-geometry svg:viewBox="0 0 2540 2540" draw:path-stretchpoint-x="700" draw:enhanced-path="M logwidth xstretch L right bottom N"/>"#,
         );
-        let e = enhanced(&g, 72.0, 72.0).unwrap();
+        let e = enhanced(&g, 72.0, 72.0, &mut budget()).unwrap();
         assert_eq!(e.paths[0].d, "M 2540 700 L 2540 2540");
     }
 
@@ -993,14 +1018,14 @@ mod tests {
             r#"<draw:enhanced-geometry svg:viewBox="0 0 1000 1000" draw:enhanced-path="M ?f399 ?f100 N">{}</draw:enhanced-geometry>"#,
             chain((0..400).rev())
         ));
-        let e = enhanced(&g, 10.0, 10.0).unwrap();
+        let e = enhanced(&g, 10.0, 10.0, &mut budget()).unwrap();
         assert!(e.paths[0].d.ends_with(" 101"), "{}", e.paths[0].d);
         // Listed bottom first (the usual order), any length works.
         let g = geom(&format!(
             r#"<draw:enhanced-geometry svg:viewBox="0 0 1000 1000" draw:enhanced-path="M ?f2000 0 N">{}</draw:enhanced-geometry>"#,
             chain(0..=2000)
         ));
-        assert_eq!(enhanced(&g, 10.0, 10.0).unwrap().paths[0].d, "M 2001 0");
+        assert_eq!(enhanced(&g, 10.0, 10.0, &mut budget()).unwrap().paths[0].d, "M 2001 0");
     }
 
     #[test]
@@ -1046,7 +1071,7 @@ mod tests {
             r#"<draw:enhanced-geometry svg:viewBox="0 0 10 10" draw:enhanced-path="M ?f0 ?d L ?f2 ?f4000 N" draw:text-areas="?f0 ?d ?f1 ?f3">{eqs}<draw:equation draw:name="d" draw:formula="{deep}"/></draw:enhanced-geometry>"#
         ));
         let started = std::time::Instant::now();
-        let e = enhanced(&g, 10.0, 10.0).unwrap();
+        let e = enhanced(&g, 10.0, 10.0, &mut budget()).unwrap();
         assert!(started.elapsed().as_secs() < 20);
         assert!(e.paths[0].d.split(' ').filter_map(|t| t.parse::<f64>().ok()).all(f64::is_finite));
     }
@@ -1057,7 +1082,7 @@ mod tests {
         let g = geom(
             r#"<draw:enhanced-geometry svg:viewBox="0 0 100 100" draw:path-stretchpoint-x="50" draw:enhanced-path="M 0 0 L 40 0 60 0 100 0 100 100 0 100 Z N" draw:text-areas="10 10 90 90"/>"#,
         );
-        let e = enhanced(&g, 200.0, 100.0).unwrap();
+        let e = enhanced(&g, 200.0, 100.0, &mut budget()).unwrap();
         assert_eq!(e.paths[0].d, "M 0 0 L 40 0 L 160 0 L 200 0 L 200 100 L 0 100 Z");
         assert_eq!((e.paths[0].w, e.paths[0].h), (200.0, 100.0));
         // The text area moves with the outline: 10 → 10 pt and 90 → 190 pt of 200.
@@ -1069,7 +1094,7 @@ mod tests {
         let g = geom(
             r#"<draw:enhanced-geometry svg:viewBox="10 10 100 100" draw:path-stretchpoint-x="50" draw:path-stretchpoint-y="60" draw:enhanced-path="M 10 10 L 110 110 N" draw:text-areas="10 ?t 110 110"><draw:equation draw:name="t" draw:formula="ystretch + 10"/></draw:enhanced-geometry>"#,
         );
-        let e = enhanced(&g, 50.0, 100.0).unwrap();
+        let e = enhanced(&g, 50.0, 100.0, &mut budget()).unwrap();
         assert_eq!(e.paths[0].d, "M 0 0 L 50 100");
         let ta = e.text_area.unwrap();
         // y = 70 is past the stretch point: (70 − 10) × 0.5 + 50 = 80 of 100.
@@ -1079,7 +1104,7 @@ mod tests {
         let g = geom(
             r#"<draw:enhanced-geometry svg:viewBox="0 0 100 100" draw:path-stretchpoint-x="50" draw:enhanced-path="M 0 0 L 100 100 N" draw:text-areas="10 10 90 90"/>"#,
         );
-        let e = enhanced(&g, 30.0, 30.0).unwrap();
+        let e = enhanced(&g, 30.0, 30.0, &mut budget()).unwrap();
         assert_eq!((e.paths[0].d.as_str(), e.paths[0].w), ("M 0 0 L 100 100", 100.0));
         assert!((e.text_area.unwrap()[2] - 0.9).abs() < 1e-9);
     }
@@ -1104,7 +1129,7 @@ mod tests {
         let g = geom(
             r#"<draw:enhanced-geometry svg:viewBox="0 0 1000 1000" draw:modifiers="2.5E+2" draw:path-stretchpoint-x="1e2" draw:enhanced-path="M 1e2 $0 L xstretch 5E-1 N"/>"#,
         );
-        let e = enhanced(&g, 10.0, 10.0).unwrap();
+        let e = enhanced(&g, 10.0, 10.0, &mut budget()).unwrap();
         assert_eq!(e.modifiers, vec![250.0]);
         assert_eq!(e.paths[0].d, "M 100 250 L 100 0.5");
     }
