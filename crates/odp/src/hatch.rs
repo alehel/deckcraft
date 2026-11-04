@@ -252,6 +252,65 @@ impl Hatch {
     }
 }
 
+impl Hatch {
+    /// The DrawingML pattern closest to this hatch (for when no tile can be drawn).
+    pub fn preset(&self) -> &'static str {
+        let rot = self.rotation.rem_euclid(180.0);
+        let dense = self.distance < 4.0;
+        let near = |a: f64| (rot - a).abs() < 22.5 || (rot - a - 180.0).abs() < 22.5;
+        match self.style {
+            HatchStyle::Double | HatchStyle::Triple => {
+                if near(45.0) || near(135.0) {
+                    if dense { "smCheck" } else { "openDmnd" }
+                } else if dense {
+                    "smGrid"
+                } else {
+                    "lgGrid"
+                }
+            }
+            _ => {
+                if near(0.0) {
+                    if dense { "narHorz" } else { "ltHorz" }
+                } else if near(90.0) {
+                    if dense { "narVert" } else { "ltVert" }
+                } else if near(45.0) {
+                    if dense { "dkUpDiag" } else { "ltUpDiag" }
+                } else if dense {
+                    "dkDnDiag"
+                } else {
+                    "ltDnDiag"
+                }
+            }
+        }
+    }
+
+    /// The hatch closest to a DrawingML pattern, in its colours.
+    pub fn from_preset(preset: &str, color: Rgba, background: Option<Rgba>) -> Hatch {
+        let (style, rotation, distance) = {
+            use HatchStyle::{Double, Single};
+            let dense = preset.starts_with("dk") || preset.starts_with("nar") || preset.starts_with("sm") || preset.starts_with("pct");
+            let d = if dense { 2.0 } else { 4.0 };
+            let p = preset.to_ascii_lowercase();
+            if p.contains("grid") || p.contains("cross") && !p.contains("diag") || p.contains("plaid") {
+                (Double, 0.0, d)
+            } else if p.contains("check") || p.contains("diagcross") || p.contains("dmnd") || p.contains("trellis") {
+                (Double, 45.0, d)
+            } else if p.contains("updiag") || p.contains("wdupdiag") {
+                (Single, 45.0, d)
+            } else if p.contains("dndiag") {
+                (Single, 135.0, d)
+            } else if p.contains("horz") {
+                (Single, 0.0, d)
+            } else if p.contains("vert") {
+                (Single, 90.0, d)
+            } else {
+                (Single, 45.0, d)
+            }
+        };
+        Hatch::new(style, color, distance, rotation, background)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +437,14 @@ mod tests {
                 }
                 assert!(worst <= 1, "{rot}° d={d}: seam off by {worst}");
             }
+        }
+    }
+
+    /// A pattern turned into a hatch turns back into the same pattern.
+    #[test]
+    fn patterns_and_hatches_map_both_ways() {
+        for preset in ["ltHorz", "narVert", "ltUpDiag", "dkDnDiag", "lgGrid", "smGrid", "openDmnd", "smCheck"] {
+            assert_eq!(Hatch::from_preset(preset, Rgba::BLACK, None).preset(), preset);
         }
     }
 }

@@ -1184,7 +1184,7 @@ impl Reader<'_> {
                     }),
                     None => {
                         let bg = if solid { with_alpha(color) } else { ColorRef::rgb(Rgba::WHITE).with(ColorTransform::Alpha(0)) };
-                        Fill::Pattern(PatternFill { preset: hatch_preset(&hatch), fg: with_alpha(hc), bg })
+                        Fill::Pattern(PatternFill { preset: hatch.preset().into(), fg: with_alpha(hc), bg })
                     }
                 }
             }
@@ -1670,38 +1670,6 @@ fn srgb_steps(stops: &[(f64, Rgba)]) -> Vec<(f64, Rgba)> {
         out.push(*last);
     }
     out
-}
-
-/// The closest DrawingML pattern to a hatch.
-fn hatch_preset(h: &crate::hatch::Hatch) -> String {
-    let rot = h.rotation.rem_euclid(180.0);
-    let dense = h.distance < 4.0;
-    let near = |a: f64| (rot - a).abs() < 22.5 || (rot - a - 180.0).abs() < 22.5;
-    let p = match h.style {
-        crate::hatch::HatchStyle::Double | crate::hatch::HatchStyle::Triple => {
-            if near(45.0) || near(135.0) {
-                if dense { "smCheck" } else { "openDmnd" }
-            } else if dense {
-                "smGrid"
-            } else {
-                "lgGrid"
-            }
-        }
-        _ => {
-            if near(0.0) {
-                if dense { "narHorz" } else { "ltHorz" }
-            } else if near(90.0) {
-                if dense { "narVert" } else { "ltVert" }
-            } else if near(45.0) {
-                if dense { "dkUpDiag" } else { "ltUpDiag" }
-            } else if dense {
-                "dkDnDiag"
-            } else {
-                "ltDnDiag"
-            }
-        }
-    };
-    p.into()
 }
 
 fn dash(d: &El, width: f64) -> Dash {

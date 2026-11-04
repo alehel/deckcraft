@@ -459,23 +459,7 @@ pub fn fill_attrs(w: &mut Writer, ctx: &Ctx, f: &Fill, ph: Option<Rgba>) -> Stri
         Fill::Picture(pf) => {
             // A hatch read from a file: the hatch again.
             if let Some(h) = w.p.media(pf.media).and_then(|m| crate::hatch::Hatch::from_media_name(&m.name)) {
-                let name = w.named.def(
-                    "draw:hatch",
-                    "Hatch",
-                    &format!(
-                        r#"draw:style="{}" draw:color="{}" draw:distance="{}" draw:rotation="{}""#,
-                        h.style.as_str(),
-                        hex(h.color),
-                        cm(h.distance),
-                        trim(h.rotation * 10.0, 0)
-                    ),
-                    "",
-                );
-                let mut s = format!(r#" draw:fill="hatch" draw:fill-hatch-name="{name}" draw:fill-hatch-solid="{}""#, h.background.is_some());
-                if let Some(bg) = h.background {
-                    let _ = write!(s, r#" draw:fill-color="{}""#, hex(bg));
-                }
-                return s;
+                return hatch_fill(w, &h);
             }
             let Some(href) = w.media_path(pf.media) else { return r#" draw:fill="none""#.into() };
             let name = w.named.def("draw:fill-image", "Bitmap", &embed(&href), "");
@@ -490,45 +474,29 @@ pub fn fill_attrs(w: &mut Writer, ctx: &Ctx, f: &Fill, ph: Option<Rgba>) -> Stri
             s
         }
         Fill::Pattern(pat) => {
-            let fg = ctx.color(&pat.fg, ph);
+            // The closest hatch: ODF has no other patterns.
             let (bg, bga) = color_alpha(ctx, &pat.bg, ph);
-            let (style, rot, dist) = hatch_of(&pat.preset);
-            let name = w.named.def(
-                "draw:hatch",
-                "Hatch",
-                &format!(r#"draw:style="{style}" draw:color="{}" draw:distance="{}" draw:rotation="{}""#, hex(fg), cm(dist), rot * 10),
-                "",
-            );
-            let solid = bga > 0.0;
-            let mut s = format!(r#" draw:fill="hatch" draw:fill-hatch-name="{name}" draw:fill-hatch-solid="{solid}""#);
-            if solid {
-                let _ = write!(s, r#" draw:fill-color="{}""#, hex(bg));
-            }
-            s
+            hatch_fill(w, &crate::hatch::Hatch::from_preset(&pat.preset, ctx.color(&pat.fg, ph), (bga > 0.0).then_some(bg)))
         }
     }
 }
 
 /// A hatch close to a DrawingML pattern: style, rotation (degrees) and line distance (points).
-fn hatch_of(preset: &str) -> (&'static str, i32, f64) {
-    let dense = preset.starts_with("dk") || preset.starts_with("nar") || preset.starts_with("sm") || preset.starts_with("pct");
-    let d = if dense { 2.0 } else { 4.0 };
-    let p = preset.to_ascii_lowercase();
-    if p.contains("grid") || p.contains("cross") && !p.contains("diag") || p.contains("plaid") {
-        ("double", 0, d)
-    } else if p.contains("check") || p.contains("diagcross") || p.contains("dmnd") || p.contains("trellis") {
-        ("double", 45, d)
-    } else if p.contains("updiag") || p.contains("wdupdiag") {
-        ("single", 45, d)
-    } else if p.contains("dndiag") {
-        ("single", 135, d)
-    } else if p.contains("horz") {
-        ("single", 0, d)
-    } else if p.contains("vert") {
-        ("single", 90, d)
-    } else {
-        ("single", 45, d)
+/// A hatch fill: its `draw:hatch` definition, and the fill attributes naming it.
+fn hatch_fill(w: &mut Writer, h: &crate::hatch::Hatch) -> String {
+    let attrs = format!(
+        r#"draw:style="{}" draw:color="{}" draw:distance="{}" draw:rotation="{}""#,
+        h.style.as_str(),
+        hex(h.color),
+        cm(h.distance),
+        trim(h.rotation * 10.0, 0)
+    );
+    let name = w.named.def("draw:hatch", "Hatch", &attrs, "");
+    let mut s = format!(r#" draw:fill="hatch" draw:fill-hatch-name="{name}" draw:fill-hatch-solid="{}""#, h.background.is_some());
+    if let Some(bg) = h.background {
+        let _ = write!(s, r#" draw:fill-color="{}""#, hex(bg));
     }
+    s
 }
 
 pub fn line_attrs(w: &mut Writer, ctx: &Ctx, l: &Line, ph: Option<Rgba>) -> String {
