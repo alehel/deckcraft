@@ -10,7 +10,7 @@ use deckcraft_model::style::{
     PictureMode, Shadow,
 };
 use deckcraft_model::table::{Cell, Row, Table};
-use deckcraft_model::text::{Action, Align, Anchor, AutoFit, BodyProps, LevelStyle, ListStyle, Paragraph, Spacing, TextBody, TextDir};
+use deckcraft_model::text::{Action, Align, Anchor, AutoFit, BodyProps, LevelStyle, ListStyle, Paragraph, TextBody, TextDir};
 use deckcraft_model::{
     Background, CustomPath, Geom, LayoutType, MediaId, PhType, Placeholder, Presentation, Shape, ShapeId, ShapeKind, Size, Slide, SlideId, Xfrm,
     defaults,
@@ -105,7 +105,8 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         targets: HashMap::new(),
         glue: vec![],
     };
-    r.p.masters.clear();
+    // The blank deck's master stands in only when the file has none.
+    let fallback = std::mem::take(&mut r.p.masters);
     if let Some(m) = meta.as_ref().and_then(|m| kid(m, "office:meta")) {
         r.meta(m);
     }
@@ -113,9 +114,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         r.master(m, master_scope);
     }
     if r.p.masters.is_empty() {
-        let (m, next) = defaults::build_master(size, Default::default(), r.p.next_id.max(1));
-        r.p.next_id = next;
-        r.p.masters.push(Arc::new(m));
+        r.p.masters = fallback;
     }
     let decls = Decls::read(body);
     for page in kids(body, "draw:page").take(MAX_PAGES) {
@@ -183,6 +182,8 @@ struct Ctx {
     master: String,
     /// The background colour behind shapes, for automatic text colour.
     bg: Rgba,
+    /// The page has a subtitle: its title is a title slide's centred title.
+    title_slide: bool,
 }
 
 impl Reader<'_> {
@@ -273,10 +274,13 @@ impl Reader<'_> {
         master.name = attr(m, "style:display-name").unwrap_or(&name).to_string();
         let page_style = attr(m, "draw:style-name").map(|n| self.store.resolve(scope, "drawing-page", Some(n))).unwrap_or_default();
         // The page style's fill, else the master's background presentation style (older files).
-        let bg_style = self.store.chain(scope, "presentation", &format!("{name}-background"));
+        // Its colour may come from the defaults below it, but only a fill it sets itself counts.
+        let bg_name = format!("{name}-background");
+        let sets_fill = self.store.chain(scope, "presentation", &bg_name).graphic.contains_key("draw:fill");
+        let bg_style = if sets_fill { self.store.resolve(scope, "presentation", Some(&bg_name)) } else { Default::default() };
         master.background = Some(
-            self.background(&page_style.page, scope)
-                .or_else(|| self.background(&bg_style.graphic, scope))
+            self.background(&page_style.page)
+                .or_else(|| self.background(&bg_style.graphic))
                 .unwrap_or(Background::Fill { fill: Fill::solid(ColorRef::rgb(Rgba::WHITE)) }),
         );
         // Text styles: the title level, and the nine outline levels.
@@ -292,7 +296,7 @@ impl Reader<'_> {
             master.body_style.set(lv, self.level_style(&s, scope, lv, true));
         }
         let bg = master.background.as_ref().and_then(background_rgb).unwrap_or(Rgba::WHITE);
-        let ctx = Ctx { scope, master: name.clone(), bg };
+        let ctx = Ctx { scope, master: name.clone(), bg, title_slide: false };
         let mut decorations = vec![];
         for e in m.elements() {
             let class = attr(e, "presentation:class");
@@ -348,34 +352,9 @@ impl Reader<'_> {
 
     /// One level of a master text style from a resolved presentation style.
     fn level_style(&self, s: &Style, scope: Scope, level: u8, in_list: bool) -> LevelStyle {
-        let cx = TextCtx {
-            store: &self.store,
-            scope,
-            base: s.clone(),
-            outline_master: None,
-            own: None,
-            shape_para: None,
-            slide_links: false,
-            auto_color: Rgba::BLACK,
-        };
-        // Read a one-paragraph list at this level to get the bullet and indents the style gives.
-        let mut xml = String::from("<b xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\">");
-        let wraps = if in_list { usize::from(level) + 1 } else { 0 };
-        for _ in 0..wraps {
-            xml.push_str("<text:list><text:list-item>");
-        }
-        xml.push_str("<text:p/>");
-        for _ in 0..wraps {
-            xml.push_str("</text:list-item></text:list>");
-        }
-        xml.push_str("</b>");
-        let para = crate::dom::parse(xml.as_bytes()).ok().and_then(|b| text::paragraphs(&cx, &b).into_iter().next()).unwrap_or_default();
-        let mut para_props = para.props;
-        if s.list.is_none() || !in_list {
-            para_props.bullet = Some(deckcraft_model::text::Bullet::None);
-        }
-        complete_para(&mut para_props);
-        LevelStyle { para: para_props, run: para.end_props }
+        let (mut para, run) = text::level_props(&self.store, scope, s, usize::from(level), in_list);
+        text::complete(&mut para);
+        LevelStyle { para, run }
     }
 
     // -----------------------------------------------------------------------------------------
@@ -393,9 +372,10 @@ impl Reader<'_> {
         let page_style = attr(page, "draw:style-name").map(|n| self.store.resolve(Scope::Content, "drawing-page", Some(n))).unwrap_or_default();
         let pp = &page_style.page;
         let master_bg = self.p.masters.get(mi).and_then(|m| m.background.as_ref()).and_then(background_rgb);
-        let page_bg = self.background(pp, Scope::Content);
+        let page_bg = self.background(pp);
         let bg = page_bg.as_ref().and_then(background_rgb).or(master_bg).unwrap_or(Rgba::WHITE);
-        let ctx = Ctx { scope: Scope::Content, master: master_name, bg };
+        let title_slide = page.elements().any(|e| attr(e, "presentation:class") == Some("subtitle"));
+        let ctx = Ctx { scope: Scope::Content, master: master_name, bg, title_slide };
         let mut slide = Slide { id, name: attr(page, "draw:name").unwrap_or("").to_string(), ..Default::default() };
         if let Some(n) = attr(page, "draw:name") {
             self.page_names.push((n.to_string(), id));
@@ -477,7 +457,7 @@ impl Reader<'_> {
             .iter()
             .filter(|s| matches!(s.ph_type(), Some(PhType::Body | PhType::Obj | PhType::Chart | PhType::Table | PhType::Picture)))
             .count();
-        let kind = if has(PhType::SubTitle) || has(PhType::CtrTitle) {
+        let kind = if ctx.title_slide || has(PhType::CtrTitle) {
             LayoutType::Title
         } else if has(PhType::Title) && bodies >= 2 {
             LayoutType::TwoContent
@@ -490,15 +470,6 @@ impl Reader<'_> {
         };
         let master = self.p.masters.get(mi)?;
         slide.layout = master.layouts.iter().find(|l| l.kind == kind).or(master.layouts.first()).map(|l| l.id).unwrap_or_default();
-        if kind == LayoutType::Title {
-            for s in &mut shapes {
-                if let Some(ph) = s.ph.as_mut()
-                    && ph.kind == PhType::Title
-                {
-                    ph.kind = PhType::CtrTitle;
-                }
-            }
-        }
         slide.shapes = shapes;
         Some(slide)
     }
@@ -623,13 +594,12 @@ impl Reader<'_> {
         Some(Xfrm::new(len("svg:x").unwrap_or(0.0), len("svg:y").unwrap_or(0.0), w, h))
     }
 
-    /// The resolved style of a shape, and its own automatic style (for outline levels).
-    fn shape_style(&self, e: &El, ctx: &Ctx) -> (Style, Option<Style>, bool) {
-        if let Some(n) = attr(e, "presentation:style-name") {
-            return (self.store.resolve(ctx.scope, "presentation", Some(n)), self.store.own(ctx.scope, "presentation", n), true);
+    /// The resolved style of a shape, and whether it is a presentation style.
+    fn shape_style(&self, e: &El, ctx: &Ctx) -> (Style, bool) {
+        match attr(e, "presentation:style-name") {
+            Some(n) => (self.store.resolve(ctx.scope, "presentation", Some(n)), true),
+            None => (self.store.resolve(ctx.scope, "graphic", attr(e, "draw:style-name")), false),
         }
-        let n = attr(e, "draw:style-name");
-        (self.store.resolve(ctx.scope, "graphic", n), n.and_then(|n| self.store.own(ctx.scope, "graphic", n)), false)
     }
 
     fn shape(&mut self, e: &El, ctx: &Ctx, depth: usize) -> Option<Shape> {
@@ -637,7 +607,7 @@ impl Reader<'_> {
             return None;
         }
         self.shapes += 1;
-        let (style, own, presentation) = self.shape_style(e, ctx);
+        let (style, presentation) = self.shape_style(e, ctx);
         let g = &style.graphic;
         let mut s = Shape {
             id: self.id(),
@@ -650,7 +620,7 @@ impl Reader<'_> {
             ..Default::default()
         };
         let class = attr(e, "presentation:class");
-        if let Some(kind) = class.and_then(ph_kind) {
+        if let Some(kind) = class.and_then(ph_kind).map(|k| if k == PhType::Title && ctx.title_slide { PhType::CtrTitle } else { k }) {
             let idx = match kind {
                 PhType::Title | PhType::CtrTitle => 0,
                 PhType::Date => 10,
@@ -663,23 +633,19 @@ impl Reader<'_> {
         if let Some(id) = attr(e, "xml:id").or_else(|| attr(e, "draw:id")) {
             self.targets.insert(id.to_string(), (s.id, None));
         }
-        s.fill = Some(self.fill(g, ctx.scope));
+        s.fill = Some(self.fill(g));
         s.line = Some(self.line(g));
         s.effects = self.effects(g);
         let shape_para = attr(e, "draw:text-style-name").map(|n| self.store.chain(ctx.scope, "paragraph", n));
         let outline = class == Some("outline");
         let store = std::rc::Rc::clone(&self.store);
         let behind = s.fill.as_ref().and_then(fill_rgb).unwrap_or(ctx.bg);
-        let tcx = TextCtx {
-            store: &store,
-            scope: ctx.scope,
-            base: style.clone(),
-            outline_master: outline.then(|| ctx.master.clone()),
-            own,
-            shape_para,
-            slide_links: true,
-            auto_color: text::auto_text_color(behind),
-        };
+        let levels =
+            if outline { store.outline_levels(ctx.scope, &ctx.master, attr(e, "presentation:style-name"), &style) } else { vec![style.clone()] };
+        // Title and outline placeholders inherit what their styles leave unset from the master's
+        // title and outline levels, which are read from the same styles.
+        let inherit = matches!(class, Some("title" | "outline"));
+        let tcx = TextCtx { store: &store, scope: ctx.scope, levels, shape_para, auto_color: text::auto_text_color(behind), inherit };
         let name = e.name.as_str();
         match name {
             "draw:frame" => self.frame(e, &mut s, &tcx, g, ctx)?,
@@ -756,7 +722,7 @@ impl Reader<'_> {
                 // A link around a shape: the shape, clickable.
                 let inner = e.elements().next()?;
                 let mut inner_shape = self.shape(inner, ctx, depth + 1)?;
-                inner_shape.click = text::hyperlink(attr(e, "xlink:href").unwrap_or(""), true);
+                inner_shape.click = text::hyperlink(attr(e, "xlink:href").unwrap_or(""));
                 return Some(inner_shape);
             }
             _ => return None,
@@ -952,7 +918,7 @@ impl Reader<'_> {
             "first-page" => Action::FirstSlide,
             "last-page" => Action::LastSlide,
             "stop" => Action::EndShow,
-            "show" => return text::hyperlink(attr(l, "xlink:href").unwrap_or(""), true),
+            "show" => return text::hyperlink(attr(l, "xlink:href").unwrap_or("")),
             _ => return None,
         };
         Some(deckcraft_model::text::Hyperlink {
@@ -967,22 +933,14 @@ impl Reader<'_> {
 
     fn text_body(&self, cx: &TextCtx, container: &El, g: &Props) -> TextBody {
         let mut paragraphs = text::paragraphs(cx, container);
-        for p in &mut paragraphs {
-            complete_para(&mut p.props);
-        }
         let custom_shape = container.name == "draw:custom-shape";
         let body = body_props(g, custom_shape);
-        // A text block pushed to one side of the frame: lines that start at the left follow it.
-        let block = g.get("draw:textarea-horizontal-align").map(String::as_str);
-        let to = match block {
-            Some("right") => Some(Align::Right),
-            Some("center") => Some(Align::Center),
-            _ => None,
-        };
-        if let Some(to) = to {
+        // A text block pushed to the right of the frame (centred is `anchor_ctr`): we have no
+        // such block placement, so lines that start at the left follow it.
+        if g.get("draw:textarea-horizontal-align").map(String::as_str) == Some("right") {
             for p in &mut paragraphs {
-                if p.props.align == Some(Align::Left) && p.props.bullet == Some(deckcraft_model::text::Bullet::None) {
-                    p.props.align = Some(to);
+                if p.props.align.unwrap_or(Align::Left) == Align::Left && p.props.bullet == Some(deckcraft_model::text::Bullet::None) {
+                    p.props.align = Some(Align::Right);
                 }
             }
         }
@@ -1170,13 +1128,7 @@ impl Reader<'_> {
         );
         for name in [default_style, attr(c, "table:style-name")].into_iter().flatten() {
             if self.store.exists(ctx.scope, "table-cell", name) {
-                let own = self.store.chain(ctx.scope, "table-cell", name);
-                for (k, v) in &own.graphic {
-                    st.graphic.insert(k.clone(), v.clone());
-                }
-                st.cell.extend(own.cell.clone());
-                st.paragraph.extend(own.paragraph.clone());
-                crate::styles::merge_text(&mut st.text, &own.text);
+                st.merge(&self.store.chain(ctx.scope, "table-cell", name));
             }
         }
         let mut g = st.graphic.clone();
@@ -1190,8 +1142,8 @@ impl Reader<'_> {
             }
             None => {}
         }
-        // Unset, a cell is filled (the pool default), as the slide shows it.
-        cell.fill = Some(self.fill(&g, ctx.scope));
+        // Unset, a cell is filled (the built-in default), as the slide shows it.
+        cell.fill = Some(self.fill(&g));
         let border = |k: &str| st.cell.get(k).or_else(|| st.cell.get("fo:border")).and_then(|b| border_line(b));
         // An unset border is none (not the table style's).
         cell.borders = [border("fo:border-left"), border("fo:border-top"), border("fo:border-right"), border("fo:border-bottom")]
@@ -1210,17 +1162,12 @@ impl Reader<'_> {
         let tcx = TextCtx {
             store: &store,
             scope: ctx.scope,
-            base,
-            outline_master: None,
-            own: None,
+            levels: vec![base],
             shape_para: None,
-            slide_links: true,
             auto_color: text::auto_text_color(behind),
+            inherit: false,
         };
         let mut paragraphs = text::paragraphs(&tcx, c);
-        for p in &mut paragraphs {
-            complete_para(&mut p.props);
-        }
         if paragraphs.is_empty() {
             paragraphs.push(Paragraph::default());
         }
@@ -1231,17 +1178,18 @@ impl Reader<'_> {
     // -----------------------------------------------------------------------------------------
     // Fills, lines, effects
 
-    fn background(&mut self, page: &Props, scope: Scope) -> Option<Background> {
+    fn background(&mut self, page: &Props) -> Option<Background> {
         let fill = page.get("draw:fill")?;
         if fill == "none" {
             return None;
         }
-        let f = self.fill(page, scope);
-        Some(Background::Fill { fill: f })
+        // A page style names no colour of its own: the graphic default's applies.
+        let mut props = self.store.default_of("graphic").graphic;
+        props.extend(page.iter().map(|(k, v)| (k.clone(), v.clone())));
+        Some(Background::Fill { fill: self.fill(&props) })
     }
 
-    fn fill(&mut self, g: &Props, scope: Scope) -> Fill {
-        let _ = scope;
+    fn fill(&mut self, g: &Props) -> Fill {
         // An opacity gradient wins over a flat opacity.
         let og = g.get("draw:opacity-name").and_then(|n| self.store.opacities.get(n)).cloned();
         let alpha = match &og {
@@ -1252,20 +1200,10 @@ impl Reader<'_> {
             }
             None => g.get("draw:opacity").and_then(|v| units::percent(v)).map(|v| v.clamp(0.0, 1.0)),
         };
-        let with_alpha = |c: Rgba| {
-            let mut r = ColorRef::rgb(c);
-            if let Some(a) = alpha.filter(|a| *a < 1.0) {
-                r.mods.push(ColorTransform::Alpha((a * 100_000.0).round() as i32));
-            }
-            r
-        };
-        let color = g
-            .get("draw:fill-color")
-            .and_then(|c| units::color(c))
-            .or_else(|| self.store.default_of("graphic").graphic.get("draw:fill-color").and_then(|c| units::color(c)))
-            .unwrap_or(Rgba::rgb(0x72, 0x9f, 0xcf));
-        // Unset, the fill is solid (LibreOffice's pool default, which files leave unwritten).
-        match g.get("draw:fill").map(String::as_str).unwrap_or("solid") {
+        let with_alpha = |c: Rgba| crate::styles::color_ref(c, alpha);
+        // Resolved styles carry the built-in defaults; a page style without them is unfilled.
+        let color = g.get("draw:fill-color").and_then(|c| units::color(c)).unwrap_or(Rgba::WHITE);
+        match g.get("draw:fill").map(String::as_str).unwrap_or("none") {
             "none" => Fill::None,
             "solid" => match &og {
                 // A solid colour under an opacity gradient: the colour, faded by the gradient.
@@ -1327,14 +1265,11 @@ impl Reader<'_> {
     }
 
     fn line(&self, g: &Props) -> Line {
-        let stroke = g.get("draw:stroke").map(String::as_str).unwrap_or("solid");
+        let stroke = g.get("draw:stroke").map(String::as_str).unwrap_or("none");
         if stroke == "none" {
             return Line::none();
         }
-        let mut color = ColorRef::rgb(g.get("svg:stroke-color").and_then(|c| units::color(c)).unwrap_or(Rgba::rgb(0x34, 0x65, 0xa4)));
-        if let Some(a) = g.get("svg:stroke-opacity").and_then(|v| units::percent(v)).filter(|a| *a < 1.0) {
-            color.mods.push(ColorTransform::Alpha((a.clamp(0.0, 1.0) * 100_000.0).round() as i32));
-        }
+        let color = crate::styles::color_prop(g, "svg:stroke-color", "svg:stroke-opacity").unwrap_or(ColorRef::rgb(Rgba::BLACK));
         // A zero width is a hairline.
         let width = g.get("svg:stroke-width").and_then(|v| units::length(v)).filter(|w| *w > 0.0).unwrap_or(0.5).min(1000.0);
         let mut l = Line::solid(color, width);
@@ -1383,10 +1318,7 @@ impl Reader<'_> {
         }
         let len = |k: &str| g.get(k).and_then(|v| units::length(v));
         let (dx, dy) = (len("draw:shadow-offset-x").unwrap_or(0.0), len("draw:shadow-offset-y").unwrap_or(0.0));
-        let mut color = ColorRef::rgb(g.get("draw:shadow-color").and_then(|c| units::color(c)).unwrap_or(Rgba::rgb(0x80, 0x80, 0x80)));
-        if let Some(a) = g.get("draw:shadow-opacity").and_then(|v| units::percent(v)).filter(|a| *a < 1.0) {
-            color.mods.push(ColorTransform::Alpha((a.clamp(0.0, 1.0) * 100_000.0).round() as i32));
-        }
+        let color = crate::styles::color_prop(g, "draw:shadow-color", "draw:shadow-opacity").unwrap_or(ColorRef::rgb(Rgba::rgb(0x80, 0x80, 0x80)));
         Some(Effects {
             outer_shadow: Some(Shadow {
                 color,
@@ -1404,19 +1336,6 @@ impl Reader<'_> {
             ..Default::default()
         })
     }
-}
-
-/// Paragraph defaults made explicit, so a slide's text never inherits a master level it didn't
-/// ask for.
-fn complete_para(p: &mut deckcraft_model::text::ParaProps) {
-    p.align.get_or_insert(Align::Left);
-    p.margin_left.get_or_insert(0.0);
-    p.indent.get_or_insert(0.0);
-    p.margin_right.get_or_insert(0.0);
-    p.space_before.get_or_insert(Spacing::Pts(0.0));
-    p.space_after.get_or_insert(Spacing::Pts(0.0));
-    p.line_spacing.get_or_insert(Spacing::Pct(1.0));
-    p.bullet.get_or_insert(deckcraft_model::text::Bullet::None);
 }
 
 /// Fonts embedded in the package (`svg:font-face-uri` in the font face declarations).
@@ -1548,6 +1467,8 @@ fn body_props(g: &Props, custom_shape: bool) -> BodyProps {
         inset_r: Some(pad("fo:padding-right").unwrap_or(0.0)),
         inset_b: Some(pad("fo:padding-bottom").unwrap_or(0.0)),
         anchor: Some(g.get("draw:textarea-vertical-align").and_then(|v| anchor(v)).unwrap_or(Anchor::Top)),
+        // The text block centred in the frame.
+        anchor_ctr: Some(g.get("draw:textarea-horizontal-align").map(String::as_str) == Some("center")),
         wrap: Some(if custom_shape {
             g.get("fo:wrap-option").map(String::as_str) != Some("no-wrap")
         } else {
@@ -1659,12 +1580,9 @@ fn gradient(gr: &El, with_alpha: &dyn Fn(Rgba) -> ColorRef, opacity_of: Option<R
     }
     let stops = srgb_steps(&stops);
     let stop = |pos: f64, c: Rgba| {
-        let mut color = with_alpha(c.with_alpha(255));
-        if c.a < 255 {
-            let a = f64::from(c.a) / 255.0 * color.alpha();
-            color.mods.retain(|m| !matches!(m, ColorTransform::Alpha(_)));
-            color.mods.push(ColorTransform::Alpha((a * 100_000.0).round() as i32));
-        }
+        // The stop's own opacity (from an opacity gradient) times the fill's.
+        let fill_alpha = with_alpha(Rgba::BLACK).alpha();
+        let color = crate::styles::color_ref(c.with_alpha(255), Some(f64::from(c.a) / 255.0 * fill_alpha));
         GradientStop { pos: pos.clamp(0.0, 1.0), color }
     };
     // `border` is the part at the start with the start colour.

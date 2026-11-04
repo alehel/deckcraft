@@ -13,6 +13,14 @@ pub type Props = BTreeMap<String, String>;
 /// Parent chains longer than this are treated as broken (a cycle or a hostile file).
 const MAX_CHAIN: usize = 32;
 
+/// LibreOffice's built-in graphic defaults, which files leave unwritten: the lowest layer of every
+/// graphic and presentation style.
+const POOL_GRAPHIC: [(&str, &str); 4] =
+    [("draw:fill", "solid"), ("draw:fill-color", "#729fcf"), ("draw:stroke", "solid"), ("svg:stroke-color", "#3465a4")];
+
+/// Outline levels a presentation style can have (`{master}-outline1` … `-outline9`).
+pub const OUTLINE_LEVELS: usize = 9;
+
 #[derive(Clone, Debug, Default)]
 pub struct Style {
     pub family: String,
@@ -39,7 +47,9 @@ impl Style {
         self.chart.get(k).map(String::as_str)
     }
 
-    fn merge(&mut self, over: &Style) {
+    /// Lay `over` on this style: each property it sets wins; relative font sizes apply to the
+    /// size they replace.
+    pub fn merge(&mut self, over: &Style) {
         for (k, v) in &over.graphic {
             self.graphic.insert(k.clone(), v.clone());
         }
@@ -270,11 +280,6 @@ impl Store {
         auto.or_else(|| self.common.get(&key))
     }
 
-    /// The style's own properties, without its parents.
-    pub fn own(&self, scope: Scope, family: &str, name: &str) -> Option<Style> {
-        self.lookup(scope, family, name).cloned()
-    }
-
     pub fn exists(&self, scope: Scope, family: &str, name: &str) -> bool {
         self.lookup(scope, family, name).is_some()
     }
@@ -298,9 +303,53 @@ impl Store {
         out
     }
 
-    /// The family default style (presentation styles fall back to the graphic default).
+    /// The named style merged with its parents up to (not including) the first one `stop`
+    /// accepts: what a style adds to a common style it derives from.
+    pub fn chain_until(&self, scope: Scope, family: &str, name: &str, stop: &dyn Fn(&str) -> bool) -> Style {
+        let mut chain = vec![];
+        let mut cur = Some(name).filter(|n| !stop(n)).and_then(|n| self.lookup(scope, family, n));
+        while let Some(s) = cur {
+            if chain.len() >= MAX_CHAIN {
+                break;
+            }
+            chain.push(s);
+            cur = s.parent.as_deref().filter(|p| !stop(p)).and_then(|p| self.common.get(&(family.to_string(), p.to_string())));
+        }
+        let mut out = Style { family: family.to_string(), ..Default::default() };
+        for s in chain.iter().rev() {
+            out.merge(s);
+        }
+        out
+    }
+
+    /// An outline placeholder's style at each level: the master's `{master}-outline{n}` with what
+    /// the shape's own style adds over the outline styles laid on top. A missing level keeps the
+    /// one above.
+    pub fn outline_levels(&self, scope: Scope, master: &str, shape_style: Option<&str>, resolved: &Style) -> Vec<Style> {
+        let prefix = format!("{master}-outline");
+        let own = shape_style.map(|n| self.chain_until(scope, "presentation", n, &|p| p.starts_with(&prefix))).unwrap_or_default();
+        let mut out: Vec<Style> = vec![];
+        for level in 1..=OUTLINE_LEVELS {
+            let name = format!("{prefix}{level}");
+            let s = if self.exists(scope, "presentation", &name) {
+                let mut s = self.resolve(scope, "presentation", Some(&name));
+                s.merge(&own);
+                s
+            } else {
+                out.last().cloned().unwrap_or_else(|| resolved.clone())
+            };
+            out.push(s);
+        }
+        out
+    }
+
+    /// The family default style over the built-in defaults (presentation styles fall back to the
+    /// graphic default).
     pub fn default_of(&self, family: &str) -> Style {
         let mut out = Style::default();
+        if family == "graphic" || family == "presentation" {
+            out.graphic.extend(POOL_GRAPHIC.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        }
         if family == "presentation"
             && let Some(g) = self.defaults.get("graphic")
         {
@@ -339,6 +388,21 @@ impl Store {
         };
         auto.or_else(|| self.lists_common.get(name))
     }
+}
+
+/// A colour at an opacity (0–1; opaque when `None` or 1).
+pub fn color_ref(c: deckcraft_color::Rgba, opacity: Option<f64>) -> deckcraft_model::style::ColorRef {
+    let mut r = deckcraft_model::style::ColorRef::rgb(c);
+    if let Some(a) = opacity.filter(|a| a.is_finite() && *a < 1.0) {
+        r.mods.push(deckcraft_color::ColorTransform::Alpha((a.max(0.0) * 100_000.0).round() as i32));
+    }
+    r
+}
+
+/// A colour property at the opacity a percentage property gives it.
+pub fn color_prop(p: &Props, color: &str, opacity: &str) -> Option<deckcraft_model::style::ColorRef> {
+    let c = p.get(color).and_then(|v| units::color(v))?;
+    Some(color_ref(c, p.get(opacity).and_then(|v| units::percent(v))))
 }
 
 /// `'Liberation Sans'` → `Liberation Sans`; a family list keeps its first entry.

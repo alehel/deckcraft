@@ -69,7 +69,7 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
         let _ = write!(styles, r#"<style:style style:name="{name}" style:family="chart">{body}</style:style>"#);
         name
     };
-    let (class, vertical, stacked, percent) = odf_class(c.kind);
+    let (class, vertical, stacked, percent) = crate::chart::class_of(c.kind);
     let text_color = c.text_color.as_ref().map(|t| hex(ctx.color(t, None))).unwrap_or_else(|| "#595959".into());
     // The renderer's default sizes, so the chart reads the same in other apps.
     let base = c.text_size.unwrap_or_else(|| (x.h.min(x.w) / 22.0).clamp(7.0, 18.0));
@@ -81,13 +81,13 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
     let ch_style = style(format!(
         r#"<style:graphic-properties draw:stroke="none"{chart_fill}/><style:text-properties fo:font-size="{text_size}" fo:color="{text_color}"/>"#
     ));
-    let mut plot_props = format!(r#" chart:vertical="{vertical}" chart:stacked="{}" chart:percentage="{percent}""#, stacked && !percent);
+    let mut plot_props = format!(r#" chart:vertical="{vertical}" chart:stacked="{stacked}" chart:percentage="{percent}""#);
     if class == "bar" {
         let _ = write!(
             plot_props,
             r#" chart:gap-width="{}" chart:overlap="{}""#,
             trim(c.gap_width * 100.0, 0),
-            trim(if stacked { 100.0 } else { c.overlap * 100.0 }, 0)
+            trim(if stacked || percent { 100.0 } else { c.overlap * 100.0 }, 0)
         );
     }
     if c.kind == ChartType::LineMarkers {
@@ -175,12 +175,7 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
             let _ = write!(points, r#"<chart:data-point chart:style-name="{ps}"/>"#);
         }
         let axis = if s.secondary_axis { r#" chart:attached-axis="secondary-y""# } else { "" };
-        let sclass = match s.kind {
-            Some(ChartType::Line | ChartType::LineMarkers) => "line",
-            Some(ChartType::Area) => "area",
-            Some(ChartType::Column | ChartType::Bar) => "bar",
-            _ => class,
-        };
+        let sclass = s.kind.map_or(class, |k| crate::chart::class_of(k).0);
         let _ = write!(
             series_xml,
             r#"<chart:series chart:style-name="{ss}" chart:values-cell-range-address="{}" chart:label-cell-address="local-table.${}$1" chart:class="chart:{sclass}"{axis}>{domains}{points}</chart:series>"#,
@@ -195,13 +190,7 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
         format!(r#"<chart:title chart:style-name="{st}"><text:p>{}</text:p></chart:title>"#, esc(t))
     });
     let legend = c.legend.as_deref().map(|l| {
-        let pos = match l {
-            "l" => "start",
-            "t" => "top",
-            "b" => "bottom",
-            "tr" => "top-end",
-            _ => "end",
-        };
+        let pos = crate::chart::legend_position(l);
         format!(r#"<chart:legend chart:legend-position="{pos}" style:legend-expansion="balanced"/>"#)
     });
     let cats = if c.categories.is_empty() || xy {
@@ -245,29 +234,6 @@ fn y_props(c: &Chart) -> String {
         yprops.push_str(r#" chart:logarithmic="true""#);
     }
     yprops
-}
-
-/// The ODF chart class of a model chart type, and its vertical, stacked and percent flags.
-fn odf_class(kind: ChartType) -> (&'static str, bool, bool, bool) {
-    match kind {
-        ChartType::Bar => ("bar", true, false, false),
-        ChartType::StackedBar => ("bar", true, true, false),
-        ChartType::PercentBar => ("bar", true, true, true),
-        ChartType::StackedColumn => ("bar", false, true, false),
-        ChartType::PercentColumn => ("bar", false, true, true),
-        ChartType::Line | ChartType::LineMarkers => ("line", false, false, false),
-        ChartType::StackedLine => ("line", false, true, false),
-        ChartType::Area => ("area", false, false, false),
-        ChartType::StackedArea => ("area", false, true, false),
-        ChartType::Pie => ("circle", false, false, false),
-        ChartType::Doughnut => ("ring", false, false, false),
-        ChartType::Scatter => ("scatter", false, false, false),
-        ChartType::Bubble => ("bubble", false, false, false),
-        ChartType::Radar => ("radar", false, false, false),
-        ChartType::FilledRadar => ("filled-radar", false, false, false),
-        ChartType::Stock => ("stock", false, false, false),
-        _ => ("bar", false, false, false),
-    }
 }
 
 /// The chart's local data table: categories in column A, then one column per entry of `cols`.

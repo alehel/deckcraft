@@ -1,7 +1,6 @@
 //! Charts: an embedded chart document (`Object N/content.xml`, `office:chart`) read into the
 //! model's chart, and written back as one.
 
-use deckcraft_color::ColorTransform;
 use deckcraft_model::chart::{Chart, ChartType, Series};
 use deckcraft_model::style::{ColorRef, Fill, Line};
 
@@ -131,22 +130,13 @@ pub fn read(content: &El) -> Option<Chart> {
     let percent = cp("chart:percentage") == Some("true");
     // LibreOffice's defaults where the file is silent: bars as wide as their gaps, no overlap.
     let mut c = Chart { title: None, legend: None, gap_width: 1.0, overlap: 0.0, ..Default::default() };
-    c.kind = chart_kind(class, vertical, stacked, percent);
+    c.kind = kind_of(class, vertical, stacked, percent);
     c.title = kid(chart, "chart:title").map(|t| kids(t, "text:p").map(|p| p.text()).collect::<Vec<_>>().join(" ")).filter(|t| !t.trim().is_empty());
     if let Some(t) = kid(chart, "chart:title") {
         c.title_size = style(t).text.get("fo:font-size").and_then(|v| units::length(v));
     }
     if let Some(l) = kid(chart, "chart:legend") {
-        c.legend = Some(
-            match attr(l, "chart:legend-position").unwrap_or("end") {
-                "start" => "l",
-                "top" => "t",
-                "bottom" => "b",
-                "top-end" => "tr",
-                _ => "r",
-            }
-            .into(),
-        );
+        c.legend = Some(legend_of(attr(l, "chart:legend-position").unwrap_or("end")).into());
     }
     let chart_style = style(chart);
     if let Some(f) = simple_fill(&chart_style.graphic) {
@@ -282,11 +272,7 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
         if let Some(cl) = attr(s, "chart:class").map(|v| v.trim_start_matches("chart:"))
             && cl != class
         {
-            series.kind = Some(match cl {
-                "line" => ChartType::Line,
-                "area" => ChartType::Area,
-                _ => ChartType::Column,
-            });
+            series.kind = Some(kind_of(cl, false, false, false));
         }
         if attr(s, "chart:attached-axis") == Some("secondary-y") {
             series.secondary_axis = true;
@@ -295,40 +281,62 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
     }
 }
 
-/// The model chart type of an ODF chart class and its plot-area flags.
-fn chart_kind(class: &str, vertical: bool, stacked: bool, percent: bool) -> ChartType {
-    match (class, vertical, stacked, percent) {
-        ("bar", true, _, true) => ChartType::PercentBar,
-        ("bar", true, true, _) => ChartType::StackedBar,
-        ("bar", true, ..) => ChartType::Bar,
-        ("bar", _, _, true) => ChartType::PercentColumn,
-        ("bar", _, true, _) => ChartType::StackedColumn,
-        ("line", _, true, _) => ChartType::StackedLine,
-        ("line", ..) => ChartType::Line,
-        ("area", _, s, p) if s || p => ChartType::StackedArea,
-        ("area", ..) => ChartType::Area,
-        ("circle", ..) => ChartType::Pie,
-        ("ring", ..) => ChartType::Doughnut,
-        ("scatter", ..) => ChartType::Scatter,
-        ("bubble", ..) => ChartType::Bubble,
-        ("radar", ..) => ChartType::Radar,
-        ("filled-radar", ..) => ChartType::FilledRadar,
-        ("stock", ..) => ChartType::Stock,
-        _ => ChartType::Column,
-    }
+/// (model type, ODF `chart:class`, bars run sideways (`chart:vertical`), stacked, percent).
+/// Percent charts are written unstacked (`chart:percentage` alone). Types without a row are
+/// written as columns.
+const KINDS: &[(ChartType, &str, bool, bool, bool)] = &[
+    (ChartType::Column, "bar", false, false, false),
+    (ChartType::StackedColumn, "bar", false, true, false),
+    (ChartType::PercentColumn, "bar", false, false, true),
+    (ChartType::Bar, "bar", true, false, false),
+    (ChartType::StackedBar, "bar", true, true, false),
+    (ChartType::PercentBar, "bar", true, false, true),
+    (ChartType::Line, "line", false, false, false),
+    (ChartType::LineMarkers, "line", false, false, false),
+    (ChartType::StackedLine, "line", false, true, false),
+    (ChartType::Area, "area", false, false, false),
+    (ChartType::StackedArea, "area", false, true, false),
+    (ChartType::Pie, "circle", false, false, false),
+    (ChartType::Doughnut, "ring", false, false, false),
+    (ChartType::Scatter, "scatter", false, false, false),
+    (ChartType::Bubble, "bubble", false, false, false),
+    (ChartType::Radar, "radar", false, false, false),
+    (ChartType::FilledRadar, "filled-radar", false, false, false),
+    (ChartType::Stock, "stock", false, false, false),
+];
+
+/// The model chart type of an ODF chart class and its plot-area flags: the exact row, else one
+/// stacked the same way (a stacked percent chart is a percent chart), else the class's first.
+pub(crate) fn kind_of(class: &str, vertical: bool, stacked: bool, percent: bool) -> ChartType {
+    let of_class = || KINDS.iter().filter(|r| r.1 == class);
+    of_class()
+        .find(|r| r.2 == vertical && r.4 == percent && (percent || r.3 == stacked))
+        .or_else(|| of_class().find(|r| r.2 == vertical && r.3 == (stacked || percent)))
+        .or_else(|| of_class().next())
+        .map_or(ChartType::Column, |r| r.0)
+}
+
+/// The ODF class and plot-area flags (vertical, stacked, percent) of a model chart type.
+pub(crate) fn class_of(kind: ChartType) -> (&'static str, bool, bool, bool) {
+    let r = KINDS.iter().find(|r| r.0 == kind).or(KINDS.first());
+    r.map_or(("bar", false, false, false), |r| (r.1, r.2, r.3, r.4))
+}
+
+/// (our legend position, `chart:legend-position`).
+const LEGEND: [(&str, &str); 5] = [("r", "end"), ("l", "start"), ("t", "top"), ("b", "bottom"), ("tr", "top-end")];
+
+pub(crate) fn legend_of(position: &str) -> &'static str {
+    LEGEND.iter().find(|l| l.1 == position).map_or("r", |l| l.0)
+}
+
+pub(crate) fn legend_position(ours: &str) -> &'static str {
+    LEGEND.iter().find(|l| l.0 == ours).map_or("end", |l| l.1)
 }
 
 fn simple_fill(g: &crate::styles::Props) -> Option<Fill> {
     match g.get("draw:fill").map(String::as_str) {
         Some("none") => Some(Fill::None),
-        Some("solid") | None => {
-            let col = g.get("draw:fill-color").and_then(|v| units::color(v))?;
-            let mut cr = ColorRef::rgb(col);
-            if let Some(a) = g.get("draw:opacity").and_then(|v| units::percent(v)).filter(|a| *a < 1.0) {
-                cr.mods.push(ColorTransform::Alpha((a * 100_000.0) as i32));
-            }
-            Some(Fill::solid(cr))
-        }
+        Some("solid") | None => Some(Fill::solid(crate::styles::color_prop(g, "draw:fill-color", "draw:opacity")?)),
         Some("gradient") => g.get("draw:fill-color").and_then(|v| units::color(v)).map(|c| Fill::solid(ColorRef::rgb(c))),
         _ => None,
     }
@@ -337,6 +345,22 @@ fn simple_fill(g: &crate::styles::Props) -> Option<Fill> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every chart type with an ODF class reads back as itself.
+    #[test]
+    fn chart_kinds_and_legends_map_both_ways() {
+        for (kind, ..) in KINDS {
+            let (class, vertical, stacked, percent) = class_of(*kind);
+            let back = kind_of(class, vertical, stacked, percent);
+            // Line markers are told apart by their symbols, not the class.
+            let want = if *kind == ChartType::LineMarkers { ChartType::Line } else { *kind };
+            assert_eq!(back, want);
+        }
+        assert_eq!(kind_of("bar", true, true, true), ChartType::PercentBar);
+        for (ours, _) in LEGEND {
+            assert_eq!(legend_of(legend_position(ours)), ours);
+        }
+    }
 
     #[test]
     fn cell_references() {

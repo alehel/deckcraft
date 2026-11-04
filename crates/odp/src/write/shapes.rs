@@ -7,7 +7,7 @@ use deckcraft_geom::preset::FillMode;
 use deckcraft_model::resolve::{self, Ctx};
 use deckcraft_model::style::{Dash, Effects, Fill, GradientShape, Line, LineCap, LineJoin, PictureFill, PictureMode};
 use deckcraft_model::table::Table;
-use deckcraft_model::text::{Action, Anchor, AutoFit, BodyProps, ListStyle, TextDir};
+use deckcraft_model::text::{Action, Anchor, AutoFit, BodyProps, LevelStyle, ListStyle, TextDir};
 use deckcraft_model::{Geom, Layout, PhType, Shape, ShapeKind, Xfrm};
 use kurbo::{Affine, BezPath, PathEl, Point};
 
@@ -176,7 +176,7 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
     let (effects, ph_fx) = resolve::effects(ctx, s);
     let body = resolve::body(ctx, s);
     let fill = fill.unwrap_or(Fill::None);
-    let mut g = fill_attrs(w, ctx, &fill, ph_fill, false);
+    let mut g = fill_attrs(w, ctx, &fill, ph_fill);
     g.push_str(&line_attrs(w, ctx, &line, ph_line));
     g.push_str(&shadow_attrs_ph(ctx, effects.as_ref(), ph_fx));
     g.push_str(&body_attrs(&body));
@@ -411,8 +411,7 @@ fn color_alpha(ctx: &Ctx, c: &deckcraft_model::style::ColorRef, ph: Option<Rgba>
 }
 
 /// Fill attributes for `style:graphic-properties` or `style:drawing-page-properties`.
-pub fn fill_attrs(w: &mut Writer, ctx: &Ctx, f: &Fill, ph: Option<Rgba>, page: bool) -> String {
-    let _ = page;
+pub fn fill_attrs(w: &mut Writer, ctx: &Ctx, f: &Fill, ph: Option<Rgba>) -> String {
     match f {
         Fill::None | Fill::Group | Fill::Background => r#" draw:fill="none""#.into(),
         Fill::Solid { color } => {
@@ -772,7 +771,7 @@ fn table(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, t: &Table) ->
                 .or_else(|| look.paint.clone())
                 .or_else(|| look.fill.map(|c| (Fill::solid(deckcraft_model::style::ColorRef::rgb(c)), None)));
             let mut g = match &fill {
-                Some((f, ph)) => fill_attrs(w, ctx, f, *ph, false),
+                Some((f, ph)) => fill_attrs(w, ctx, f, *ph),
                 None => r#" draw:fill="none""#.to_string(),
             };
             let mut cp = String::new();
@@ -836,81 +835,50 @@ fn border(ctx: &Ctx, l: Option<&Line>) -> String {
 
 /// The presentation styles of one master page: title, outline levels, subtitle, notes,
 /// background and background objects.
-pub fn presentation_styles(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str) -> String {
-    let _ = auto;
+pub fn presentation_styles(w: &mut Writer, ctx: &Ctx, name: &str) -> String {
     let mut out = String::new();
     let m = ctx.master;
     let title_ph = m.shapes.iter().find(|s| s.ph_type().is_some_and(PhType::is_title));
     let body_ph = m.shapes.iter().find(|s| s.ph_type() == Some(PhType::Body));
     let level = |ls: &ListStyle, l: u8| ls.level(l).cloned().unwrap_or_default();
-    let style = |w: &mut Writer, sname: &str, parent: Option<&str>, g: &str, lv: &deckcraft_model::text::LevelStyle, list: &str| {
-        let pp = &lv.para;
+    // A presentation style: graphic properties (with a list style), paragraph and text properties.
+    let style = |w: &mut Writer, sname: &str, parent: Option<&str>, g: &str, lv: &LevelStyle, props: &str, list: &str| {
         let tp = text::text_attrs(w, Some(ctx), &lv.run);
-        let size = lv.run.size.unwrap_or(18.0);
-        let space = |s: Option<deckcraft_model::text::Spacing>| match s {
-            Some(deckcraft_model::text::Spacing::Pts(v)) => v,
-            Some(deckcraft_model::text::Spacing::Pct(f)) => f * size * 1.2,
-            None => 0.0,
-        };
         let parent = parent.map(|p| format!(r#" style:parent-style-name="{p}""#)).unwrap_or_default();
-        let align = match pp.align {
-            Some(deckcraft_model::text::Align::Center) => r#" fo:text-align="center""#,
-            Some(deckcraft_model::text::Align::Right) => r#" fo:text-align="end""#,
-            Some(deckcraft_model::text::Align::Justify) => r#" fo:text-align="justify""#,
-            _ => "",
-        };
         format!(
-            r#"<style:style style:name="{sname}" style:family="presentation"{parent}><style:graphic-properties{g}>{list}</style:graphic-properties><style:paragraph-properties fo:margin-top="{}" fo:margin-bottom="{}"{align}/><style:text-properties{tp}/></style:style>"#,
-            cm(space(pp.space_before)),
-            cm(space(pp.space_after)),
+            r#"<style:style style:name="{sname}" style:family="presentation"{parent}><style:graphic-properties{g}>{list}</style:graphic-properties><style:paragraph-properties{props}/><style:text-properties{tp}/></style:style>"#
         )
+    };
+    let plain = |w: &mut Writer, sname: &str, g: &str, lv: &LevelStyle| {
+        let (props, _) = text::level_style(w, ctx, 1, lv, false);
+        style(w, sname, None, g, lv, &props, "")
     };
     let body_of = |s: Option<&Shape>| s.map(|s| body_attrs(&resolve::body(ctx, s))).unwrap_or_default();
     let tg = format!(r#" draw:stroke="none" draw:fill="none"{}"#, body_of(title_ph));
-    out.push_str(&style(w, &format!("{name}-title"), None, &tg, &level(&m.title_style, 0), ""));
-    // The outline list style: bullets and indents of every level.
-    let mut levels = String::new();
-    for l in 0..9u8 {
-        let lv = level(&m.body_style, l);
-        let pp = &lv.para;
-        let margin = pp.margin_left.unwrap_or(0.0);
-        let indent = pp.indent.unwrap_or(0.0);
-        let props = format!(
-            r#"<style:list-level-properties text:space-before="{}" text:min-label-width="{}"/>"#,
-            cm((margin + indent).max(0.0)),
-            cm((-indent).max(0.0))
-        );
-        let rel = pp.bullet_size.unwrap_or(1.0).clamp(0.25, 4.0);
-        let c = match &pp.bullet {
-            Some(deckcraft_model::text::Bullet::Char { char }) => char.chars().take(1).collect::<String>(),
-            _ => "●".into(),
-        };
-        let _ = write!(
-            levels,
-            r#"<text:list-level-style-bullet text:level="{}" text:bullet-char="{}">{props}<style:text-properties fo:font-size="{}" style:use-window-font-color="true"/></text:list-level-style-bullet>"#,
-            l + 1,
-            esc(&c),
-            pct(rel)
-        );
-    }
-    let og = format!(r#" draw:stroke="none" draw:fill="none"{}"#, body_of(body_ph));
+    out.push_str(&plain(w, &format!("{name}-title"), &tg, &level(&m.title_style, 0)));
+    // The outline levels, each a style deriving from the one above; the first holds the list
+    // style with every level's bullet and indents.
+    let outline: Vec<(LevelStyle, String, Option<String>)> = (0..9u8)
+        .map(|l| {
+            let lv = level(&m.body_style, l);
+            let (props, list) = text::level_style(w, ctx, usize::from(l) + 1, &lv, true);
+            (lv, props, list)
+        })
+        .collect();
+    let levels: String = outline.iter().filter_map(|o| o.2.as_deref()).collect();
     let list = format!(r#"<text:list-style style:name="{name}-outline1">{levels}</text:list-style>"#);
-    out.push_str(&style(w, &format!("{name}-outline1"), None, &og, &level(&m.body_style, 0), &list));
-    for l in 1..9u8 {
-        out.push_str(&style(w, &format!("{name}-outline{}", l + 1), Some(&format!("{name}-outline{l}")), "", &level(&m.body_style, l), ""));
+    let og = format!(r#" draw:stroke="none" draw:fill="none"{}"#, body_of(body_ph));
+    for (l, (lv, props, _)) in outline.iter().enumerate() {
+        let (sname, parent) = (format!("{name}-outline{}", l + 1), format!("{name}-outline{l}"));
+        let xml = if l == 0 { style(w, &sname, None, &og, lv, props, &list) } else { style(w, &sname, Some(&parent), "", lv, props, "") };
+        out.push_str(&xml);
     }
-    out.push_str(&style(
-        w,
-        &format!("{name}-subtitle"),
-        None,
-        r#" draw:stroke="none" draw:fill="none" draw:textarea-vertical-align="middle""#,
-        &level(&m.body_style, 0),
-        "",
-    ));
-    out.push_str(&style(w, &format!("{name}-notes"), None, r#" draw:stroke="none" draw:fill="none""#, &level(&m.other_style, 0), ""));
+    let subtitle = r#" draw:stroke="none" draw:fill="none" draw:textarea-vertical-align="middle""#;
+    out.push_str(&plain(w, &format!("{name}-subtitle"), subtitle, &level(&m.body_style, 0)));
+    out.push_str(&plain(w, &format!("{name}-notes"), r#" draw:stroke="none" draw:fill="none""#, &level(&m.other_style, 0)));
     // The master background, also in its background style (LibreOffice reads it from there too).
     let (bg, ph) = resolve::background(ctx, None);
-    let bgx = fill_attrs(w, ctx, &bg, ph, true);
+    let bgx = fill_attrs(w, ctx, &bg, ph);
     let _ = write!(
         out,
         r#"<style:style style:name="{name}-background" style:family="presentation"><style:graphic-properties draw:stroke="none"{bgx}/></style:style>"#
@@ -926,7 +894,7 @@ pub fn presentation_styles(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &st
 pub fn master_page(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str, layout: Option<&Layout>) -> String {
     let pg = PageCtx::new(name, format!("{name}-"), true);
     let (bg, ph) = resolve::background(ctx, None);
-    let bgx = fill_attrs(w, ctx, &bg, ph, true);
+    let bgx = fill_attrs(w, ctx, &bg, ph);
     let dp = auto.style("drawing-page", "dp", None, &format!(r#"<style:drawing-page-properties{bgx} draw:background-size="border"/>"#));
     let mut shapes_xml = String::new();
     let (_, show_master) = (true, layout.is_none_or(|l| l.show_master_shapes));
@@ -968,11 +936,7 @@ pub fn master_page(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str, layou
             let pp = resolve::para(ctx, s, &para);
             let rp = resolve::run(ctx, s, &para, para.runs.first().map(|r| &r.props).unwrap_or(&para.end_props));
             let tp = text::text_attrs(w, Some(ctx), &rp);
-            let align = match pp.align {
-                Some(deckcraft_model::text::Align::Center) => "center",
-                Some(deckcraft_model::text::Align::Right) => "end",
-                _ => "start",
-            };
+            let align = crate::text::odf_align(pp.align.unwrap_or(deckcraft_model::text::Align::Left));
             let ps =
                 auto.style("paragraph", "P", None, &format!(r#"<style:paragraph-properties fo:text-align="{align}"/><style:text-properties{tp}/>"#));
             let body = body_attrs(&resolve::body(ctx, s));

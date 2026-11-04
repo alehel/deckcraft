@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use deckcraft_color::Rgba;
 use deckcraft_model::resolve::{self, Ctx};
 use deckcraft_model::style::Fill;
-use deckcraft_model::text::{Action, Align, Bullet, Caps, ParaProps, Run, RunKind, RunProps, Spacing, Strike, TextBody};
+use deckcraft_model::text::{Action, Align, Bullet, Caps, LevelStyle, ParaProps, Run, RunKind, RunProps, Spacing, Strike, TextBody};
 use deckcraft_model::{Shape, SlideId};
 
 use super::{Auto, PageCtx, Writer};
@@ -65,10 +65,10 @@ fn paragraph(
     // its end (so an empty paragraph has its height).
     let first = runs.first().map(|(r, _)| r).unwrap_or(end);
     let size = first.size.or(end.size).unwrap_or(18.0);
-    let in_list = !matches!(pp.bullet.clone().unwrap_or(Bullet::None), Bullet::None) || outline || level > 0;
-    // In a list the indents live in the list level; the paragraph's are zero (as LibreOffice
-    // writes them: it adds the two).
-    let ppx = if in_list { para_attrs(&ParaProps { margin_left: Some(0.0), indent: Some(0.0), ..pp.clone() }, size) } else { para_attrs(pp, size) };
+    let bullet = pp.bullet.clone().unwrap_or(Bullet::None);
+    let bulleted = !matches!(bullet, Bullet::None);
+    let in_list = bulleted || outline || level > 0;
+    let ppx = para_attrs_in(pp, size, in_list);
     let tabs = tab_stops(pp);
     let ptext = text_attrs(w, ctx, end);
     let pstyle = auto.style(
@@ -110,9 +110,7 @@ fn paragraph(
     }
     let id = id.map(|i| format!(r#" xml:id="{i}" text:id="{i}""#)).unwrap_or_default();
     let p = format!(r#"<text:p{id} text:style-name="{pstyle}">{inner}</text:p>"#);
-    let bullet = pp.bullet.clone().unwrap_or(Bullet::None);
-    let bulleted = !matches!(bullet, Bullet::None);
-    if !bulleted && !outline && level == 0 {
+    if !in_list {
         return p;
     }
     // A list: one level element for this paragraph's level, nested to its depth.
@@ -141,18 +139,30 @@ fn paragraph(
 fn list_level(w: &mut Writer, ctx: Option<&Ctx>, level: usize, pp: &ParaProps, bullet: &Bullet, size: f64, first: &RunProps) -> String {
     let margin = pp.margin_left.unwrap_or(0.0);
     let indent = pp.indent.unwrap_or(0.0);
+    let rel = pp.bullet_size.or_else(|| pp.bullet_size_points.map(|p| p / size.max(1.0))).unwrap_or(1.0);
+    // A picture bullet also has its size here.
+    let picture = match bullet {
+        Bullet::Picture { media } => w.media_path(*media),
+        _ => None,
+    };
+    let image_size = match picture {
+        Some(_) => {
+            let edge = cm(size * rel.clamp(0.25, 4.0));
+            format!(r#" fo:width="{edge}" fo:height="{edge}""#)
+        }
+        None => String::new(),
+    };
     let props = format!(
-        r#"<style:list-level-properties text:space-before="{}" text:min-label-width="{}"/>"#,
+        r#"<style:list-level-properties text:space-before="{}" text:min-label-width="{}"{image_size}/>"#,
         cm((margin + indent).max(0.0)),
         cm((-indent).max(0.0))
     );
-    let rel = pp.bullet_size.or_else(|| pp.bullet_size_points.map(|p| p / size.max(1.0))).unwrap_or(1.0);
     let mut tp = format!(r#" fo:font-size="{}""#, pct(rel.clamp(0.25, 4.0)));
     if let Some(f) = pp.bullet_font.as_deref().filter(|_| pp.bullet_font_follow_text != Some(true)) {
-        let _ = write!(tp, r#" fo:font-family="'{}'""#, esc(&f.replace('\'', "")));
+        let _ = write!(tp, r#" fo:font-family="{}""#, super::quoted_family(f));
     } else if let Some(c) = ctx {
         let f = resolve::font_family(c, first);
-        let _ = write!(tp, r#" fo:font-family="'{}'""#, esc(&f.replace('\'', "")));
+        let _ = write!(tp, r#" fo:font-family="{}""#, super::quoted_family(&f));
     }
     match (&pp.bullet_color, ctx) {
         (Some(c), Some(cx)) if pp.bullet_color_follow_text != Some(true) => {
@@ -174,10 +184,8 @@ fn list_level(w: &mut Writer, ctx: Option<&Ctx>, level: usize, pp: &ParaProps, b
                 r#"<text:list-level-style-number text:level="{level}" style:num-format="{fmt}" style:num-prefix="{prefix}" style:num-suffix="{suffix}">{props}<style:text-properties{tp}/></text:list-level-style-number>"#
             )
         }
-        Bullet::Picture { media } => match w.media_path(*media) {
+        Bullet::Picture { .. } => match picture {
             Some(href) => {
-                let edge = cm(size * rel.clamp(0.25, 4.0));
-                let props = props.replace("/>", &format!(r#" fo:width="{edge}" fo:height="{edge}"/>"#));
                 format!(
                     r#"<text:list-level-style-image text:level="{level}" xlink:href="{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad">{props}</text:list-level-style-image>"#,
                     esc(&href)
@@ -278,15 +286,24 @@ pub fn text_content(s: &str) -> String {
     out
 }
 
+/// Paragraph properties for a paragraph in a list, or not: in a list the indents live in the list
+/// level and the paragraph's are zero (as LibreOffice writes them: it adds the two).
+fn para_attrs_in(pp: &ParaProps, size: f64, in_list: bool) -> String {
+    if in_list { para_attrs(&ParaProps { margin_left: Some(0.0), indent: Some(0.0), ..pp.clone() }, size) } else { para_attrs(pp, size) }
+}
+
+/// One level of a master text style as a presentation style writes it: its paragraph properties
+/// and, for a list level (1-based `level`), its list level style.
+pub(crate) fn level_style(w: &mut Writer, ctx: &Ctx, level: usize, lv: &LevelStyle, in_list: bool) -> (String, Option<String>) {
+    let size = lv.run.size.unwrap_or(18.0);
+    let props = para_attrs_in(&lv.para, size, in_list);
+    let list = in_list.then(|| list_level(w, Some(ctx), level, &lv.para, &lv.para.bullet.clone().unwrap_or(Bullet::None), size, &lv.run));
+    (props, list)
+}
+
 fn para_attrs(pp: &ParaProps, size: f64) -> String {
     let mut a = String::new();
-    let align = match pp.align.unwrap_or(Align::Left) {
-        Align::Left => "start",
-        Align::Center => "center",
-        Align::Right => "end",
-        Align::Justify | Align::JustLow | Align::Distributed | Align::ThaiDistributed => "justify",
-    };
-    let _ = write!(a, r#" fo:text-align="{align}""#);
+    let _ = write!(a, r#" fo:text-align="{}""#, crate::text::odf_align(pp.align.unwrap_or(Align::Left)));
     let _ = write!(
         a,
         r#" fo:margin-left="{}" fo:margin-right="{}" fo:text-indent="{}""#,

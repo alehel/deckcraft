@@ -1,7 +1,7 @@
 //! Text: `text:p`, `text:h`, `text:list` with spans, spaces, tabs, line breaks, links and fields,
 //! resolved through paragraph, text and list styles into model paragraphs with explicit formatting.
 
-use deckcraft_color::{ColorTransform, Rgba};
+use deckcraft_color::Rgba;
 use deckcraft_model::style::{ColorRef, Fill, Line, Shadow};
 use deckcraft_model::text::{Action, Align, Bullet, Caps, Hyperlink, ParaProps, Paragraph, Run, RunKind, RunProps, Spacing, Strike, TabStop};
 
@@ -18,19 +18,17 @@ const MAX_LIST_DEPTH: usize = 10;
 pub struct TextCtx<'a> {
     pub store: &'a Store,
     pub scope: Scope,
-    /// The shape's resolved style (graphic default → shape style chain).
-    pub base: Style,
-    /// For outline placeholders: the master's presentation style prefix (`Default`), so level n
-    /// takes its formatting from `Default-outline{n}`.
-    pub outline_master: Option<String>,
-    /// The shape's own automatic style, laid over the outline level style.
-    pub own: Option<Style>,
+    /// The shape's resolved style at each list depth, the last one serving deeper levels: one
+    /// style for most shapes; an outline placeholder's levels each take the master's outline style
+    /// ([`Store::outline_levels`]).
+    pub levels: Vec<Style>,
     /// Paragraph style named by the shape's `draw:text-style-name`.
     pub shape_para: Option<Style>,
-    /// Hyperlinks whose target is a page name (`#page2`): resolved by the reader afterwards.
-    pub slide_links: bool,
     /// The colour of automatic text: black, or white over a dark fill or background.
     pub auto_color: Rgba,
+    /// Leave what the styles don't set to the master (title and outline placeholders); otherwise
+    /// paragraphs carry LibreOffice's defaults for it.
+    pub inherit: bool,
 }
 
 struct ListCtx<'a> {
@@ -46,8 +44,8 @@ struct ListCtx<'a> {
 /// Read the paragraphs of a text container (`draw:text-box`, a shape, a table cell).
 pub fn paragraphs(cx: &TextCtx, container: &El) -> Vec<Paragraph> {
     let mut out = vec![];
-    let shape_list = cx.base.list.clone();
-    walk(cx, container, &ListCtx { style: shape_list.as_ref(), depth: 0, bulleted: false, in_list: false, start: None }, &mut out, 0);
+    let shape_list = cx.levels.first().and_then(|s| s.list.as_ref());
+    walk(cx, container, &ListCtx { style: shape_list, depth: 0, bulleted: false, in_list: false, start: None }, &mut out, 0);
     out
 }
 
@@ -127,57 +125,45 @@ fn level_style(list: &El, depth: usize) -> Option<&El> {
     best.map(|(_, l)| l)
 }
 
-/// The merged paragraph/text style of a paragraph in this body at `depth`.
+/// The merged style of a paragraph in this body at `depth`: the shape's style at that level, the
+/// shape's text style, the paragraph's own.
 fn para_style(cx: &TextCtx, depth: usize, p_style: Option<&str>) -> Style {
-    let mut s = cx.base.clone();
-    if let Some(m) = &cx.outline_master
-        && depth > 0
-    {
-        let name = format!("{m}-outline{}", depth + 1);
-        if cx.store.exists(cx.scope, "presentation", &name) {
-            let lv = cx.store.chain(cx.scope, "presentation", &name);
-            merge_style(&mut s, &lv);
-            if let Some(own) = &cx.own {
-                merge_style(&mut s, own);
-            }
-        }
-    }
+    let mut s = cx.levels.get(depth).or(cx.levels.last()).cloned().unwrap_or_default();
     if let Some(sp) = &cx.shape_para {
-        merge_style(&mut s, sp);
+        s.merge(sp);
     }
     if let Some(n) = p_style {
-        let ps = cx.store.chain(cx.scope, "paragraph", n);
-        merge_style(&mut s, &ps);
+        s.merge(&cx.store.chain(cx.scope, "paragraph", n));
     }
     s
 }
 
-fn merge_style(base: &mut Style, over: &Style) {
-    for (k, v) in &over.paragraph {
-        base.paragraph.insert(k.clone(), v.clone());
-    }
-    merge_text(&mut base.text, &over.text);
-    if over.tabs.is_some() {
-        base.tabs.clone_from(&over.tabs);
-    }
-    if over.list.is_some() {
-        base.list.clone_from(&over.list);
-    }
+/// The paragraph and text formatting a style gives a paragraph at this list position.
+fn props_at<'a>(cx: &TextCtx<'a>, style: &Style, list: &ListCtx<'a>) -> (ParaProps, RunProps) {
+    let mut props = para_props(&style.paragraph, style.tabs.as_ref());
+    let run = run_props(cx.store, &style.text, cx.auto_color);
+    // The list's level, else the one the paragraph style names (`style:list-style-name`).
+    let at_depth = |l: &'a El| level_style(l, list.depth);
+    let named = || style.list_style_name.as_deref().and_then(|n| cx.store.list_style(cx.scope, n)).and_then(at_depth);
+    let level_el = if list.in_list { list.style.and_then(at_depth).or_else(named) } else { None };
+    apply_list_level(cx.store, &mut props, level_el, list, run.size);
+    (props, run)
+}
+
+/// One level of a text style: the formatting a paragraph at `depth` (in a list, or not) gets from
+/// `style` alone.
+pub fn level_props(store: &Store, scope: Scope, style: &Style, depth: usize, in_list: bool) -> (ParaProps, RunProps) {
+    let cx = TextCtx { store, scope, levels: vec![style.clone()], shape_para: None, auto_color: Rgba::BLACK, inherit: false };
+    let list = ListCtx { style: style.list.as_ref(), depth: depth.min(MAX_LIST_DEPTH - 1), bulleted: in_list, in_list, start: None };
+    props_at(&cx, style, &list)
 }
 
 fn paragraph(cx: &TextCtx, p: &El, list: &ListCtx) -> Paragraph {
     let style = para_style(cx, list.depth, attr(p, "text:style-name"));
-    let mut props = para_props(cx.store, &style.paragraph, style.tabs.as_ref());
-    let base_run = run_props(cx.store, &style.text, cx.auto_color);
-    let level_el = if list.in_list { list.style.and_then(|l| level_style(l, list.depth)) } else { None };
-    // A paragraph style may name its own list style (`style:list-style-name`) when it's in a list.
-    let level_el = level_el.or_else(|| {
-        if !list.in_list {
-            return None;
-        }
-        style.list_style_name.as_deref().and_then(|n| cx.store.list_style(cx.scope, n)).and_then(|l| level_style(l, list.depth))
-    });
-    apply_list_level(cx.store, &mut props, level_el, &style.paragraph, list, base_run.size);
+    let (mut props, base_run) = props_at(cx, &style, list);
+    if !cx.inherit {
+        complete(&mut props);
+    }
     let mut para = Paragraph { level: list.depth.min(8) as u8, props, runs: vec![], def_props: RunProps::default(), end_props: base_run.clone() };
     let mut st = RunState { space_pending: false, at_start: true };
     inline(cx, p, &style.text, None, &mut para.runs, &mut st, 0);
@@ -259,7 +245,7 @@ fn inline(cx: &TextCtx, el: &El, text_props: &Props, link: Option<&Hyperlink>, r
                 }
                 "text:a" => {
                     let href = attr(e, "xlink:href").unwrap_or("");
-                    let l = hyperlink(href, cx.slide_links);
+                    let l = hyperlink(href);
                     inline(cx, e, text_props, l.as_ref().or(link), runs, st, depth + 1);
                 }
                 "text:s" => {
@@ -315,15 +301,12 @@ fn inline(cx: &TextCtx, el: &El, text_props: &Props, link: Option<&Hyperlink>, r
 }
 
 /// `xlink:href` of a `text:a` or `draw:a`/`presentation:event-listener`.
-pub fn hyperlink(href: &str, slide_links: bool) -> Option<Hyperlink> {
+pub fn hyperlink(href: &str) -> Option<Hyperlink> {
     let href = href.trim();
     if href.is_empty() {
         return None;
     }
     let action = if let Some(name) = href.strip_prefix('#') {
-        if !slide_links {
-            return None;
-        }
         // Resolved to a slide id by the reader once every page is known.
         Action::Url { url: format!("#{name}") }
     } else if deckcraft_model::text::safe_url(href) {
@@ -340,18 +323,44 @@ pub fn auto_text_color(behind: Rgba) -> Rgba {
     if lum <= 156.0 { Rgba::WHITE } else { Rgba::BLACK }
 }
 
+/// LibreOffice's defaults for the paragraph formatting a style leaves unset.
+pub fn complete(p: &mut ParaProps) {
+    p.align.get_or_insert(Align::Left);
+    p.margin_left.get_or_insert(0.0);
+    p.indent.get_or_insert(0.0);
+    p.margin_right.get_or_insert(0.0);
+    p.space_before.get_or_insert(Spacing::Pts(0.0));
+    p.space_after.get_or_insert(Spacing::Pts(0.0));
+    p.line_spacing.get_or_insert(Spacing::Pct(1.0));
+    p.bullet.get_or_insert(Bullet::None);
+}
+
+/// Our alignment of an `fo:text-align` value.
+pub fn align_of(v: &str) -> Option<Align> {
+    match v {
+        "start" | "left" => Some(Align::Left),
+        "end" | "right" => Some(Align::Right),
+        "center" => Some(Align::Center),
+        "justify" => Some(Align::Justify),
+        _ => None,
+    }
+}
+
+/// The `fo:text-align` value of our alignment (ODF has one justification).
+pub fn odf_align(a: Align) -> &'static str {
+    match a {
+        Align::Left => "start",
+        Align::Center => "center",
+        Align::Right => "end",
+        Align::Justify | Align::JustLow | Align::Distributed | Align::ThaiDistributed => "justify",
+    }
+}
+
 /// Paragraph properties from merged `style:paragraph-properties`.
-pub fn para_props(store: &Store, p: &Props, tabs: Option<&El>) -> ParaProps {
-    let _ = store;
+pub fn para_props(p: &Props, tabs: Option<&El>) -> ParaProps {
     let len = |k: &str| p.get(k).and_then(|v| units::length(v));
     let mut pp = ParaProps {
-        align: p.get("fo:text-align").and_then(|a| match a.as_str() {
-            "start" | "left" => Some(Align::Left),
-            "end" | "right" => Some(Align::Right),
-            "center" => Some(Align::Center),
-            "justify" => Some(Align::Justify),
-            _ => None,
-        }),
+        align: p.get("fo:text-align").and_then(|a| align_of(a)),
         margin_left: len("fo:margin-left"),
         margin_right: len("fo:margin-right"),
         indent: len("fo:text-indent"),
@@ -390,7 +399,7 @@ pub fn para_props(store: &Store, p: &Props, tabs: Option<&El>) -> ParaProps {
 }
 
 /// Bullets and the hanging indent of a list level.
-fn apply_list_level(store: &Store, pp: &mut ParaProps, level: Option<&El>, para: &Props, list: &ListCtx, text_size: Option<f64>) {
+fn apply_list_level(store: &Store, pp: &mut ParaProps, level: Option<&El>, list: &ListCtx, text_size: Option<f64>) {
     let Some(l) = level else {
         pp.bullet = Some(Bullet::None);
         return;
@@ -400,7 +409,6 @@ fn apply_list_level(store: &Store, pp: &mut ParaProps, level: Option<&El>, para:
     // The list level's indents, added to the paragraph's own (LibreOffice writes the paragraph's
     // as zero and the indent in the list). ODF 1.2 "label-alignment" mode puts them on a nested
     // element.
-    let _ = para;
     let (lm, li) = match props.and_then(|e| kid(e, "style:list-level-label-alignment")) {
         Some(a) => {
             (attr(a, "fo:margin-left").and_then(units::length).unwrap_or(0.0), attr(a, "fo:text-indent").and_then(units::length).unwrap_or(0.0))
@@ -536,14 +544,9 @@ pub fn run_props(store: &Store, t: &Props, auto: Rgba) -> RunProps {
         });
     }
     if let Some(c) = g("fo:color").and_then(units::color) {
-        let mut cr = ColorRef::rgb(c);
-        if let Some(op) = g("loext:opacity").and_then(units::percent)
-            && op > 0.0
-            && op < 1.0
-        {
-            cr.mods.push(ColorTransform::Alpha((op * 100_000.0) as i32));
-        }
-        rp.fill = Some(Fill::solid(cr));
+        // A zero opacity is LibreOffice's "unset".
+        let op = g("loext:opacity").and_then(units::percent).filter(|o| *o > 0.0);
+        rp.fill = Some(Fill::solid(crate::styles::color_ref(c, op)));
     } else if g("style:use-window-font-color") == Some("true") {
         rp.fill = Some(Fill::solid(ColorRef::rgb(auto)));
     }
@@ -621,9 +624,8 @@ mod tests {
 
     #[test]
     fn hyperlinks_keep_only_safe_targets() {
-        assert!(hyperlink("https://example.org", false).is_some());
-        assert!(hyperlink("javascript:alert(1)", false).is_none());
-        assert!(hyperlink("#page2", false).is_none());
-        assert!(hyperlink("#page2", true).is_some());
+        assert!(hyperlink("https://example.org").is_some());
+        assert!(hyperlink("javascript:alert(1)").is_none());
+        assert!(hyperlink("#page2").is_some());
     }
 }

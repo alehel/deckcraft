@@ -291,7 +291,7 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
             Some(l) => Ctx::for_layout(p, m, l),
             None => Ctx::for_master(p, m),
         };
-        common.push_str(&shapes::presentation_styles(&mut w, &mut sauto, &ctx, &pg.name));
+        common.push_str(&shapes::presentation_styles(&mut w, &ctx, &pg.name));
         masters.push_str(&shapes::master_page(&mut w, &mut sauto, &ctx, &pg.name, layout));
     }
 
@@ -401,7 +401,13 @@ fn page_names(p: &Presentation) -> HashMap<u32, String> {
     out
 }
 
-/// A style name: letters, digits and `_` (spaces encoded as `_20_`, as LibreOffice does).
+/// A font family as `svg:font-family` and `fo:font-family` take it: quoted, escaped.
+pub(crate) fn quoted_family(f: &str) -> String {
+    esc(&format!("'{}'", f.replace('\'', "")))
+}
+
+/// A style name: letters, digits, `-` and `_`, other characters as `_` (spaces as `_20_`, as
+/// LibreOffice does), never starting with a digit or `-`.
 pub(crate) fn style_name(s: &str) -> String {
     let mut o = String::new();
     for c in s.chars().take(64) {
@@ -424,7 +430,7 @@ fn font_decls(fonts: &std::collections::BTreeSet<String>, embedded: &[(String, &
     for f in fonts {
         let faces: Vec<_> = embedded.iter().filter(|e| e.0 == *f).collect();
         if faces.is_empty() {
-            let _ = write!(s, r#"<style:font-face style:name="{}" svg:font-family="'{}'"/>"#, esc(f), esc(&f.replace('\'', "")));
+            let _ = write!(s, r#"<style:font-face style:name="{}" svg:font-family="{}"/>"#, esc(f), quoted_family(f));
             continue;
         }
         // An embedded font: one face per file, pointing at it.
@@ -432,9 +438,9 @@ fn font_decls(fonts: &std::collections::BTreeSet<String>, embedded: &[(String, &
             let name = if k == 0 { f.clone() } else { format!("{f}{k}") };
             let _ = write!(
                 s,
-                r#"<style:font-face style:name="{}" svg:font-family="'{}'" svg:font-weight="{weight}" svg:font-style="{style}"><svg:font-face-src><svg:font-face-uri xlink:href="{}" xlink:type="simple"><svg:font-face-format svg:string="truetype"/></svg:font-face-uri></svg:font-face-src></style:font-face>"#,
+                r#"<style:font-face style:name="{}" svg:font-family="{}" svg:font-weight="{weight}" svg:font-style="{style}"><svg:font-face-src><svg:font-face-uri xlink:href="{}" xlink:type="simple"><svg:font-face-format svg:string="truetype"/></svg:font-face-uri></svg:font-face-src></style:font-face>"#,
                 esc(&name),
-                esc(&f.replace('\'', "")),
+                quoted_family(f),
                 esc(path)
             );
         }
@@ -520,7 +526,7 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
     let mut pp = String::new();
     if s.background.is_some() {
         let (fill, ph) = resolve::background(&ctx, Some(s));
-        pp.push_str(&shapes::fill_attrs(w, &ctx, &fill, ph, true));
+        pp.push_str(&shapes::fill_attrs(w, &ctx, &fill, ph));
         pp.push_str(r#" draw:background-size="border""#);
     }
     if s.hidden {
@@ -560,18 +566,21 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
     }
     // Comments (replies follow their comment, at its place).
     for c in &s.comments {
-        for (k, cm) in std::iter::once(c).chain(c.replies.iter()).enumerate().take(1000) {
-            let text: String = cm.text.split('\n').map(|l| format!("<text:p>{}</text:p>", text::text_content(l))).collect();
-            let date = if cm.date.is_empty() { String::new() } else { format!("<dc:date>{}</dc:date>", esc(&cm.date)) };
-            let initials =
-                if cm.initials.is_empty() { String::new() } else { format!("<meta:creator-initials>{}</meta:creator-initials>", esc(&cm.initials)) };
-            let resolved = if cm.resolved && k == 0 { r#" loext:resolved="true""# } else { "" };
+        for (k, reply) in std::iter::once(c).chain(c.replies.iter()).enumerate().take(1000) {
+            let text: String = reply.text.split('\n').map(|l| format!("<text:p>{}</text:p>", text::text_content(l))).collect();
+            let date = if reply.date.is_empty() { String::new() } else { format!("<dc:date>{}</dc:date>", esc(&reply.date)) };
+            let initials = if reply.initials.is_empty() {
+                String::new()
+            } else {
+                format!("<meta:creator-initials>{}</meta:creator-initials>", esc(&reply.initials))
+            };
+            let resolved = if reply.resolved && k == 0 { r#" loext:resolved="true""# } else { "" };
             let _ = write!(
                 out,
                 r#"<officeooo:annotation svg:x="{}" svg:y="{}" svg:width="0.5cm" svg:height="0.5cm"{resolved}><dc:creator>{}</dc:creator>{date}{initials}{text}</officeooo:annotation>"#,
-                crate::units::cm(c.x),
-                crate::units::cm(c.y),
-                esc(&cm.author)
+                cm(c.x),
+                cm(c.y),
+                esc(&reply.author)
             );
         }
     }
