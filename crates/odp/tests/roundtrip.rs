@@ -292,6 +292,146 @@ fn hostile_files_are_errors_not_crashes() {
     }
 }
 
+const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0""#;
+
+/// Repeat counts and spans in the billions are bounded, not expanded: a table and a chart that
+/// claim them read quickly into something small.
+#[test]
+fn huge_repeats_and_spans_are_bounded() {
+    let doc = format!(
+        r#"<office:document {NS} office:mimetype="application/vnd.oasis.opendocument.presentation"><office:body><office:presentation><draw:page>
+<draw:frame svg:x="1cm" svg:y="1cm" svg:width="10cm" svg:height="5cm"><table:table>
+<table:table-column table:number-columns-repeated="2000000000"/>
+<table:table-row table:number-rows-repeated="2000000000"><table:table-cell table:number-columns-repeated="2000000000" table:number-columns-spanned="4000000000" table:number-rows-spanned="4000000000"><text:p>x</text:p></table:table-cell></table:table-row>
+</table:table></draw:frame>
+<draw:frame svg:x="1cm" svg:y="7cm" svg:width="10cm" svg:height="5cm"><draw:object><office:document><office:body><office:chart><chart:chart chart:class="chart:bar"><chart:plot-area><chart:series chart:values-cell-range-address="local-table.$B$1:.$B$2000000000"><chart:data-point chart:repeated="2000000000"/></chart:series></chart:plot-area>
+<table:table table:name="local-table"><table:table-rows><table:table-row table:number-rows-repeated="2000000000"><table:table-cell table:number-columns-repeated="2000000000" office:value-type="float" office:value="1"><text:p>1</text:p></table:table-cell></table:table-row></table:table-rows></table:table>
+</chart:chart></office:chart></office:body></office:document></draw:object></draw:frame>
+</draw:page></office:presentation></office:body></office:document>"#
+    );
+    let started = std::time::Instant::now();
+    let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+    assert!(started.elapsed().as_secs() < 10);
+    let mut cells = 0;
+    let mut values = 0;
+    deckcraft_model::walk(&p.slides[0].shapes, &mut |sh, _| match &sh.kind {
+        ShapeKind::Table(t) => {
+            for r in &t.rows {
+                assert!(r.cells.len() == t.cols.len());
+                for (ci, c) in r.cells.iter().enumerate() {
+                    assert!(ci + c.grid_span as usize <= t.cols.len());
+                }
+                cells += r.cells.len();
+            }
+        }
+        ShapeKind::Chart(c) => values += c.series.iter().map(|s| s.values.len()).sum::<usize>(),
+        _ => {}
+    });
+    assert!(cells > 0 && cells <= 1_000_000, "{cells}");
+    assert!(values <= 4096, "{values}");
+    deckcraft_odp::export(&p).unwrap();
+}
+
+/// A cell whose style says `transparent` has no fill; a trailing space in a paragraph stays.
+#[test]
+fn transparent_cells_and_trailing_spaces_read() {
+    let doc = format!(
+        r#"<office:document {NS} office:mimetype="application/vnd.oasis.opendocument.presentation"><office:automatic-styles><style:style style:name="ce1" style:family="table-cell"><style:table-cell-properties fo:background-color="transparent"/></style:style></office:automatic-styles><office:body><office:presentation><draw:page>
+<draw:frame svg:x="1cm" svg:y="1cm" svg:width="10cm" svg:height="5cm"><table:table><table:table-column/><table:table-row><table:table-cell table:style-name="ce1"><text:p>x</text:p></table:table-cell></table:table-row></table:table></draw:frame>
+<draw:frame svg:x="1cm" svg:y="7cm" svg:width="10cm" svg:height="2cm"><draw:text-box><text:p>ends with<text:s/></text:p></draw:text-box></draw:frame>
+</draw:page></office:presentation></office:body></office:document>"#
+    );
+    let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+    let sh = &p.slides[0].shapes;
+    let ShapeKind::Table(t) = &sh[0].kind else { panic!("not a table") };
+    assert!(matches!(t.rows[0].cells[0].fill, None | Some(Fill::None)), "{:?}", t.rows[0].cells[0].fill);
+    assert_eq!(sh[1].text.as_ref().unwrap().paragraphs[0].text(), "ends with ");
+}
+
+/// A presentation without masters still writes a package LibreOffice opens.
+#[test]
+fn a_deck_without_masters_exports() {
+    let mut p = defaults::new_presentation(None);
+    p.masters.clear();
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    assert_eq!(back.slides.len(), p.slides.len());
+}
+
+/// The start tags of an XML document: name and attributes.
+fn tags(xml: &str) -> Vec<(String, Vec<(String, String)>)> {
+    let mut out = vec![];
+    for chunk in xml.split('<').skip(1) {
+        if chunk.starts_with(['/', '?', '!']) {
+            continue;
+        }
+        let end = chunk.find('>').unwrap();
+        let body = chunk[..end].trim_end_matches('/');
+        let name_end = body.find(char::is_whitespace).unwrap_or(body.len());
+        let mut attrs = vec![];
+        let mut rest = &body[name_end..];
+        while let Some(eq) = rest.find('=') {
+            let name = rest[..eq].trim().to_string();
+            let q = rest[eq + 1..].chars().next().unwrap();
+            let after = &rest[eq + 2..];
+            let close = after.find(q).unwrap();
+            attrs.push((name, after[..close].to_string()));
+            rest = &after[close + 1..];
+        }
+        out.push((body[..name_end].to_string(), attrs));
+    }
+    out
+}
+
+fn part(bytes: &[u8], name: &str) -> String {
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut s = String::new();
+    std::io::Read::read_to_string(&mut z.by_name(name).unwrap(), &mut s).unwrap();
+    s
+}
+
+/// What we write has no repeated attribute, unique ids, and no reference to an id it didn't write
+/// — even when an effect targets a footer placeholder, which a slide doesn't write.
+#[test]
+fn written_ids_are_unique_and_references_resolve() {
+    use deckcraft_model::anim::Animation;
+    let mut p = sample();
+    let slide = Arc::make_mut(&mut p.slides[0]);
+    let footer = Shape { ph: Some(deckcraft_model::Placeholder { kind: PhType::Footer, ..Default::default() }), ..Default::default() };
+    let footer_id = ShapeId(90_000);
+    slide.shapes.push(Shape { id: footer_id, ..footer });
+    let first = slide.shapes[0].id;
+    slide.animations.push(Animation { shape: footer_id, ..Default::default() });
+    slide.animations.push(Animation { shape: first, trigger: Some(footer_id), ..Default::default() });
+    slide.animations.push(Animation { shape: first, paragraph: Some(999), ..Default::default() });
+    p.fix_next_id();
+    let bytes = deckcraft_odp::export(&p).unwrap();
+    for name in ["content.xml", "styles.xml"] {
+        let xml = part(&bytes, name);
+        let tags = tags(&xml);
+        let mut ids = std::collections::HashSet::new();
+        for (tag, attrs) in &tags {
+            let mut names = std::collections::HashSet::new();
+            for (k, v) in attrs {
+                assert!(names.insert(k.as_str()), "{name}: <{tag}> repeats {k}");
+                if k == "xml:id" {
+                    assert!(ids.insert(v.clone()), "{name}: id {v} written twice");
+                }
+            }
+        }
+        for (tag, attrs) in &tags {
+            for (k, v) in attrs {
+                let id = match k.as_str() {
+                    "smil:targetElement" | "draw:start-shape" | "draw:end-shape" => v.as_str(),
+                    "smil:begin" if v.ends_with(".click") || v.ends_with(".begin") => v.rsplit_once('.').unwrap().0,
+                    _ => continue,
+                };
+                assert!(ids.contains(id), "{name}: <{tag} {k}={v}> points at nothing");
+            }
+        }
+    }
+    deckcraft_odp::import(&bytes).unwrap();
+}
+
 #[test]
 fn templates_write_the_template_media_type() {
     let p = defaults::new_presentation(None);
@@ -388,6 +528,90 @@ fn animations_and_transitions_round_trip() {
         assert_eq!(got.trigger, want.trigger.map(map), "{}", want.effect);
     }
     assert_eq!(s.animations[4].path.as_deref(), Some("M 0 0 L 0.25 0.1 E"));
+}
+
+/// Repeats, reversal, easing, rewind, amounts and colours live on the effect node and survive.
+#[test]
+fn animation_modifiers_and_amounts_round_trip() {
+    use deckcraft_model::anim::{AnimClass, Animation};
+    use deckcraft_model::style::ColorRef;
+    let a = Shape { xfrm: Some(Xfrm::new(50.0, 50.0, 100.0, 80.0)), geom: Geom::preset("rect"), ..Default::default() };
+    let mut p = deck_with(vec![a]);
+    let id = shapes_of(&p)[0].id;
+    let anims = vec![
+        Animation {
+            shape: id,
+            effect: "wipe".into(),
+            option: "r".into(),
+            repeat: 3,
+            auto_reverse: true,
+            smooth_start: 0.25,
+            smooth_end: 0.5,
+            ..Default::default()
+        },
+        Animation {
+            shape: id,
+            class: AnimClass::Emphasis,
+            effect: "spin".into(),
+            option: "counterClockwise".into(),
+            amount: Some(90.0),
+            repeat: u32::MAX,
+            rewind: true,
+            duration_ms: 2000,
+            ..Default::default()
+        },
+        Animation {
+            shape: id,
+            class: AnimClass::Emphasis,
+            effect: "growShrink".into(),
+            option: "horz".into(),
+            amount: Some(2.0),
+            ..Default::default()
+        },
+        Animation { shape: id, class: AnimClass::Emphasis, effect: "transparency".into(), amount: Some(0.75), ..Default::default() },
+        Animation {
+            shape: id,
+            class: AnimClass::Emphasis,
+            effect: "fillColor".into(),
+            color: Some(ColorRef::rgb(deckcraft_color::Rgba::rgb(0x12, 0x34, 0x56))),
+            ..Default::default()
+        },
+        Animation { shape: id, class: AnimClass::Exit, effect: "shrinkTurn".into(), ..Default::default() },
+        Animation { shape: id, class: AnimClass::Exit, effect: "floatOut".into(), option: "d".into(), ..Default::default() },
+        Animation { shape: id, class: AnimClass::Exit, effect: "bounceOut".into(), ..Default::default() },
+        Animation { shape: id, class: AnimClass::Emphasis, effect: "objectColor".into(), ..Default::default() },
+    ];
+    Arc::make_mut(&mut p.slides[0]).animations = anims.clone();
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    let got = &back.slides[0].animations;
+    assert_eq!(got.len(), anims.len());
+    for (want, got) in anims.iter().zip(got) {
+        let key = |a: &Animation| (a.class, a.effect.clone(), a.option.clone(), a.repeat, a.auto_reverse, a.rewind, a.amount);
+        assert_eq!(key(got), key(want), "{}", want.effect);
+        assert_eq!((got.smooth_start, got.smooth_end), (want.smooth_start, want.smooth_end), "{}", want.effect);
+    }
+    assert_eq!(got[4].color, anims[4].color);
+}
+
+/// Each transition comes back as the kind and direction it was written with.
+#[test]
+fn transition_directions_round_trip() {
+    for (kind, option) in [
+        ("uncover", "l"),
+        ("cover", "ru"),
+        ("wipe", "l"),
+        ("split", "horzIn"),
+        ("clock", "counterClockwise"),
+        ("fade", "throughBlack"),
+        ("push", "r"),
+    ] {
+        let mut p = deck_with(vec![]);
+        Arc::make_mut(&mut p.slides[0]).transition =
+            Some(deckcraft_model::Transition { kind: kind.into(), option: option.into(), duration_ms: 900, ..Default::default() });
+        let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+        let t = back.slides[0].transition.as_ref().unwrap();
+        assert_eq!((t.kind.as_str(), t.option.as_str(), t.duration_ms), (kind, option, 900));
+    }
 }
 
 #[test]

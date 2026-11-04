@@ -126,15 +126,9 @@ pub(crate) struct Writer<'p> {
     pub fonts: std::collections::BTreeSet<String>,
     /// Slide id → page name, for links.
     pub page_names: HashMap<u32, String>,
-    /// The master page the shapes being written sit on (their presentation styles' prefix).
-    pub page: String,
     /// Embedded objects written (charts), and the package directories they live in.
     pub objects: usize,
     pub dirs: Vec<(String, String)>,
-    /// Shapes and paragraphs the page's animations target: they get `xml:id`s.
-    pub anim_targets: std::collections::HashSet<(u32, Option<u32>)>,
-    /// Writing a master page: its date fields follow each slide's date setting.
-    pub in_master: bool,
 }
 
 impl Writer<'_> {
@@ -152,6 +146,52 @@ impl Writer<'_> {
         self.files.push((path.clone(), m.content_type.clone(), std::sync::Arc::clone(&m.data)));
         self.media.insert(id.0, path.clone());
         Some(path)
+    }
+}
+
+/// The page being written: the master page whose presentation styles its placeholders take, and
+/// the element ids it gives shapes and paragraphs others refer to (animations, connector ends).
+pub(crate) struct PageCtx {
+    /// The master page's name: the prefix of its presentation styles (`Name-title` …).
+    pub master: String,
+    /// The page's id prefix (`pg3`), unique in the document.
+    pub tag: String,
+    /// A master page: its date fields are the slides' date-time field, which each slide shows
+    /// or hides.
+    pub is_master: bool,
+    ids: std::collections::HashSet<(u32, Option<u32>)>,
+}
+
+impl PageCtx {
+    pub fn new(master: &str, tag: String, is_master: bool) -> Self {
+        PageCtx { master: master.to_string(), tag, is_master, ids: Default::default() }
+    }
+
+    /// The `xml:id` of a shape (or one of its paragraphs), when something refers to it and it is
+    /// written.
+    pub fn id(&self, shape: deckcraft_model::ShapeId, para: Option<u32>) -> Option<String> {
+        self.ids.contains(&(shape.0, para)).then(|| match para {
+            Some(p) => format!("{}s{}p{p}", self.tag, shape.0),
+            None => format!("{}s{}", self.tag, shape.0),
+        })
+    }
+
+    /// Give ids to what the page's animations and connectors refer to, if it is written.
+    pub fn refer(&mut self, w: &Writer, shapes: &[deckcraft_model::Shape], animations: &[deckcraft_model::Animation]) {
+        let mut wanted: Vec<(deckcraft_model::ShapeId, Option<u32>)> =
+            animations.iter().flat_map(|a| [Some((a.shape, a.paragraph)), a.trigger.map(|t| (t, None))]).flatten().collect();
+        deckcraft_model::walk(shapes, &mut |sh, _| {
+            if let ShapeKind::Connector { start, end } = &sh.kind {
+                wanted.extend([start, end].into_iter().flatten().map(|(id, _)| (*id, None)));
+            }
+        });
+        for (id, para) in wanted {
+            let Some(sh) = deckcraft_model::find_shape(shapes, id) else { continue };
+            let para_ok = para.is_none_or(|i| sh.text.as_ref().is_some_and(|t| (i as usize) < t.paragraphs.len()));
+            if shapes::writes_element(w, sh, !self.is_master) && para_ok {
+                self.ids.insert((id.0, para));
+            }
+        }
     }
 }
 
@@ -181,6 +221,18 @@ struct Page {
 }
 
 pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
+    // Every page needs a master page: a deck without masters gets the default one.
+    let with_master;
+    let p = if p.masters.is_empty() {
+        let mut q = p.clone();
+        let (m, next) = deckcraft_model::defaults::build_master(q.slide_size, Default::default(), q.next_id.max(1));
+        q.next_id = next.max(q.next_id);
+        q.masters.push(std::sync::Arc::new(m));
+        with_master = q;
+        &with_master
+    } else {
+        p
+    };
     let mut w = Writer {
         p,
         named: Named::default(),
@@ -188,15 +240,10 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         files: vec![],
         fonts: Default::default(),
         page_names: HashMap::new(),
-        page: String::new(),
         objects: 0,
         dirs: vec![],
-        anim_targets: Default::default(),
-        in_master: false,
     };
-    for (i, s) in p.slides.iter().enumerate() {
-        w.page_names.insert(s.id.0, page_name(i, s));
-    }
+    w.page_names = page_names(p);
     // Master pages: one per (master, layout) the slides use; a deck without slides keeps each
     // master's first layout.
     let mut pages: Vec<Page> = vec![];
@@ -205,7 +252,7 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         if let Some(n) = page_of.get(&(mi, layout)) {
             return n.clone();
         }
-        let m = &p.masters[mi.min(p.masters.len().saturating_sub(1))];
+        let Some(m) = p.masters.get(mi) else { return String::new() };
         let lname = layout.and_then(|l| m.layout(l)).map(|l| l.name.clone()).unwrap_or_default();
         let base = if lname.is_empty() { m.name.clone() } else { format!("{} {}", m.name, lname) };
         let base = style_name(if base.trim().is_empty() { "Default" } else { &base });
@@ -221,17 +268,15 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
     };
     let mut slide_pages = vec![];
     for s in &p.slides {
-        let mi = p.masters.iter().position(|m| m.layout(s.layout).is_some()).unwrap_or(0);
-        let layout = p
-            .masters
-            .get(mi)
-            .and_then(|m| m.layout(s.layout))
-            .map(|l| l.id)
-            .or_else(|| p.masters.get(mi).and_then(|m| m.layouts.first()).map(|l| l.id));
+        // The master and layout the slide is drawn with, as the model resolves them.
+        let (mi, layout) = match p.master_for(s) {
+            Some((m, l)) => (p.masters.iter().position(|x| std::ptr::eq(x.as_ref(), m)).unwrap_or(0), l.map(|l| l.id)),
+            None => (0, None),
+        };
         slide_pages.push(want(mi, layout, &mut pages));
     }
-    if pages.is_empty() && !p.masters.is_empty() {
-        let layout = p.masters[0].layouts.first().map(|l| l.id);
+    if pages.is_empty() {
+        let layout = p.masters.first().and_then(|m| m.layouts.first()).map(|l| l.id);
         want(0, layout, &mut pages);
     }
 
@@ -274,11 +319,11 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
             );
         }
     }
-    let settings = show_settings(p);
+    let settings = show_settings(p, &w.page_names);
     let embedded = embedded_fonts(&mut w);
     let fonts = font_decls(&w.fonts, &embedded);
     let content = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?><office:document-content {NS}>{fonts}<office:automatic-styles>{}<number:date-style style:name="D1" number:automatic-order="true"><number:month number:style="long"/><number:text>/</number:text><number:day number:style="long"/><number:text>/</number:text><number:year/></number:date-style></office:automatic-styles><office:body><office:presentation>{decls}{body}{settings}</office:presentation></office:body></office:document-content>"#,
+        r#"<?xml version="1.0" encoding="UTF-8"?><office:document-content {NS}>{fonts}<office:automatic-styles>{}</office:automatic-styles><office:body><office:presentation>{decls}{body}{settings}</office:presentation></office:body></office:document-content>"#,
         cauto.out
     );
     let page_layouts = format!(
@@ -291,7 +336,7 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
     );
     let fonts = font_decls(&w.fonts, &embedded);
     let styles = format!(
-        r##"<?xml version="1.0" encoding="UTF-8"?><office:document-styles {NS}>{fonts}<office:styles>{}<style:default-style style:family="graphic"><style:graphic-properties svg:stroke-color="#3465a4" draw:fill-color="#729fcf" fo:wrap-option="no-wrap"/><style:paragraph-properties style:writing-mode="lr-tb"/><style:text-properties fo:font-size="18pt" fo:language="en" fo:country="US"/></style:default-style><style:style style:name="standard" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0cm" svg:stroke-color="#3465a4" draw:fill="solid" draw:fill-color="#729fcf" fo:padding-top="0.125cm" fo:padding-bottom="0.125cm" fo:padding-left="0.25cm" fo:padding-right="0.25cm" draw:shadow="hidden"/></style:style>{common}</office:styles><office:automatic-styles>{page_layouts}{}</office:automatic-styles><office:master-styles>{masters}</office:master-styles></office:document-styles>"##,
+        r##"<?xml version="1.0" encoding="UTF-8"?><office:document-styles {NS}>{fonts}<office:styles>{}<number:date-style style:name="D1" number:automatic-order="true"><number:month number:style="long"/><number:text>/</number:text><number:day number:style="long"/><number:text>/</number:text><number:year/></number:date-style><style:default-style style:family="graphic"><style:graphic-properties svg:stroke-color="#3465a4" draw:fill-color="#729fcf" fo:wrap-option="no-wrap"/><style:paragraph-properties style:writing-mode="lr-tb"/><style:text-properties fo:font-size="18pt" fo:language="en" fo:country="US"/></style:default-style><style:style style:name="standard" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0cm" svg:stroke-color="#3465a4" draw:fill="solid" draw:fill-color="#729fcf" fo:padding-top="0.125cm" fo:padding-bottom="0.125cm" fo:padding-left="0.25cm" fo:padding-right="0.25cm" draw:shadow="hidden"/></style:style>{common}</office:styles><office:automatic-styles>{page_layouts}{}</office:automatic-styles><office:master-styles>{masters}</office:master-styles></office:document-styles>"##,
         w.named.out, sauto.out
     );
     let meta = meta_xml(p);
@@ -339,9 +384,21 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
     Ok(z.finish().map_err(|e| err(&e))?.into_inner())
 }
 
-fn page_name(i: usize, s: &Slide) -> String {
-    let n = s.name.trim();
-    if n.is_empty() { format!("page{}", i + 1) } else { n.to_string() }
+/// Each slide's page name: its own name, unique and without commas (custom shows list pages
+/// separated by commas), else `pageN`.
+fn page_names(p: &Presentation) -> HashMap<u32, String> {
+    let mut out = HashMap::new();
+    let mut used = std::collections::HashSet::new();
+    for (i, s) in p.slides.iter().enumerate() {
+        let own = s.name.replace(',', " ").trim().to_string();
+        let mut name = if own.is_empty() { format!("page{}", i + 1) } else { own };
+        if !used.insert(name.clone()) {
+            name = format!("{name} ({})", i + 1);
+            used.insert(name.clone());
+        }
+        out.insert(s.id.0, name);
+    }
+    out
 }
 
 /// A style name: letters, digits and `_` (spaces encoded as `_20_`, as LibreOffice does).
@@ -434,7 +491,7 @@ fn meta_xml(p: &Presentation) -> String {
     )
 }
 
-fn show_settings(p: &Presentation) -> String {
+fn show_settings(p: &Presentation, names: &HashMap<u32, String>) -> String {
     let mut attrs = String::new();
     if p.show.loop_until_esc {
         attrs.push_str(r#" presentation:endless="true""#);
@@ -447,8 +504,7 @@ fn show_settings(p: &Presentation) -> String {
     }
     let mut shows = String::new();
     for cs in &p.custom_shows {
-        let pages: Vec<String> =
-            cs.slides.iter().filter_map(|id| p.slide_index(*id).and_then(|i| p.slides.get(i).map(|s| page_name(i, s)))).collect();
+        let pages: Vec<&str> = cs.slides.iter().filter_map(|id| names.get(&id.0).map(String::as_str)).collect();
         let _ = write!(shows, r#"<presentation:show presentation:name="{}" presentation:pages="{}"/>"#, esc(&cs.name), esc(&pages.join(",")));
     }
     format!(r#"<presentation:settings presentation:mouse-visible="true"{attrs}>{shows}</presentation:settings>"#)
@@ -458,20 +514,11 @@ fn show_settings(p: &Presentation) -> String {
 fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str) -> String {
     let p = w.p;
     let Some(ctx) = Ctx::for_slide(p, s) else { return String::new() };
-    w.page = master_name.to_string();
-    w.anim_targets = s.animations.iter().flat_map(|a| [Some((a.shape.0, a.paragraph)), a.trigger.map(|t| (t.0, None))]).flatten().collect();
-    // Shapes connectors are glued to need ids too.
-    deckcraft_model::walk(&s.shapes, &mut |sh, _| {
-        if let ShapeKind::Connector { start, end } = &sh.kind {
-            for (id, _) in [start, end].into_iter().flatten() {
-                w.anim_targets.insert((id.0, None));
-            }
-        }
-    });
+    let mut pg = PageCtx::new(master_name, format!("pg{i}"), false);
+    pg.refer(w, &s.shapes, &s.animations);
     // The page style: background, transition, visibility, footers.
     let mut pp = String::new();
-    if let Some(bg) = &s.background {
-        let _ = bg;
+    if s.background.is_some() {
         let (fill, ph) = resolve::background(&ctx, Some(s));
         pp.push_str(&shapes::fill_attrs(w, &ctx, &fill, ph, true));
         pp.push_str(r#" draw:background-size="border""#);
@@ -492,13 +539,14 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
         hf.date && has(PhType::Date)
     );
     if let Some(t) = &s.transition {
-        pp.push_str(&shapes::transition_attrs(t));
+        pp.push_str(&crate::anim::transition_props(t));
     }
     let page_style = auto.style("drawing-page", "dp", None, &format!("<style:drawing-page-properties{pp}/>"));
     let mut out = format!(
-        r#"<draw:page draw:name="{}" draw:style-name="{page_style}" draw:master-page-name="{}" xml:id="pg{i}" draw:id="pg{i}""#,
-        esc(&page_name(i, s)),
-        esc(master_name)
+        r#"<draw:page draw:name="{}" draw:style-name="{page_style}" draw:master-page-name="{}" xml:id="{tag}" draw:id="{tag}""#,
+        esc(w.page_names.get(&s.id.0).map(String::as_str).unwrap_or_default()),
+        esc(master_name),
+        tag = pg.tag,
     );
     if hf.footer && has(PhType::Footer) && !hf.footer_text.is_empty() {
         out.push_str(r#" presentation:use-footer-name="ftr1""#);
@@ -508,11 +556,7 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
     }
     out.push('>');
     for sh in &s.shapes {
-        // Footer placeholders are drawn by the master page from the declarations above.
-        if sh.ph_type().is_some_and(PhType::is_footer_kind) {
-            continue;
-        }
-        out.push_str(&shapes::shape(w, auto, &ctx, sh, 0));
+        out.push_str(&shapes::shape(w, auto, &ctx, &pg, sh, 0));
     }
     // Comments (replies follow their comment, at its place).
     for c in &s.comments {
@@ -534,11 +578,7 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
     // Transition and animations.
     let filter = s.transition.as_ref().and_then(crate::anim::transition_filter);
     if filter.is_some() || !s.animations.is_empty() {
-        let ids = |sid: deckcraft_model::ShapeId, para: Option<u32>| match para {
-            Some(pi) => Some(format!("s{}p{pi}", sid.0)),
-            None => Some(format!("s{}", sid.0)),
-        };
-        out.push_str(&crate::anim::write(&format!("pg{i}"), filter.as_deref(), &s.animations, &ids));
+        out.push_str(&crate::anim::write(&pg.tag, filter.as_deref(), &s.animations, &ctx, &|sid, para| pg.id(sid, para)));
     }
     if !s.notes.paragraphs.is_empty() && !s.notes.text().trim().is_empty() {
         let notes = text::plain_paragraphs(w, auto, &s.notes);

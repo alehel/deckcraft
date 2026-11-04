@@ -6529,5 +6529,10 @@ fn opendocument_presentations_open_and_save() {
     let f = crate::cmd::file::read_presentation_file(&path).unwrap();
     assert!(f.native);
     assert_eq!(f.doc.slides.len(), n);
+    // A flat .fodp opens, but isn't saved over in place: DeckCraft writes packaged ODF only.
+    let flat = dir.join("talk.fodp");
+    std::fs::write(&flat, br#"<?xml version="1.0"?><office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" office:mimetype="application/vnd.oasis.opendocument.presentation"><office:body><office:presentation/></office:body></office:document>"#).unwrap();
+    let f = crate::cmd::file::read_presentation_file(&flat.to_string_lossy()).unwrap();
+    assert!(!f.native);
     let _ = std::fs::remove_dir_all(&dir);
 }

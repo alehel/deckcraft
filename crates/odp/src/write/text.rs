@@ -8,13 +8,13 @@ use deckcraft_model::style::Fill;
 use deckcraft_model::text::{Action, Align, Bullet, Caps, ParaProps, Run, RunKind, RunProps, Spacing, Strike, TextBody};
 use deckcraft_model::{Shape, SlideId};
 
-use super::{Auto, Writer};
+use super::{Auto, PageCtx, Writer};
 use crate::dom::esc;
 use crate::units::{cm, hex, pct, pt, trim};
 
 /// The text of a shape, resolved through its placeholder chain. `outline`: an outline
 /// placeholder, whose every paragraph is a list item (its level is its nesting).
-pub fn body(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, shape: &Shape, outline: bool) -> String {
+pub fn body(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, shape: &Shape, outline: bool) -> String {
     let Some(t) = &shape.text else { return String::new() };
     let mut out = String::new();
     for (i, p) in t.paragraphs.iter().enumerate() {
@@ -22,8 +22,8 @@ pub fn body(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, shape: &Shape, outline: 
         let runs: Vec<(RunProps, &Run)> = p.runs.iter().map(|r| (resolve::run(ctx, shape, p, &r.props), r)).collect();
         let end = resolve::run(ctx, shape, p, &p.end_props);
         // A paragraph an animation targets carries an id.
-        let id = w.anim_targets.contains(&(shape.id.0, Some(i as u32))).then(|| format!("s{}p{i}", shape.id.0));
-        out.push_str(&paragraph(w, auto, Some(ctx), p.level, &pp, &end, &runs, outline, id));
+        let id = pg.id(shape.id, Some(i as u32));
+        out.push_str(&paragraph(w, auto, Some(ctx), p.level, &pp, &end, &runs, outline, id, pg.is_master));
     }
     out
 }
@@ -43,7 +43,7 @@ pub fn plain_paragraphs(w: &mut Writer, auto: &mut Auto, t: &TextBody) -> String
                 (rp, r)
             })
             .collect();
-        out.push_str(&paragraph(w, auto, None, p.level, &p.props, &end, &runs, false, None));
+        out.push_str(&paragraph(w, auto, None, p.level, &p.props, &end, &runs, false, None, false));
     }
     out
 }
@@ -59,6 +59,7 @@ fn paragraph(
     runs: &[(RunProps, &Run)],
     outline: bool,
     id: Option<String>,
+    on_master: bool,
 ) -> String {
     // The paragraph style carries its alignment, spacing and indents, and the text properties of
     // its end (so an empty paragraph has its height).
@@ -86,7 +87,7 @@ fn paragraph(
                 let f = field.to_ascii_lowercase();
                 if f == "slidenum" {
                     format!("<text:page-number>{}</text:page-number>", esc(&r.text))
-                } else if f.starts_with("datetime") && w.in_master {
+                } else if f.starts_with("datetime") && on_master {
                     "<presentation:date-time/>".to_string()
                 } else if f.starts_with("datetime") {
                     format!(r#"<text:date style:data-style-name="D1">{}</text:date>"#, esc(&r.text))

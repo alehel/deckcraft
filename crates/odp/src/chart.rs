@@ -9,58 +9,79 @@ use crate::dom::{El, attr, kid, kids};
 use crate::styles::{Scope, Store};
 use crate::units;
 
-/// Most rows and columns read from a chart's data table.
+/// Most cells kept from a chart's data table, across all rows.
+const MAX_GRID_CELLS: usize = 65_536;
+/// Most cells one range address yields, and most points per series.
 const MAX_CELLS: usize = 4096;
+/// Longest text kept from one cell.
+const MAX_CELL_TEXT: usize = 1024;
+
+type Value = (String, Option<f64>);
 
 /// The chart's local data: cells as text and number, row by row.
 #[derive(Default)]
 struct Grid {
-    rows: Vec<Vec<(String, Option<f64>)>>,
+    rows: Vec<Vec<Value>>,
+    width: usize,
+}
+
+fn repeat(e: &El, k: &str) -> usize {
+    attr(e, k).and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).max(1)
 }
 
 impl Grid {
+    /// Read the table, repeats expanded, within [`MAX_GRID_CELLS`] in all.
     fn read(t: &El) -> Grid {
         let mut g = Grid::default();
+        let mut budget = MAX_GRID_CELLS;
         let mut rows: Vec<&El> = vec![];
         collect_rows(t, &mut rows, 0);
         for r in rows {
-            let rep = attr(r, "table:number-rows-repeated").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).clamp(1, 64);
             let mut cells = vec![];
             for c in r.elements().filter(|c| c.name == "table:table-cell" || c.name == "table:covered-table-cell") {
-                let crep = attr(c, "table:number-columns-repeated").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).clamp(1, 64);
-                let text = kids(c, "text:p").map(|p| p.text()).collect::<Vec<_>>().join("\n");
-                let num = if attr(c, "office:value-type") == Some("float") || attr(c, "office:value-type") == Some("percentage") {
+                let mut text = kids(c, "text:p").map(|p| p.text()).collect::<Vec<_>>().join("\n");
+                text.truncate(text.char_indices().nth(MAX_CELL_TEXT).map_or(text.len(), |(i, _)| i));
+                let num = if matches!(attr(c, "office:value-type"), Some("float" | "percentage")) {
                     attr(c, "office:value").and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite())
                 } else {
                     None
                 };
-                for _ in 0..crep {
-                    if cells.len() < MAX_CELLS {
-                        cells.push((text.clone(), num));
-                    }
-                }
+                let n = repeat(c, "table:number-columns-repeated").min(budget.saturating_sub(cells.len()));
+                cells.extend(std::iter::repeat_n((text, num), n));
             }
-            for _ in 0..rep {
-                if g.rows.len() < MAX_CELLS {
-                    g.rows.push(cells.clone());
-                }
+            let n = repeat(r, "table:number-rows-repeated").min(budget / cells.len().max(1));
+            for _ in 0..n {
+                budget -= cells.len();
+                g.rows.push(cells.clone());
+            }
+            g.width = g.width.max(cells.len());
+            if budget == 0 {
+                break;
             }
         }
         g
     }
 
-    fn get(&self, r: usize, c: usize) -> Option<&(String, Option<f64>)> {
+    fn get(&self, r: usize, c: usize) -> Option<&Value> {
         self.rows.get(r).and_then(|row| row.get(c))
     }
 
-    /// Cells of a range (`local-table.$B$2:.$B$5`, several ranges separated by spaces), in order.
-    fn range(&self, addr: &str) -> Vec<(String, Option<f64>)> {
+    /// Cells of a range (`local-table.$B$2:.$B$5`, several ranges separated by spaces), in order,
+    /// within the table and at most [`MAX_CELLS`].
+    fn range(&self, addr: &str) -> Vec<Value> {
         let mut out = vec![];
+        let (last_row, last_col) = (self.rows.len().saturating_sub(1), self.width.saturating_sub(1));
         for part in addr.split_whitespace().take(64) {
             let (a, b) = part.split_once(':').unwrap_or((part, part));
             let (Some((c0, r0)), Some((c1, r1))) = (cell_ref(a), cell_ref(b)) else { continue };
-            for r in r0.min(r1)..=r0.max(r1).min(r0.min(r1) + MAX_CELLS) {
-                for c in c0.min(c1)..=c0.max(c1).min(c0.min(c1) + MAX_CELLS) {
+            if self.rows.is_empty() || r0.min(r1) > last_row || c0.min(c1) > last_col {
+                continue;
+            }
+            for r in r0.min(r1)..=r0.max(r1).min(last_row) {
+                for c in c0.min(c1)..=c0.max(c1).min(last_col) {
+                    if out.len() >= MAX_CELLS {
+                        return out;
+                    }
                     out.push(self.get(r, c).cloned().unwrap_or_default());
                 }
             }
@@ -245,18 +266,16 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
             series.data_labels = Some(true);
             c.data_labels = true;
         }
-        // Per-point overrides (pie slices).
+        // Per-point overrides (pie slices), for the points the series has.
         let mut idx = 0usize;
-        for p in kids(s, "chart:data-point").take(MAX_CELLS) {
-            let rep = attr(p, "chart:repeated").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).clamp(1, MAX_CELLS);
-            if let Some(f) =
-                attr(p, "chart:style-name").map(|n| store.resolve(Scope::Content, "chart", Some(n))).and_then(|st| simple_fill(&st.graphic))
-            {
-                for k in 0..rep {
-                    if series.fill.as_ref() != Some(&f) {
-                        series.point_fills.push((idx + k, f.clone()));
-                    }
-                }
+        for p in kids(s, "chart:data-point") {
+            if idx >= series.values.len() {
+                break;
+            }
+            let rep = repeat(p, "chart:repeated").min(series.values.len() - idx);
+            let fill = attr(p, "chart:style-name").map(|n| store.resolve(Scope::Content, "chart", Some(n))).and_then(|st| simple_fill(&st.graphic));
+            if let Some(f) = fill.filter(|f| series.fill.as_ref() != Some(f)) {
+                series.point_fills.extend((idx..idx + rep).map(|k| (k, f.clone())));
             }
             idx += rep;
         }

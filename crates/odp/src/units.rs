@@ -82,6 +82,25 @@ pub fn hex(c: Rgba) -> String {
     format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)
 }
 
+/// A SMIL clock value (`1.5s`, `500ms`, `00:00:01.5`) in ms.
+pub fn clock(s: &str) -> Option<u32> {
+    let s = s.trim();
+    let v = if let Some(ms) = s.strip_suffix("ms") {
+        ms.trim().parse::<f64>().ok()?
+    } else if let Some(sec) = s.strip_suffix('s') {
+        sec.trim().parse::<f64>().ok()? * 1000.0
+    } else if s.contains(':') {
+        let mut v = 0.0;
+        for part in s.split(':').take(3) {
+            v = v * 60.0 + part.trim().parse::<f64>().ok()?;
+        }
+        v * 1000.0
+    } else {
+        s.parse::<f64>().ok()? * 1000.0
+    };
+    (v.is_finite() && v >= 0.0).then(|| v.min(f64::from(u32::MAX)).round() as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

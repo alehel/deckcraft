@@ -3,10 +3,10 @@
 use std::fmt::Write as _;
 
 use deckcraft_color::{Rgba, SchemeSlot};
+use deckcraft_model::Xfrm;
 use deckcraft_model::chart::{Chart, ChartType};
 use deckcraft_model::resolve::Ctx;
 use deckcraft_model::style::Fill;
-use deckcraft_model::{Shape, Xfrm};
 
 use super::{Auto, Writer};
 use crate::dom::esc;
@@ -44,8 +44,7 @@ fn fill_color(ctx: &Ctx, f: Option<&Fill>, i: usize) -> Rgba {
 }
 
 /// A `draw:frame` holding the chart, and the chart document in the package.
-pub fn frame(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, x: &Xfrm, c: &Chart, common: &str) -> String {
-    let _ = s;
+pub fn frame(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, x: &Xfrm, c: &Chart, common: &str) -> String {
     w.objects += 1;
     let dir = format!("Object {}", w.objects);
     let content = chart_document(ctx, c, x);
@@ -157,14 +156,23 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
             cols.push((s.name.clone(), vals));
         }
         let vcol = cols.len();
+        // Points with their own colour: overridden ones, and every slice of a varied pie. The
+        // rest are unstyled runs (`chart:repeated`) that keep the series colour.
+        let varied = c.vary_colors && matches!(c.kind, ChartType::Pie | ChartType::Doughnut);
         let mut points = String::new();
-        if !s.point_fills.is_empty() || (c.vary_colors && matches!(c.kind, ChartType::Pie | ChartType::Doughnut)) {
-            for p in 0..s.values.len().min(MAX) {
-                let f = s.point_fills.iter().find(|(k, _)| *k == p).map(|(_, f)| f);
-                let pc = if f.is_some() { fill_color(ctx, f, p) } else { fill_color(ctx, None, p) };
-                let ps = style(format!(r#"<style:graphic-properties draw:fill-color="{}"/>"#, hex(pc)));
-                let _ = write!(points, r#"<chart:data-point chart:style-name="{ps}"/>"#);
+        let mut plain = 0usize;
+        for p in 0..s.values.len().min(MAX) {
+            let own = s.point_fills.iter().find(|(k, _)| *k == p).map(|(_, f)| f);
+            if own.is_none() && !varied {
+                plain += 1;
+                continue;
             }
+            if plain > 0 {
+                let _ = write!(points, r#"<chart:data-point chart:repeated="{plain}"/>"#);
+                plain = 0;
+            }
+            let ps = style(format!(r#"<style:graphic-properties draw:fill-color="{}"/>"#, hex(fill_color(ctx, own, p))));
+            let _ = write!(points, r#"<chart:data-point chart:style-name="{ps}"/>"#);
         }
         let axis = if s.secondary_axis { r#" chart:attached-axis="secondary-y""# } else { "" };
         let sclass = match s.kind {
@@ -235,9 +243,6 @@ fn y_props(c: &Chart) -> String {
     }
     if c.y_log_base.is_some() {
         yprops.push_str(r#" chart:logarithmic="true""#);
-    }
-    if c.y_hidden {
-        yprops.push_str(r#" chart:display-label="false""#);
     }
     yprops
 }

@@ -28,6 +28,16 @@ use crate::units;
 pub const MAX_DEPTH: usize = 128;
 /// Most shapes read from one file.
 const MAX_SHAPES: usize = 250_000;
+/// Most rows, and most columns, read from one table.
+const MAX_TABLE_SIDE: usize = 1000;
+/// Most cells read into one table.
+const MAX_TABLE_CELLS: usize = 65_536;
+
+/// A `*-repeated` count (at least 1).
+fn repeat(e: &El, k: &str) -> usize {
+    attr(e, k).and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).max(1)
+}
+
 /// Most pages read.
 const MAX_PAGES: usize = 10_000;
 
@@ -400,7 +410,7 @@ impl Reader<'_> {
         if pp.get("presentation:visibility").map(String::as_str) == Some("hidden") {
             slide.hidden = true;
         }
-        slide.transition = transition(pp, page);
+        slide.transition = transition(pp);
         self.targets.clear();
         self.glue.clear();
         let mut shapes = vec![];
@@ -437,7 +447,7 @@ impl Reader<'_> {
                 let (sid, _) = self.targets.get(id)?;
                 // LibreOffice numbers a shape's glue points top, right, bottom, left; ours run top,
                 // left, bottom, right.
-                Some((*sid, [0, 3, 2, 1].get(*pt as usize).copied().unwrap_or(0)))
+                Some((*sid, crate::GLUE_POINTS.get(*pt as usize).copied().unwrap_or(0)))
             };
             let (a, b) = (resolve(&start), resolve(&end));
             if let Some(c) = deckcraft_model::find_shape_mut(&mut shapes, cid)
@@ -500,10 +510,12 @@ impl Reader<'_> {
             let Some(src) = master.shapes.iter().find(|s| s.ph_type() == Some(kind)) else { return };
             let mut s = src.clone();
             s.id = this.id();
+            // The declared text replaces the field, in the placeholder's first paragraph.
             if let (Some(t), Some(body)) = (text, s.text.as_mut()) {
-                for p in &mut body.paragraphs {
+                body.paragraphs.truncate(1);
+                if let Some(p) = body.paragraphs.first_mut() {
                     let props = p.runs.first().map(|r| r.props.clone()).unwrap_or_else(|| p.end_props.clone());
-                    p.runs = vec![deckcraft_model::text::Run::with(t.clone(), props)];
+                    p.runs = vec![deckcraft_model::text::Run::with(t, props)];
                 }
             }
             shapes.push(s);
@@ -547,22 +559,46 @@ impl Reader<'_> {
                 }
             }
         };
+        // Every holder of a link: shapes (and their groups and tables), notes, masters, layouts.
         for s in &mut self.p.slides {
             let s = Arc::make_mut(s);
             for sh in &mut s.shapes {
                 fix_shape(sh, &fix, 0);
             }
+            fix_body(&mut s.notes, &fix);
         }
-        fn fix_shape(s: &mut Shape, fix: &dyn Fn(&mut Option<deckcraft_model::text::Hyperlink>), depth: usize) {
+        for m in &mut self.p.masters {
+            let m = Arc::make_mut(m);
+            for sh in &mut m.shapes {
+                fix_shape(sh, &fix, 0);
+            }
+            for l in &mut m.layouts {
+                for sh in &mut l.shapes {
+                    fix_shape(sh, &fix, 0);
+                }
+            }
+        }
+        type Fix<'a> = &'a dyn Fn(&mut Option<deckcraft_model::text::Hyperlink>);
+        fn fix_body(t: &mut TextBody, fix: Fix) {
+            for p in &mut t.paragraphs {
+                for r in &mut p.runs {
+                    fix(&mut r.props.link);
+                    fix(&mut r.props.hover);
+                }
+            }
+        }
+        fn fix_shape(s: &mut Shape, fix: Fix, depth: usize) {
             if depth > MAX_DEPTH {
                 return;
             }
             fix(&mut s.click);
+            fix(&mut s.hover);
             if let Some(t) = s.text.as_mut() {
-                for p in &mut t.paragraphs {
-                    for r in &mut p.runs {
-                        fix(&mut r.props.link);
-                    }
+                fix_body(t, fix);
+            }
+            if let ShapeKind::Table(t) = &mut s.kind {
+                for c in t.rows.iter_mut().flat_map(|r| r.cells.iter_mut()) {
+                    fix_body(&mut c.text, fix);
                 }
             }
             if let Some(ch) = s.children_mut() {
@@ -988,9 +1024,6 @@ impl Reader<'_> {
 
     fn table(&mut self, t: &El, ctx: &Ctx, x: Xfrm) -> Table {
         let mut table = Table { first_row: false, band_row: false, style: String::new(), ..Default::default() };
-        if let Some(tpl) = attr(t, "table:template-name") {
-            let _ = tpl;
-        }
         let flag = |k: &str| attr(t, k) == Some("true");
         table.first_row = flag("table:use-first-row-styles");
         table.last_row = flag("table:use-last-row-styles");
@@ -1001,16 +1034,13 @@ impl Reader<'_> {
         for c in t.elements().filter(|c| c.name == "table:table-column" || c.name == "table:table-columns").take(1000) {
             let cols: Vec<&El> = if c.name == "table:table-columns" { kids(c, "table:table-column").collect() } else { vec![c] };
             for c in cols {
-                let rep = attr(c, "table:number-columns-repeated").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).clamp(1, 1000);
+                let rep = repeat(c, "table:number-columns-repeated").min(MAX_TABLE_SIDE);
                 let w = attr(c, "table:style-name")
                     .map(|n| self.store.resolve(ctx.scope, "table-column", Some(n)))
                     .and_then(|s| s.column.get("style:column-width").and_then(|v| units::length(v)))
                     .filter(|w| *w > 0.0);
-                for _ in 0..rep {
-                    if table.cols.len() < 1000 {
-                        table.cols.push(w.unwrap_or(0.0));
-                    }
-                }
+                let n = rep.min(MAX_TABLE_SIDE - table.cols.len());
+                table.cols.extend(std::iter::repeat_n(w.unwrap_or(0.0), n));
             }
         }
         let rows: Vec<&El> = t
@@ -1024,9 +1054,12 @@ impl Reader<'_> {
                     vec![]
                 }
             })
-            .take(1000)
+            .take(MAX_TABLE_SIDE)
             .collect();
         for row in rows {
+            if table.rows.len() >= MAX_TABLE_SIDE {
+                break;
+            }
             let rs = attr(row, "table:style-name").map(|n| self.store.resolve(ctx.scope, "table-row", Some(n)));
             let h = rs
                 .as_ref()
@@ -1036,17 +1069,23 @@ impl Reader<'_> {
             let optimal = rs.as_ref().is_some_and(|s| s.row.get("style:use-optimal-row-height").map(String::as_str) == Some("true"));
             let h = if optimal && h <= 0.0 { 12.0 } else { h };
             let default_cell = attr(row, "table:default-cell-style-name");
-            let mut cells = vec![];
+            let mut cells: Vec<Cell> = vec![];
             for c in row.elements().filter(|c| c.name == "table:table-cell" || c.name == "table:covered-table-cell") {
-                let rep = attr(c, "table:number-columns-repeated").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).clamp(1, 1000);
-                for _ in 0..rep {
-                    if cells.len() >= 1000 {
-                        break;
-                    }
-                    cells.push(self.cell(c, ctx, default_cell));
+                let n = repeat(c, "table:number-columns-repeated").min(MAX_TABLE_SIDE - cells.len());
+                if n == 0 {
+                    break;
                 }
+                // A repeated cell is read once.
+                let cell = self.cell(c, ctx, default_cell);
+                cells.extend(std::iter::repeat_n(cell, n));
             }
-            table.rows.push(Row { height: h, cells });
+            let read: usize = table.rows.iter().map(|r| r.cells.len()).sum();
+            let room = MAX_TABLE_CELLS.saturating_sub(read) / cells.len().max(1);
+            let n = repeat(row, "table:number-rows-repeated").min(MAX_TABLE_SIDE - table.rows.len()).min(room);
+            if n == 0 {
+                break;
+            }
+            table.rows.extend(std::iter::repeat_n(Row { height: h, cells }, n));
         }
         let ncols = table.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0).max(table.cols.len()).max(1);
         // Columns without a width share what's left of the frame.
@@ -1077,24 +1116,37 @@ impl Reader<'_> {
                 r.cells.push(Cell::new(""));
             }
         }
-        // Spans: the anchor cell spans, covered cells are merged into it.
-        let spans: Vec<(usize, usize, u32, u32)> = table
-            .rows
-            .iter()
-            .enumerate()
-            .flat_map(|(ri, r)| {
-                r.cells.iter().enumerate().filter(|(_, c)| c.grid_span > 1 || c.row_span > 1).map(move |(ci, c)| (ri, ci, c.grid_span, c.row_span))
-            })
-            .collect();
-        for (ri, ci, gs, rs) in spans {
-            for dr in 0..rs as usize {
-                for dc in 0..gs as usize {
-                    if (dr, dc) == (0, 0) {
-                        continue;
-                    }
-                    if let Some(c) = table.cell_mut(ri + dr, ci + dc) {
-                        c.h_merge = dc > 0;
-                        c.v_merge = dr > 0;
+        // Spans: the anchor cell spans (no further than the table), covered cells are merged into it.
+        let nrows = table.rows.len();
+        for (ri, r) in table.rows.iter_mut().enumerate() {
+            for (ci, c) in r.cells.iter_mut().enumerate() {
+                c.grid_span = c.grid_span.min((ncols - ci) as u32).max(1);
+                c.row_span = c.row_span.min((nrows - ri) as u32).max(1);
+            }
+        }
+        // In reading order, so a cell an earlier span covers spans nothing itself. Overlapping
+        // spans share a budget of visits.
+        let mut budget = 4 * MAX_TABLE_CELLS;
+        for ri in 0..nrows {
+            for ci in 0..ncols {
+                let Some(c) = table.cell_mut(ri, ci) else { continue };
+                if c.h_merge || c.v_merge {
+                    (c.grid_span, c.row_span) = (1, 1);
+                    continue;
+                }
+                let (gs, rs) = (c.grid_span as usize, c.row_span as usize);
+                if gs * rs > budget {
+                    (c.grid_span, c.row_span) = (1, 1);
+                    continue;
+                }
+                budget -= gs * rs;
+                for dr in 0..rs {
+                    for dc in 0..gs {
+                        if let Some(c) = table.cell_mut(ri + dr, ci + dc).filter(|_| (dr, dc) != (0, 0))
+                            && !(c.h_merge || c.v_merge)
+                        {
+                            (c.h_merge, c.v_merge) = (dc > 0, dr > 0);
+                        }
                     }
                 }
             }
@@ -1128,11 +1180,15 @@ impl Reader<'_> {
             }
         }
         let mut g = st.graphic.clone();
-        if let Some(bg) = st.cell.get("fo:background-color")
-            && bg != "transparent"
-        {
-            g.insert("draw:fill".into(), "solid".into());
-            g.insert("draw:fill-color".into(), bg.clone());
+        match st.cell.get("fo:background-color").map(String::as_str) {
+            Some("transparent") => {
+                g.insert("draw:fill".into(), "none".into());
+            }
+            Some(bg) => {
+                g.insert("draw:fill".into(), "solid".into());
+                g.insert("draw:fill-color".into(), bg.to_string());
+            }
+            None => {}
         }
         // Unset, a cell is filled (the pool default), as the slide shows it.
         cell.fill = Some(self.fill(&g, ctx.scope));
@@ -1803,86 +1859,37 @@ fn picture_adjust(g: &Props) -> PictureAdjust {
     }
 }
 
-fn transition(pp: &Props, page: &El) -> Option<deckcraft_model::Transition> {
-    let _ = page;
-    let smil = pp.get("smil:type").map(String::as_str);
-    let legacy = pp.get("presentation:transition-style").map(String::as_str);
-    if smil.is_none() && legacy.is_none() && !pp.contains_key("presentation:duration") {
-        return None;
-    }
-    let sub = pp.get("smil:subtype").map(String::as_str).unwrap_or("");
-    let dir = pp.get("smil:direction").map(String::as_str).unwrap_or("forward");
-    let (kind, option) = match (smil, legacy) {
-        (Some("fade"), _) => ("fade", ""),
-        (Some("slideWipe"), _) => ("cover", side(sub, dir)),
-        (Some("pushWipe"), _) => ("push", side(sub, dir)),
-        (Some("barWipe"), _) => ("wipe", side(sub, dir)),
-        (Some("barnDoorWipe"), _) => ("split", if sub == "horizontal" { "horz" } else { "vert" }),
-        (Some("irisWipe" | "ellipseWipe"), _) => ("circle", ""),
-        (Some("clockWipe"), _) => ("wheel", ""),
-        (Some("blindsWipe"), _) => ("blinds", if sub == "horizontal" { "horz" } else { "vert" }),
-        (Some("checkerBoardWipe"), _) => ("checker", ""),
-        (Some("randomBarWipe"), _) => ("randomBar", if sub == "horizontal" { "horz" } else { "vert" }),
-        (Some("dissolve"), _) => ("dissolve", ""),
-        (Some("zoom"), _) => ("zoom", ""),
-        (Some(_), _) => ("fade", ""),
+/// The transition a page style describes: SMIL attributes, or the ODF 1.0 `transition-style`.
+fn transition(pp: &Props) -> Option<deckcraft_model::Transition> {
+    let get = |k: &str| pp.get(k).map(String::as_str);
+    let (kind, option) = match (get("smil:type"), get("presentation:transition-style")) {
+        (Some(ty), _) => crate::anim::transition_of(ty, get("smil:subtype").unwrap_or(""), get("smil:direction") == Some("reverse")),
         (None, Some(s)) if s.contains("fade") => ("fade", ""),
         (None, Some(s)) if s.starts_with("move") => ("cover", ""),
-        (None, Some("none")) | (None, None) => ("none", ""),
-        (None, Some(_)) => ("fade", ""),
+        (None, Some(s)) if s != "none" => ("fade", ""),
+        _ if pp.contains_key("presentation:duration") => ("none", ""),
+        _ => return None,
     };
-    let duration = pp
-        .get("smil:dur")
-        .and_then(|d| clock(d))
-        .or_else(|| match pp.get("presentation:transition-speed").map(String::as_str) {
-            Some("slow") => Some(1000),
-            Some("fast") => Some(300),
-            Some(_) => Some(500),
-            None => None,
+    let duration = get("smil:dur")
+        .and_then(units::clock)
+        .or_else(|| match get("presentation:transition-speed")? {
+            "slow" => Some(1000),
+            "fast" => Some(300),
+            _ => Some(500),
         })
         .unwrap_or(700);
-    let auto = pp.get("presentation:transition-type").map(String::as_str) == Some("automatic");
-    let after = if auto { pp.get("presentation:duration").and_then(|d| duration_iso(d)) } else { None };
+    let auto = get("presentation:transition-type") == Some("automatic");
+    let after = if auto { get("presentation:duration").and_then(duration_iso) } else { None };
     if kind == "none" && after.is_none() {
         return None;
     }
     Some(deckcraft_model::Transition {
         kind: kind.into(),
         option: option.into(),
-        duration_ms: duration,
-        advance_on_click: true,
+        duration_ms: duration.min(60_000),
         advance_after_ms: after,
-        sound: None,
-        sound_loop: false,
-        stop_sound: false,
-        raw: None,
+        ..Default::default()
     })
-}
-
-fn side(sub: &str, dir: &str) -> &'static str {
-    let reverse = dir == "reverse";
-    match (sub, reverse) {
-        ("fromLeft" | "leftToRight", false) | ("fromRight" | "rightToLeft", true) => "r",
-        ("fromRight" | "rightToLeft", false) | ("fromLeft" | "leftToRight", true) => "l",
-        ("fromTop" | "topToBottom", false) | ("fromBottom", true) => "d",
-        _ => "u",
-    }
-}
-
-/// A SMIL clock value (`1.5s`, `500ms`, `00:00:01.5`) in ms.
-fn clock(s: &str) -> Option<u32> {
-    let s = s.trim();
-    let v = if let Some(ms) = s.strip_suffix("ms") {
-        ms.trim().parse::<f64>().ok()?
-    } else if let Some(sec) = s.strip_suffix('s') {
-        sec.trim().parse::<f64>().ok()? * 1000.0
-    } else if s.contains(':') {
-        let parts: Vec<f64> = s.split(':').filter_map(|p| p.parse().ok()).collect();
-        parts.iter().fold(0.0, |a, p| a * 60.0 + p) * 1000.0
-    } else {
-        s.parse::<f64>().ok()? * 1000.0
-    };
-    (v.is_finite() && v >= 0.0).then(|| v.min(f64::from(u32::MAX)) as u32)
 }
 
 /// An ISO 8601 duration (`PT00H00M05S`, `PT5.5S`) in ms.
@@ -1990,9 +1997,9 @@ mod tests {
 
     #[test]
     fn clocks_and_durations() {
-        assert_eq!(clock("1.5s"), Some(1500));
-        assert_eq!(clock("250ms"), Some(250));
-        assert_eq!(clock("00:00:02"), Some(2000));
+        assert_eq!(units::clock("1.5s"), Some(1500));
+        assert_eq!(units::clock("250ms"), Some(250));
+        assert_eq!(units::clock("00:00:02"), Some(2000));
         assert_eq!(duration_iso("PT00H00M05S"), Some(5000));
         assert_eq!(duration_iso("PT1.5S"), Some(1500));
         assert_eq!(duration_iso("bogus"), None);

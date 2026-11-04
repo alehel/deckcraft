@@ -181,13 +181,8 @@ fn paragraph(cx: &TextCtx, p: &El, list: &ListCtx) -> Paragraph {
     let mut para = Paragraph { level: list.depth.min(8) as u8, props, runs: vec![], def_props: RunProps::default(), end_props: base_run.clone() };
     let mut st = RunState { space_pending: false, at_start: true };
     inline(cx, p, &style.text, None, &mut para.runs, &mut st, 0);
-    // Trailing collapsed white space is dropped.
-    if let Some(last) = para.runs.last_mut()
-        && last.kind == RunKind::Text
-    {
-        let t = last.text.trim_end_matches(' ').len();
-        last.text.truncate(t);
-    }
+    // Collapsed white space at the end was never written (a pending space waits for text that
+    // didn't come); spaces left are `text:s`, which are meant.
     para.runs.retain(|r| r.kind != RunKind::Text || !r.text.is_empty());
     para
 }

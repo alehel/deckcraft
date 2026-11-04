@@ -22,6 +22,10 @@ mod write;
 
 use deckcraft_model::Presentation;
 
+/// A shape's connection sites for LibreOffice's glue points 0–3 (top, right, bottom, left): ours
+/// run top, left, bottom, right.
+pub(crate) const GLUE_POINTS: [u32; 4] = [0, 3, 2, 1];
+
 /// Main-document media types this crate reads and writes.
 pub const MIME_PRESENTATION: &str = "application/vnd.oasis.opendocument.presentation";
 pub const MIME_TEMPLATE: &str = "application/vnd.oasis.opendocument.presentation-template";

@@ -8,19 +8,35 @@ use deckcraft_model::resolve::{self, Ctx};
 use deckcraft_model::style::{Dash, Effects, Fill, GradientShape, Line, LineCap, LineJoin, PictureFill, PictureMode};
 use deckcraft_model::table::Table;
 use deckcraft_model::text::{Action, Anchor, AutoFit, BodyProps, ListStyle, TextDir};
-use deckcraft_model::{Geom, Layout, PhType, Shape, ShapeKind, Transition, Xfrm};
+use deckcraft_model::{Geom, Layout, PhType, Shape, ShapeKind, Xfrm};
 use kurbo::{Affine, BezPath, PathEl, Point};
 
 use super::text;
-use super::{Auto, Writer, rad};
+use super::{Auto, PageCtx, Writer, rad};
 use crate::dom::esc;
 use crate::units::{cm, hex, pct, trim};
 
 const MAX_DEPTH: usize = 64;
 
+/// Does `s` write an element (and so can carry an id)? Shapes with nothing to show, and on a
+/// slide the footer placeholders (the master page draws those), write none.
+pub fn writes_element(w: &Writer, s: &Shape, on_slide: bool) -> bool {
+    if on_slide && s.ph_type().is_some_and(PhType::is_footer_kind) {
+        return false;
+    }
+    let has = |m: &deckcraft_model::MediaId| w.p.media(*m).is_some();
+    match &s.kind {
+        ShapeKind::Picture { fill } => has(&fill.media),
+        ShapeKind::Media(m) => has(&m.media),
+        ShapeKind::Opaque { preview, .. } => preview.as_ref().is_some_and(has),
+        ShapeKind::Model3d { poster, .. } => poster.as_ref().is_some_and(has),
+        _ => true,
+    }
+}
+
 /// One shape (and its children).
-pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, depth: usize) -> String {
-    if depth > MAX_DEPTH {
+pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape, depth: usize) -> String {
+    if depth > MAX_DEPTH || !writes_element(w, s, !pg.is_master) {
         return String::new();
     }
     let x = resolve::xfrm(ctx, s);
@@ -31,8 +47,8 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, depth: usize
     if s.hidden {
         common.push_str(r#" draw:display="none""#);
     }
-    if w.anim_targets.contains(&(s.id.0, None)) {
-        let _ = write!(common, r#" xml:id="s{0}" draw:id="s{0}""#, s.id.0);
+    if let Some(id) = pg.id(s.id, None) {
+        let _ = write!(common, r#" xml:id="{id}" draw:id="{id}""#);
     }
     let desc = {
         let mut d = String::new();
@@ -47,17 +63,20 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, depth: usize
     let events = s.click.as_ref().map(|h| event_listener(w, &h.action)).unwrap_or_default();
     match &s.kind {
         ShapeKind::Group { children, child } => {
-            // Children are placed in the group's child space: write them at their page positions.
-            let m = group_map(&x, child);
+            // An ODF group has no space of its own: children are written at their page positions,
+            // through the group's whole transform (rotation and flips included).
+            let m = deckcraft_geom::group_child_affine(&x, child.rect());
             let mut inner = String::new();
             for c in children {
-                let mut c2 = c.clone();
-                if let Some(cx) = c.xfrm {
-                    c2.xfrm = Some(map_xfrm(m, cx));
+                match c.xfrm {
+                    Some(cx) => {
+                        let placed = Shape { xfrm: Some(place_in(m, cx)), ..c.clone() };
+                        inner.push_str(&shape(w, auto, ctx, pg, &placed, depth + 1));
+                    }
+                    None => inner.push_str(&shape(w, auto, ctx, pg, c, depth + 1)),
                 }
-                inner.push_str(&shape(w, auto, ctx, &c2, depth + 1));
             }
-            format!("<draw:g{common}>{inner}{desc}</draw:g>")
+            format!("<draw:g{common}>{inner}{desc}{events}</draw:g>")
         }
         ShapeKind::Picture { fill } => {
             let Some(href) = w.media_path(fill.media) else { return String::new() };
@@ -86,7 +105,7 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, depth: usize
         ShapeKind::Table(t) => {
             let st = auto.style("graphic", "gr", Some("standard"), r#"<style:graphic-properties draw:fill="none" draw:stroke="none"/>"#);
             let pos = position(&x);
-            let table = table(w, auto, ctx, t);
+            let table = table(w, auto, ctx, pg, t);
             format!(r#"<draw:frame draw:style-name="{st}"{common}{pos}>{table}{desc}</draw:frame>"#)
         }
         ShapeKind::Media(m) => {
@@ -113,11 +132,12 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, depth: usize
                 line: Some(Line::none()),
                 ..s.clone()
             };
-            shape(w, auto, ctx, &pic, depth + 1)
+            shape(w, auto, ctx, pg, &pic, depth + 1)
         }
         ShapeKind::Opaque { .. } | ShapeKind::Model3d { .. } => String::new(),
-        ShapeKind::Chart(c) => super::chart::frame(w, auto, ctx, s, &x, c, &common),
+        ShapeKind::Chart(c) => super::chart::frame(w, auto, ctx, &x, c, &common),
         ShapeKind::Ink { strokes } => {
+            // The strokes in a group that carries the ink's name, id, visibility and actions.
             let mut out = String::new();
             for st in strokes.iter().take(10_000) {
                 if st.points.len() < 2 {
@@ -142,15 +162,15 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, depth: usize
                 let style = auto.style("graphic", "gr", Some("standard"), &format!("<style:graphic-properties{g}/>"));
                 out.push_str(&path_element(&bp, &style, ""));
             }
-            out
+            format!("<draw:g{common}>{out}{desc}{events}</draw:g>")
         }
-        ShapeKind::Connector { .. } | ShapeKind::Shape => geometric(w, auto, ctx, s, &x, &common, &desc, &events),
+        ShapeKind::Connector { .. } | ShapeKind::Shape => geometric(w, auto, ctx, pg, s, &x, &common, &desc, &events),
     }
 }
 
 /// An autoshape, text box, line or connector.
 #[allow(clippy::too_many_arguments)]
-fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, x: &Xfrm, common: &str, desc: &str, events: &str) -> String {
+fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape, x: &Xfrm, common: &str, desc: &str, events: &str) -> String {
     let (fill, ph_fill) = resolve::fill(ctx, s);
     let (line, ph_line) = resolve::line(ctx, s);
     let (effects, ph_fx) = resolve::effects(ctx, s);
@@ -168,12 +188,14 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, x: &Xfrm, co
     let ph = s.ph.as_ref().map(|p| p.kind);
     let class = ph.and_then(class_of);
     let outline = matches!(ph, Some(PhType::Body | PhType::Obj));
-    let text = text::body(w, auto, ctx, s, outline && class.is_some());
-    let line_like = s.is_line();
+    let text = text::body(w, auto, ctx, pg, s, outline && class.is_some());
+    // Straight lines and connectors are written by their end points; bent and curved ones keep
+    // their outline as a custom shape.
+    let straight = matches!(s.geom.preset_name(), Some("line" | "straightConnector1"));
     // Placeholders keep their class so LibreOffice treats them as title/outline objects.
     let (style_attr, class_attr) = match class {
         Some(c) => {
-            let parent = format!("{}-{}", w.page, parent_style_of(c));
+            let parent = format!("{}-{}", pg.master, parent_style_of(c));
             let st = auto.style("presentation", "pr", Some(&parent), &format!("<style:graphic-properties{g}>{columns}</style:graphic-properties>"));
             (format!(r#" presentation:style-name="{st}""#), format!(r#" presentation:class="{c}""#))
         }
@@ -182,7 +204,7 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, x: &Xfrm, co
             (format!(r#" draw:style-name="{st}""#), String::new())
         }
     };
-    if line_like && matches!(s.geom, Geom::Preset { .. }) {
+    if straight {
         // Lines and straight connectors: their end points.
         let (mut x1, mut y1, mut x2, mut y2) = (x.x, x.y, x.x + x.w, x.y + x.h);
         if x.flip_h {
@@ -204,9 +226,11 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, s: &Shape, x: &Xfrm, co
                 // LibreOffice's glue points top, right, bottom, left).
                 let mut g = String::from(r#" draw:type="line""#);
                 for (k, e) in [("start", start), ("end", end)] {
-                    if let Some((id, site)) = e {
-                        let pt = [0, 3, 2, 1].get(*site as usize).copied().unwrap_or(0);
-                        let _ = write!(g, r#" draw:{k}-shape="s{}" draw:{k}-glue-point="{pt}""#, id.0);
+                    if let Some((id, site)) = e
+                        && let Some(target) = pg.id(*id, None)
+                    {
+                        let pt = crate::GLUE_POINTS.iter().position(|s| s == site).unwrap_or(0);
+                        let _ = write!(g, r#" draw:{k}-shape="{target}" draw:{k}-glue-point="{pt}""#);
                     }
                 }
                 ("draw:connector", g)
@@ -267,17 +291,12 @@ fn position(x: &Xfrm) -> String {
     format!(r#" svg:width="{}" svg:height="{}" draw:transform="rotate ({}) translate ({} {})""#, cm(w), cm(h), rad(-x.rot), cm(t.x), cm(t.y))
 }
 
-/// The map from a group's child space to the page.
-fn group_map(x: &Xfrm, child: &Xfrm) -> Affine {
-    let sx = if child.w.abs() > 1e-9 { x.w / child.w } else { 1.0 };
-    let sy = if child.h.abs() > 1e-9 { x.h / child.h } else { 1.0 };
-    Affine::translate((x.x, x.y)) * Affine::scale_non_uniform(sx, sy) * Affine::translate((-child.x, -child.y))
-}
-
-fn map_xfrm(m: Affine, x: Xfrm) -> Xfrm {
-    let a = m * Point::new(x.x, x.y);
-    let b = m * Point::new(x.x + x.w, x.y + x.h);
-    Xfrm { x: a.x.min(b.x), y: a.y.min(b.y), w: (b.x - a.x).abs(), h: (b.y - a.y).abs(), ..x }
+/// A child's box in its group's space, placed on the page by the group's transform `m`: its
+/// rotation adds the group's, and a mirroring group flips it.
+fn place_in(m: Affine, child: Xfrm) -> Xfrm {
+    let unflipped = Xfrm { flip_h: false, flip_v: false, ..child };
+    let (x, y, w, h, rot, mirrored) = crate::geometry::placed_box(m * unflipped.affine(), child.w, child.h);
+    Xfrm { x, y, w, h, rot, flip_h: child.flip_h, flip_v: child.flip_v ^ mirrored }
 }
 
 /// `draw:enhanced-geometry` drawing the shape's outline in a view box of its size (1/100 mm).
@@ -727,47 +746,10 @@ fn event_listener(w: &Writer, a: &Action) -> String {
     )
 }
 
-pub fn transition_attrs(t: &Transition) -> String {
-    let (ty, sub) = match t.kind.as_str() {
-        "fade" => ("fade", "crossfade"),
-        "push" => ("pushWipe", dir_sub(&t.option)),
-        "cover" | "pull" | "uncover" => ("slideWipe", dir_sub(&t.option)),
-        "wipe" => ("barWipe", dir_sub(&t.option)),
-        "split" => ("barnDoorWipe", if t.option.starts_with("horz") { "horizontal" } else { "vertical" }),
-        "circle" | "shape" => ("ellipseWipe", "circle"),
-        "wheel" | "clock" => ("clockWipe", "clockwiseTwelve"),
-        "blinds" => ("blindsWipe", if t.option == "horz" { "horizontal" } else { "vertical" }),
-        "checker" => ("checkerBoardWipe", "across"),
-        "randomBar" => ("randomBarWipe", if t.option == "horz" { "horizontal" } else { "vertical" }),
-        "dissolve" => ("dissolve", "default"),
-        "zoom" => ("zoom", "rotateIn"),
-        "none" | "cut" => ("", ""),
-        _ => ("fade", "crossfade"),
-    };
-    let mut s = String::new();
-    if !ty.is_empty() {
-        let _ = write!(s, r#" smil:type="{ty}" smil:subtype="{sub}" smil:dur="{}s""#, trim(f64::from(t.duration_ms) / 1000.0, 3));
-    }
-    if let Some(ms) = t.advance_after_ms {
-        let secs = f64::from(ms) / 1000.0;
-        let _ = write!(s, r#" presentation:transition-type="automatic" presentation:duration="PT{}S""#, trim(secs, 3));
-    }
-    s
-}
-
-fn dir_sub(o: &str) -> &'static str {
-    match o {
-        "l" => "fromRight",
-        "u" => "fromBottom",
-        "d" => "fromTop",
-        _ => "fromLeft",
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 // Tables
 
-fn table(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, t: &Table) -> String {
+fn table(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, t: &Table) -> String {
     let mut out = String::from("<table:table>");
     for cw in &t.cols {
         let st = auto.style("table-column", "co", None, &format!(r#"<style:table-column-properties style:column-width="{}"/>"#, cm(*cw)));
@@ -827,7 +809,7 @@ fn table(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, t: &Table) -> String {
             let _ = write!(g, r#" draw:textarea-vertical-align="{anchor}""#);
             let cs = auto.style("table-cell", "ce", None, &format!("<style:graphic-properties{g}/><style:table-cell-properties{cp}/>"));
             let shape = deckcraft_model::Shape::table_cell(body.clone());
-            let text = text::body(w, auto, ctx, &shape, false);
+            let text = text::body(w, auto, ctx, pg, &shape, false);
             let span = if cell.grid_span > 1 { format!(r#" table:number-columns-spanned="{}""#, cell.grid_span) } else { String::new() };
             let rspan = if cell.row_span > 1 { format!(r#" table:number-rows-spanned="{}""#, cell.row_span) } else { String::new() };
             let _ = write!(out, r#"<table:table-cell table:style-name="{cs}"{span}{rspan}>{text}</table:table-cell>"#);
@@ -942,8 +924,7 @@ pub fn presentation_styles(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &st
 
 /// A master page: background, the master's and layout's graphics, and the placeholders.
 pub fn master_page(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str, layout: Option<&Layout>) -> String {
-    w.page = name.to_string();
-    w.in_master = true;
+    let pg = PageCtx::new(name, format!("{name}-"), true);
     let (bg, ph) = resolve::background(ctx, None);
     let bgx = fill_attrs(w, ctx, &bg, ph, true);
     let dp = auto.style("drawing-page", "dp", None, &format!(r#"<style:drawing-page-properties{bgx} draw:background-size="border"/>"#));
@@ -952,12 +933,12 @@ pub fn master_page(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str, layou
     let master_ctx = Ctx::for_master(ctx.pres, ctx.master);
     if show_master {
         for s in ctx.master.shapes.iter().filter(|s| s.ph.is_none()) {
-            shapes_xml.push_str(&shape(w, auto, &master_ctx, s, 0));
+            shapes_xml.push_str(&shape(w, auto, &master_ctx, &pg, s, 0));
         }
     }
     if let Some(l) = layout {
         for s in l.shapes.iter().filter(|s| s.ph.is_none()) {
-            shapes_xml.push_str(&shape(w, auto, ctx, s, 0));
+            shapes_xml.push_str(&shape(w, auto, ctx, &pg, s, 0));
         }
     }
     // Placeholders: the layout's where it has them, else the master's.
@@ -1012,8 +993,27 @@ pub fn master_page(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str, layou
             );
         }
     }
-    w.in_master = false;
     format!(
         r#"<style:master-page style:name="{name}" style:page-layout-name="PM1" draw:style-name="{dp}">{shapes_xml}<presentation:notes style:page-layout-name="PM2"/></style:master-page>"#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A child of a group turned a quarter about its centre turns with it: the group's left half
+    /// becomes its top half.
+    #[test]
+    fn group_rotation_carries_children() {
+        let c = kurbo::Vec2::new(100.0, 50.0);
+        let m = Affine::translate(c) * Affine::rotate(std::f64::consts::FRAC_PI_2) * Affine::translate(-c);
+        let x = place_in(m, Xfrm::new(0.0, 0.0, 100.0, 100.0));
+        for (got, want) in [(x.x, 50.0), (x.y, -50.0), (x.w, 100.0), (x.h, 100.0), (x.rot, 90.0)] {
+            assert!((got - want).abs() < 1e-6, "{x:?}");
+        }
+        // A mirroring group flips its child instead.
+        let flipped = place_in(Affine::FLIP_X, Xfrm::new(10.0, 0.0, 20.0, 10.0));
+        assert!(flipped.flip_v != flipped.flip_h || (flipped.rot - 180.0).abs() < 1e-6, "{flipped:?}");
+    }
 }

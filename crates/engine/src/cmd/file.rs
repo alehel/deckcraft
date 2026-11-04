@@ -260,7 +260,10 @@ pub struct LoadedFile {
 pub fn read_presentation_file(path: &str) -> Result<LoadedFile> {
     let bytes = crate::io::read_file(path).map_err(EngineError::Other)?;
     let (doc, damaged) = open_checked(path, &bytes)?;
-    let native = deckcraft_format::sniff(&bytes) || deckcraft_pptx::sniff(&bytes) || deckcraft_odp::sniff(&bytes);
+    // A flat `.fodp` opens but isn't written back (DeckCraft writes packaged ODF only), so saving
+    // asks for a new name rather than putting other bytes under that one.
+    let odp_package = deckcraft_odp::sniff(&bytes) && bytes.starts_with(b"PK");
+    let native = deckcraft_format::sniff(&bytes) || deckcraft_pptx::sniff(&bytes) || odp_package;
     Ok(LoadedFile { path: path.to_string(), doc, native, damaged })
 }
 
