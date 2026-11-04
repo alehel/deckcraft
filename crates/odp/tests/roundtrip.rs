@@ -389,3 +389,26 @@ fn animations_and_transitions_round_trip() {
     }
     assert_eq!(s.animations[4].path.as_deref(), Some("M 0 0 L 0.25 0.1 E"));
 }
+
+#[test]
+fn comments_round_trip() {
+    let mut p = defaults::new_presentation(None);
+    let c = deckcraft_model::Comment {
+        author: "Ada".into(),
+        initials: "AL".into(),
+        text: "Check this\nsecond line".into(),
+        date: "2026-11-04T10:00:00".into(),
+        x: 100.0,
+        y: 50.0,
+        replies: vec![deckcraft_model::Comment { author: "Bo".into(), text: "Done".into(), ..Default::default() }],
+        ..Default::default()
+    };
+    Arc::make_mut(&mut p.slides[0]).comments.push(c);
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    let cs = &back.slides[0].comments;
+    assert_eq!(cs.len(), 2);
+    assert_eq!((cs[0].author.as_str(), cs[0].initials.as_str(), cs[0].text.as_str()), ("Ada", "AL", "Check this\nsecond line"));
+    assert_eq!(cs[0].date, "2026-11-04T10:00:00");
+    assert!((cs[0].x - 100.0).abs() < 0.01 && (cs[0].y - 50.0).abs() < 0.01);
+    assert_eq!(cs[1].text, "Done");
+}

@@ -379,6 +379,11 @@ impl Reader<'_> {
                     }
                 }
                 "anim:par" if attr(e, "presentation:node-type") == Some("timing-root") => timing = Some(e),
+                "officeooo:annotation" | "office:annotation" => {
+                    if slide.comments.len() < 10_000 {
+                        slide.comments.push(comment(e));
+                    }
+                }
                 "anim:par" | "anim:seq" | "office:forms" => {}
                 _ => {
                     if let Some(s) = self.shape(e, &ctx, 0) {
@@ -1250,6 +1255,26 @@ fn complete_para(p: &mut deckcraft_model::text::ParaProps) {
     p.space_after.get_or_insert(Spacing::Pts(0.0));
     p.line_spacing.get_or_insert(Spacing::Pct(1.0));
     p.bullet.get_or_insert(deckcraft_model::text::Bullet::None);
+}
+
+/// A comment (`officeooo:annotation`): author, initials, date, text and where it is pinned.
+fn comment(e: &El) -> deckcraft_model::Comment {
+    let t = |n: &str| kid(e, n).map(|c| c.text()).unwrap_or_default();
+    let initials = {
+        let i = t("meta:creator-initials");
+        if i.is_empty() { t("loext:sender-initials") } else { i }
+    };
+    deckcraft_model::Comment {
+        author: t("dc:creator"),
+        initials,
+        date: t("dc:date"),
+        text: kids(e, "text:p").map(|p| p.text()).collect::<Vec<_>>().join("\n"),
+        x: attr(e, "svg:x").and_then(units::length).unwrap_or(0.0),
+        y: attr(e, "svg:y").and_then(units::length).unwrap_or(0.0),
+        resolved: attr(e, "loext:resolved") == Some("true"),
+        replies: vec![],
+        shape: None,
+    }
 }
 
 /// The box of a line from its end points (rotated by `draw:transform`, if any).

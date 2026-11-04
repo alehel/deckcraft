@@ -466,6 +466,23 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
         }
         out.push_str(&shapes::shape(w, auto, &ctx, sh, 0));
     }
+    // Comments (replies follow their comment, at its place).
+    for c in &s.comments {
+        for (k, cm) in std::iter::once(c).chain(c.replies.iter()).enumerate().take(1000) {
+            let text: String = cm.text.split('\n').map(|l| format!("<text:p>{}</text:p>", text::text_content(l))).collect();
+            let date = if cm.date.is_empty() { String::new() } else { format!("<dc:date>{}</dc:date>", esc(&cm.date)) };
+            let initials =
+                if cm.initials.is_empty() { String::new() } else { format!("<meta:creator-initials>{}</meta:creator-initials>", esc(&cm.initials)) };
+            let resolved = if cm.resolved && k == 0 { r#" loext:resolved="true""# } else { "" };
+            let _ = write!(
+                out,
+                r#"<officeooo:annotation svg:x="{}" svg:y="{}" svg:width="0.5cm" svg:height="0.5cm"{resolved}><dc:creator>{}</dc:creator>{date}{initials}{text}</officeooo:annotation>"#,
+                crate::units::cm(c.x),
+                crate::units::cm(c.y),
+                esc(&cm.author)
+            );
+        }
+    }
     // Transition and animations.
     let filter = s.transition.as_ref().and_then(crate::anim::transition_filter);
     if filter.is_some() || !s.animations.is_empty() {
