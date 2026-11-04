@@ -1130,3 +1130,48 @@ fn by_paragraph_builds_round_trip() {
     assert_eq!(a.len(), 1, "{a:?}");
     assert_eq!((a[0].text_build, a[0].paragraph, a[0].start), (TextBuild::ByParagraph, None, build.start));
 }
+
+/// Distributed lines, underlines under words only, a coloured text shadow, a long date format and
+/// unnamed slides come back as they were written.
+#[test]
+fn text_details_dates_and_slide_names_round_trip() {
+    use deckcraft_model::style::Shadow;
+    use deckcraft_model::text::Align;
+    let mut run = Run::new("words here");
+    run.props.underline = Some("words".into());
+    run.props.shadow = Some(Shadow {
+        color: ColorRef::rgb(Rgba::rgb(255, 0, 0)),
+        blur: 2.0,
+        dist: 3.0,
+        dir: 45.0,
+        inner: false,
+        sx: 1.0,
+        sy: 1.0,
+        kx: 0.0,
+        ky: 0.0,
+        align: String::new(),
+        rotate_with_shape: true,
+    });
+    let mut para = Paragraph { runs: vec![run], ..Default::default() };
+    para.props.align = Some(Align::Distributed);
+    let shape = Shape {
+        xfrm: Some(Xfrm::new(50.0, 50.0, 300.0, 100.0)),
+        text_box: true,
+        text: Some(TextBody { paragraphs: vec![para], ..Default::default() }),
+        ..Default::default()
+    };
+    let mut p = deck_with(vec![shape]);
+    Arc::make_mut(&mut p.slides[0]).name.clear();
+    p.header_footer.date = true;
+    p.header_footer.date_format = "datetime4".into();
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    assert_eq!(back.slides[0].name, "");
+    assert_eq!(back.header_footer.date_format, "datetime4");
+    let para = &shapes_of(&back)[0].text.clone().unwrap().paragraphs[0];
+    assert_eq!(para.props.align, Some(Align::Distributed));
+    let r = &para.runs[0].props;
+    assert_eq!(r.underline.as_deref(), Some("words"));
+    let sh = r.shadow.clone().unwrap();
+    assert_eq!(sh.color, ColorRef::rgb(Rgba::rgb(255, 0, 0)));
+    assert!((sh.dist - 3.0).abs() < 0.05 && (sh.dir - 45.0).abs() < 0.5 && (sh.blur - 2.0).abs() < 0.05, "{sh:?}");
+}

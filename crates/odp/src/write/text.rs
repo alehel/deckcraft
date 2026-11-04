@@ -128,7 +128,7 @@ fn paragraph(
                 } else if f.starts_with("datetime") && on_master {
                     "<presentation:date-time/>".to_string()
                 } else if f.starts_with("datetime") {
-                    format!(r#"<text:date style:data-style-name="D1">{}</text:date>"#, esc(&r.text))
+                    format!(r#"<text:date style:data-style-name="{}">{}</text:date>"#, super::date_style(&f), esc(&r.text))
                 } else if f == "slidecount" {
                     format!("<text:page-count>{}</text:page-count>", esc(&r.text))
                 } else {
@@ -343,6 +343,9 @@ pub(crate) fn level_style(w: &mut Writer, ctx: &Ctx, level: usize, lv: &LevelSty
 fn para_attrs(pp: &ParaProps, size: f64) -> String {
     let mut a = String::new();
     let _ = write!(a, r#" fo:text-align="{}""#, crate::text::odf_align(pp.align.unwrap_or(Align::Left)));
+    if pp.align == Some(Align::Distributed) {
+        a.push_str(r#" fo:text-align-last="justify""#);
+    }
     let _ = write!(
         a,
         r#" fo:margin-left="{}" fo:margin-right="{}" fo:text-indent="{}""#,
@@ -422,8 +425,11 @@ pub fn text_attrs(w: &mut Writer, ctx: &Ctx, r: &RunProps) -> String {
         let _ = write!(a, r#" fo:font-style="{v}" style:font-style-asian="{v}" style:font-style-complex="{v}""#);
     }
     if let Some(u) = r.underline.as_deref() {
-        let (style, ty, width) = crate::vocab::odf_underline(u);
+        let (style, ty, width) = crate::vocab::odf_underline(if u == "words" { "sng" } else { u });
         let _ = write!(a, r#" style:text-underline-style="{style}""#);
+        if u == "words" {
+            a.push_str(r#" style:text-underline-mode="skip-white-space""#);
+        }
         if style != "none" {
             let color = r.underline_color.as_ref().map_or_else(|| "font-color".into(), |c| hex(ctx.color(c, None)));
             let _ = write!(a, r#" style:text-underline-type="{ty}" style:text-underline-width="{width}" style:text-underline-color="{color}""#);
@@ -465,8 +471,9 @@ pub fn text_attrs(w: &mut Writer, ctx: &Ctx, r: &RunProps) -> String {
     if let Some(h) = &r.highlight {
         let _ = write!(a, r#" fo:background-color="{}""#, hex(ctx.color(h, None)));
     }
-    if r.shadow.is_some() {
-        a.push_str(r#" fo:text-shadow="1pt 1pt""#);
+    if let Some(sh) = &r.shadow {
+        let (dx, dy) = (sh.dist * sh.dir.to_radians().cos(), sh.dist * sh.dir.to_radians().sin());
+        let _ = write!(a, r#" fo:text-shadow="{} {} {} {}""#, pt(dx), pt(dy), pt(sh.blur.max(0.0)), hex(ctx.color(&sh.color, None)));
     }
     // ODF outlines text in the text's colour, hollow: filled outlined text shows as an outline
     // of its fill's colour (the nearest it has), unfilled text in the outline's.

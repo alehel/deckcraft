@@ -113,7 +113,18 @@ impl Reader<'_> {
                         let mode = if repeat == "stretch" {
                             PictureMode::Stretch { fill_rect: [0.0; 4] }
                         } else {
-                            PictureMode::Tile { tx: 0.0, ty: 0.0, sx: 1.0, sy: 1.0, flip: "none".into(), align: "tl".into() }
+                            // The tile's size as a scale of the picture's own, and its offset.
+                            let natural =
+                                self.p.media(m).and_then(|md| deckcraft_render::image_natural_size(&md.data)).map(|(w, h)| (w * 0.75, h * 0.75));
+                            let len = |k: &str| g.get(k).and_then(|v| units::length(v)).filter(|v| *v > 0.0);
+                            let (sx, sy) = match (natural, len("draw:fill-image-width"), len("draw:fill-image-height")) {
+                                (Some((nw, nh)), Some(tw), Some(th)) if nw > 0.0 && nh > 0.0 => (tw / nw, th / nh),
+                                _ => (1.0, 1.0),
+                            };
+                            let (tw, th) = natural.map_or((0.0, 0.0), |(nw, nh)| (nw * sx, nh * sy));
+                            let at = |k: &str| g.get(k).and_then(|v| units::percent(v)).unwrap_or(0.0);
+                            let (tx, ty) = (at("draw:fill-image-ref-point-x") * tw, at("draw:fill-image-ref-point-y") * th);
+                            PictureMode::Tile { tx, ty, sx, sy, flip: "none".into(), align: "tl".into() }
                         };
                         Fill::Picture(PictureFill { media: m, crop: [0.0; 4], mode, alpha: alpha.filter(|a| *a < 1.0), ..Default::default() })
                     }

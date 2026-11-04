@@ -348,7 +348,11 @@ pub fn odf_align(a: Align) -> &'static str {
 pub fn para_props(p: &Props, tabs: Option<&El>) -> ParaProps {
     let len = |k: &str| p.get(k).and_then(|v| units::length(v));
     let mut pp = ParaProps {
-        align: p.get("fo:text-align").and_then(|a| align_of(a)),
+        // Justified with the last line too is distributed.
+        align: p
+            .get("fo:text-align")
+            .and_then(|a| align_of(a))
+            .map(|a| if a == Align::Justify && p.get("fo:text-align-last").map(String::as_str) == Some("justify") { Align::Distributed } else { a }),
         margin_left: len("fo:margin-left"),
         margin_right: len("fo:margin-right"),
         indent: len("fo:text-indent"),
@@ -495,7 +499,9 @@ pub fn run_props(store: &Store, t: &Props, auto: Rgba) -> RunProps {
     if let Some(u) = g("style:text-underline-style") {
         let ty = g("style:text-underline-type").unwrap_or("single");
         let width = if g("style:text-underline-width") == Some("bold") { "bold" } else { "auto" };
-        rp.underline = Some(crate::vocab::underline_of(u, ty, width).into());
+        // Under words only: the spaces between them aren't underlined.
+        let words = g("style:text-underline-mode") == Some("skip-white-space") && u == "solid" && ty == "single";
+        rp.underline = Some(if words { "words" } else { crate::vocab::underline_of(u, ty, width) }.into());
         if let Some(c) = g("style:text-underline-color").and_then(units::color) {
             rp.underline_color = Some(ColorRef::rgb(c));
         }
@@ -545,12 +551,17 @@ pub fn run_props(store: &Store, t: &Props, auto: Rgba) -> RunProps {
     if let Some(bg) = g("fo:background-color").and_then(units::color) {
         rp.highlight = Some(ColorRef::rgb(bg));
     }
-    if g("fo:text-shadow").is_some_and(|s| s != "none") {
+    if let Some(ts) = g("fo:text-shadow").filter(|s| *s != "none") {
+        // `dx dy [blur] [colour]`, the colour anywhere.
+        let mut lengths = ts.split_whitespace().filter_map(units::length);
+        let (dx, dy) = (lengths.next().unwrap_or(1.0), lengths.next().unwrap_or(1.0));
+        let blur = lengths.next().unwrap_or(0.0).max(0.0);
+        let color = ts.split_whitespace().find_map(units::color).unwrap_or(Rgba::rgb(0x80, 0x80, 0x80));
         rp.shadow = Some(Shadow {
-            color: ColorRef::rgb(Rgba::rgb(0x80, 0x80, 0x80)),
-            blur: 0.0,
-            dist: 1.5,
-            dir: 45.0,
+            color: ColorRef::rgb(color),
+            blur,
+            dist: dx.hypot(dy),
+            dir: dy.atan2(dx).to_degrees().rem_euclid(360.0),
             inner: false,
             sx: 1.0,
             sy: 1.0,

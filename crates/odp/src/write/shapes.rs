@@ -468,6 +468,21 @@ pub fn fill_attrs(w: &mut Writer, ctx: &Ctx, f: &Fill, ph: Option<Rgba>) -> Stri
                 PictureMode::Tile { .. } => "repeat",
             };
             let mut s = format!(r#" draw:fill="bitmap" draw:fill-image-name="{name}" style:repeat="{repeat}""#);
+            // A tile's size (the picture's own, scaled) and where the tiling starts.
+            if let PictureMode::Tile { tx, ty, sx, sy, .. } = &pf.mode
+                && let Some((iw, ih)) = w.p.media(pf.media).and_then(|m| deckcraft_render::image_natural_size(&m.data))
+            {
+                let (tw, th) = (iw * 0.75 * sx, ih * 0.75 * sy);
+                let _ = write!(s, r#" draw:fill-image-width="{}" draw:fill-image-height="{}""#, cm(tw), cm(th));
+                if tw > 0.0 && th > 0.0 && (*tx != 0.0 || *ty != 0.0) {
+                    let _ = write!(
+                        s,
+                        r#" draw:fill-image-ref-point-x="{}" draw:fill-image-ref-point-y="{}""#,
+                        pct((tx / tw).rem_euclid(1.0)),
+                        pct((ty / th).rem_euclid(1.0))
+                    );
+                }
+            }
             if let Some(a) = pf.alpha.filter(|a| *a < 1.0) {
                 let _ = write!(s, r#" draw:opacity="{}""#, pct(a.clamp(0.0, 1.0)));
             }

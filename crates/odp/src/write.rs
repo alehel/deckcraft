@@ -312,8 +312,11 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
     }
     if hf.date {
         if hf.date_text.is_empty() {
-            decls
-                .push_str(r#"<presentation:date-time-decl presentation:name="dtd1" presentation:source="current-date" style:data-style-name="D1"/>"#);
+            let _ = write!(
+                decls,
+                r#"<presentation:date-time-decl presentation:name="dtd1" presentation:source="current-date" style:data-style-name="{}"/>"#,
+                date_style(&hf.date_format)
+            );
         } else {
             let _ = write!(
                 decls,
@@ -338,8 +341,10 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         cm(p.notes_size.height.max(1.0)),
     );
     let styles = format!(
-        r##"<?xml version="1.0" encoding="UTF-8"?><office:document-styles {NS}>{fonts}<office:styles>{}<number:date-style style:name="D1" number:automatic-order="true"><number:month number:style="long"/><number:text>/</number:text><number:day number:style="long"/><number:text>/</number:text><number:year/></number:date-style><style:default-style style:family="graphic"><style:graphic-properties svg:stroke-color="#3465a4" draw:fill-color="#729fcf" fo:wrap-option="no-wrap"/><style:paragraph-properties style:writing-mode="lr-tb"/><style:text-properties fo:font-size="18pt" fo:language="en" fo:country="US"/></style:default-style><style:style style:name="standard" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0cm" svg:stroke-color="#3465a4" draw:fill="solid" draw:fill-color="#729fcf" fo:padding-top="0.125cm" fo:padding-bottom="0.125cm" fo:padding-left="0.25cm" fo:padding-right="0.25cm" draw:shadow="hidden"/></style:style>{common}</office:styles><office:automatic-styles>{page_layouts}{}</office:automatic-styles><office:master-styles>{masters}</office:master-styles></office:document-styles>"##,
-        w.named.out, sauto.out
+        r##"<?xml version="1.0" encoding="UTF-8"?><office:document-styles {NS}>{fonts}<office:styles>{}{}<style:default-style style:family="graphic"><style:graphic-properties svg:stroke-color="#3465a4" draw:fill-color="#729fcf" fo:wrap-option="no-wrap"/><style:paragraph-properties style:writing-mode="lr-tb"/><style:text-properties fo:font-size="18pt" fo:language="en" fo:country="US"/></style:default-style><style:style style:name="standard" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0cm" svg:stroke-color="#3465a4" draw:fill="solid" draw:fill-color="#729fcf" fo:padding-top="0.125cm" fo:padding-bottom="0.125cm" fo:padding-left="0.25cm" fo:padding-right="0.25cm" draw:shadow="hidden"/></style:style>{common}</office:styles><office:automatic-styles>{page_layouts}{}</office:automatic-styles><office:master-styles>{masters}</office:master-styles></office:document-styles>"##,
+        w.named.out,
+        date_styles(),
+        sauto.out
     );
     let meta = meta_xml(p);
     let settings_xml = r#"<?xml version="1.0" encoding="UTF-8"?><office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" office:version="1.3"><office:settings/></office:document-settings>"#;
@@ -399,6 +404,71 @@ fn page_names(p: &Presentation) -> HashMap<u32, String> {
             k += 1;
         }
         out.insert(s.id.0, name);
+    }
+    out
+}
+
+/// PowerPoint's date and time formats (`datetime1` … `datetime13`) as number styles `D1` … `D13`.
+const DATE_FORMATS: [&str; 13] = [
+    // 11/4/2026
+    "M/D/Y",
+    // Wednesday, November 4, 2026
+    "W, N D, Y",
+    // 4 November 2026
+    "D N Y",
+    // November 4, 2026
+    "N D, Y",
+    // 4-Nov-26
+    "D-b-y",
+    // November 26
+    "N y",
+    // Nov-26
+    "b-y",
+    // 11/4/2026 9:30 AM
+    "M/D/Y h:m a",
+    // 11/4/2026 9:30:45 AM
+    "M/D/Y h:m:s a",
+    // 9:30
+    "h:m",
+    // 9:30:45
+    "h:m:s",
+    // 9:30 AM
+    "h:m a",
+    // 9:30:45 AM
+    "h:m:s a",
+];
+
+/// The number style of a date format (`datetime4` → `D4`; anything else is the first).
+pub(crate) fn date_style(format: &str) -> String {
+    let n = format.strip_prefix("datetime").and_then(|n| n.parse::<usize>().ok()).filter(|n| (1..=DATE_FORMATS.len()).contains(n));
+    format!("D{}", n.unwrap_or(1))
+}
+
+/// The `number:date-style` of every date format.
+fn date_styles() -> String {
+    let mut out = String::new();
+    for (i, f) in DATE_FORMATS.iter().enumerate() {
+        let _ = write!(out, r#"<number:date-style style:name="D{}">"#, i + 1);
+        for c in f.chars() {
+            out.push_str(match c {
+                'M' => "<number:month/>",
+                'D' => "<number:day/>",
+                'Y' => r#"<number:year number:style="long"/>"#,
+                'y' => "<number:year/>",
+                'N' => r#"<number:month number:textual="true" number:style="long"/>"#,
+                'b' => r#"<number:month number:textual="true"/>"#,
+                'W' => r#"<number:day-of-week number:style="long"/>"#,
+                'h' => "<number:hours/>",
+                'm' => r#"<number:minutes number:style="long"/>"#,
+                's' => r#"<number:seconds number:style="long"/>"#,
+                'a' => "<number:am-pm/>",
+                _ => "",
+            });
+            if !"MDYyNbWhmsa".contains(c) {
+                let _ = write!(out, "<number:text>{}</number:text>", esc(&c.to_string()));
+            }
+        }
+        out.push_str("</number:date-style>");
     }
     out
 }

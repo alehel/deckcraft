@@ -117,6 +117,12 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         r.p.masters = fallback;
     }
     let decls = Decls::read(body);
+    // The date format, from a current-date declaration in one of our date styles (`D4` is
+    // `datetime4`).
+    let ours = |s: &str| s.strip_prefix('D').and_then(|n| n.parse::<u8>().ok()).filter(|n| (1..=13).contains(n));
+    if let Some(n) = decls.dates.values().filter(|d| d.0).find_map(|d| d.2.as_deref().and_then(ours)) {
+        r.p.header_footer.date_format = format!("datetime{n}");
+    }
     for page in kids(body, "draw:page").take(MAX_PAGES) {
         if let Some(s) = r.page(page, &decls) {
             r.p.slides.push(Arc::new(s));
@@ -135,7 +141,8 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
 struct Decls {
     footers: HashMap<String, String>,
     headers: HashMap<String, String>,
-    dates: HashMap<String, (bool, String)>,
+    /// Whether it shows the current date, its fixed text, and its number style.
+    dates: HashMap<String, (bool, String, Option<String>)>,
 }
 
 /// Longest footer, header or date text kept (each page that shows it gets a copy).
@@ -161,7 +168,8 @@ impl Decls {
                     d.headers.insert(name, text());
                 }
                 "presentation:date-time-decl" => {
-                    d.dates.insert(name, (attr(e, "presentation:source") == Some("current-date"), text()));
+                    let style = attr(e, "style:data-style-name").map(str::to_string);
+                    d.dates.insert(name, (attr(e, "presentation:source") == Some("current-date"), text(), style));
                 }
                 _ => {}
             }
@@ -397,7 +405,10 @@ impl Reader<'_> {
         let bg = page_bg.as_ref().and_then(background_rgb).or(master_bg).unwrap_or(Rgba::WHITE);
         let title_slide = page.elements().any(|e| attr(e, "presentation:class") == Some("subtitle"));
         let ctx = Ctx { scope: Scope::Content, master: master_name, bg, title_slide };
-        let mut slide = Slide { id, name: attr(page, "draw:name").unwrap_or("").to_string(), background: page_bg, ..Default::default() };
+        // `pageN` for the Nth page is the name a writer gives a slide that has none.
+        let unnamed = format!("page{}", self.p.slides.len() + 1);
+        let name = attr(page, "draw:name").filter(|n| *n != unnamed).unwrap_or("").to_string();
+        let mut slide = Slide { id, name, background: page_bg, ..Default::default() };
         if let Some(n) = attr(page, "draw:name") {
             self.page_names.entry(n.to_string()).or_insert(id);
         }
@@ -521,7 +532,7 @@ impl Reader<'_> {
             self.p.header_footer.footer_text.clone_from(t);
         }
         if on("presentation:display-date-time")
-            && let Some((current, t)) = attr(page, "presentation:use-date-time-name").and_then(|n| decls.dates.get(n))
+            && let Some((current, t, _)) = attr(page, "presentation:use-date-time-name").and_then(|n| decls.dates.get(n))
         {
             self.p.header_footer.date = true;
             if *current {
