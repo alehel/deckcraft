@@ -485,7 +485,7 @@ pub fn fill_attrs(w: &mut Writer, ctx: &Ctx, f: &Fill, ph: Option<Rgba>) -> Stri
                     "Hatch",
                     &format!(
                         r#"draw:style="{}" draw:color="{}" draw:distance="{}" draw:rotation="{}""#,
-                        esc(&h.style),
+                        h.style.as_str(),
                         hex(h.color),
                         cm(h.distance),
                         trim(h.rotation * 10.0, 0)

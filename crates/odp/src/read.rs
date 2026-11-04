@@ -43,28 +43,32 @@ const MAX_PAGES: usize = 10_000;
 
 pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
     let pkg = Package::open(bytes)?;
-    let (content, styles, meta) = match &pkg.flat {
+    // A flat document is one tree holding content, styles and meta: parsed once and borrowed for
+    // all three rather than copied.
+    let (flat_root, content_doc, styles_doc, meta_doc);
+    let (content, styles, meta): (&El, &El, Option<&El>) = match &pkg.flat {
         Some(flat) => {
-            let root = crate::dom::parse(flat)?;
-            (root.clone(), root.clone(), Some(root))
+            flat_root = crate::dom::parse(flat)?;
+            (&flat_root, &flat_root, Some(&flat_root))
         }
         None => {
-            let content = pkg.xml("content.xml").ok_or_else(|| OdpError::NotOdp("no content.xml".into()))?;
-            let styles = pkg.xml("styles.xml").unwrap_or_default();
-            (content, styles, pkg.xml("meta.xml"))
+            content_doc = pkg.xml("content.xml").ok_or_else(|| OdpError::NotOdp("no content.xml".into()))?;
+            styles_doc = pkg.xml("styles.xml").unwrap_or_default();
+            meta_doc = pkg.xml("meta.xml");
+            (&content_doc, &styles_doc, meta_doc.as_ref())
         }
     };
     let flat = pkg.flat.is_some();
     let mut store = Store::default();
     if !flat {
-        store.add_document(&styles, Scope::Styles);
+        store.add_document(styles, Scope::Styles);
     }
-    store.add_document(&content, Scope::Content);
-    let body = kid(&content, "office:body")
+    store.add_document(content, Scope::Content);
+    let body = kid(content, "office:body")
         .and_then(|b| kid(b, "office:presentation"))
         .ok_or_else(|| OdpError::NotOdp("no office:presentation body".into()))?;
     let master_scope = if flat { Scope::Content } else { Scope::Styles };
-    let master_styles = kid(&styles, "office:master-styles");
+    let master_styles = kid(styles, "office:master-styles");
     let masters: Vec<&El> = master_styles.map(|m| kids(m, "style:master-page").collect()).unwrap_or_default();
 
     // Slide size: the first master's page layout.
@@ -834,14 +838,11 @@ impl Reader<'_> {
     /// The chart an embedded object holds (`Object 1/content.xml`), if it is a chart.
     fn object_chart(&self, o: &El) -> Option<deckcraft_model::chart::Chart> {
         let href = attr(o, "xlink:href")?.trim_start_matches("./").trim_end_matches('/');
-        let content = if href.is_empty() {
-            // An inline chart document (flat files).
-            let doc = kid(o, "office:document")?;
-            doc.clone()
-        } else {
-            self.pkg.xml(&format!("{href}/content.xml"))?
-        };
-        crate::chart::read(&content)
+        if href.is_empty() {
+            // An inline chart document (flat files), read in place.
+            return crate::chart::read(kid(o, "office:document")?);
+        }
+        crate::chart::read(&self.pkg.xml(&format!("{href}/content.xml"))?)
     }
 
     /// `fo:clip="rect(top, right, bottom, left)"`, lengths at the picture's own size, as the
@@ -1220,17 +1221,20 @@ impl Reader<'_> {
                 let hc = h.as_ref().and_then(|h| attr(h, "draw:color")).and_then(units::color).unwrap_or(Rgba::BLACK);
                 let solid = g.get("draw:fill-hatch-solid").map(String::as_str) == Some("true");
                 // Lines at the hatch's angle and spacing, as a tile picture.
-                let hatch = crate::hatch::Hatch {
-                    style: h.as_ref().and_then(|h| attr(h, "draw:style")).unwrap_or("single").to_string(),
-                    color: hc,
-                    distance: h.as_ref().and_then(|h| attr(h, "draw:distance")).and_then(units::length).unwrap_or(5.0),
-                    rotation: h.as_ref().and_then(|h| attr(h, "draw:rotation")).and_then(|a| units::angle(a, true)).unwrap_or(0.0),
-                    background: solid.then_some(color),
-                };
-                let tile = hatch.tile().and_then(|(png, t)| {
-                    let px = (!png.is_empty()).then(|| (t * 4.0).round().clamp(4.0, 512.0))?;
-                    let id = self.p.add_media(&hatch.media_name(), "image/png", png)?;
-                    Some((id, t / (0.75 * px)))
+                let hatch = crate::hatch::Hatch::new(
+                    h.as_ref()
+                        .and_then(|h| attr(h, "draw:style"))
+                        .and_then(crate::hatch::HatchStyle::parse)
+                        .unwrap_or(crate::hatch::HatchStyle::Single),
+                    hc,
+                    h.as_ref().and_then(|h| attr(h, "draw:distance")).and_then(units::length).unwrap_or(5.0),
+                    h.as_ref().and_then(|h| attr(h, "draw:rotation")).and_then(|a| units::angle(a, true)).unwrap_or(0.0),
+                    solid.then_some(color),
+                );
+                let tile = hatch.tile().and_then(|tile| {
+                    let px = f64::from(tile.px);
+                    let id = self.p.add_media(&hatch.media_name(), "image/png", tile.png)?;
+                    Some((id, tile.edge_pt / (0.75 * px)))
                 });
                 match tile {
                     Some((media, s)) => Fill::Picture(PictureFill {

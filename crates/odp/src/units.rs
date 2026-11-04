@@ -2,14 +2,54 @@
 
 use deckcraft_color::Rgba;
 
-/// A length (`2.5cm`, `10mm`, `1in`, `12pt`, `1pc`, `96px`, bare number = cm in practice is not
-/// allowed, so a bare number is read as points) in points. Non-finite or absurd values are `None`.
+/// Split a leading decimal number (sign, digits with an optional `.`, optional exponent `e±n`)
+/// from the unit after it: `2.5E+2pt` → (`2.5E+2`, `pt`). An `e` that no exponent digits follow
+/// belongs to the unit (`1em` → `1`, `em`). `None` when there is no number.
+fn split_number(s: &str) -> Option<(&str, &str)> {
+    let b = s.as_bytes();
+    let digits_from = |mut i: usize| {
+        while b.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+        }
+        i
+    };
+    let mut i = usize::from(matches!(b.first(), Some(b'+' | b'-')));
+    let int_end = digits_from(i);
+    let mut has_digits = int_end > i;
+    i = int_end;
+    if b.get(i) == Some(&b'.') {
+        let frac_end = digits_from(i + 1);
+        has_digits |= frac_end > i + 1;
+        i = frac_end;
+    }
+    if !has_digits {
+        return None;
+    }
+    if matches!(b.get(i), Some(b'e' | b'E')) {
+        let sign = usize::from(matches!(b.get(i + 1), Some(b'+' | b'-')));
+        let exp_end = digits_from(i + 1 + sign);
+        if exp_end > i + 1 + sign {
+            i = exp_end;
+        }
+    }
+    // Every byte consumed is ASCII, so `i` is a char boundary.
+    Some((s.get(..i)?, s.get(i..)?))
+}
+
+/// A number followed by an optional unit (whitespace between them is allowed).
+fn number_unit(s: &str) -> Option<(f64, &str)> {
+    let (num, unit) = split_number(s.trim())?;
+    let v: f64 = num.parse().ok()?;
+    v.is_finite().then_some((v, unit.trim()))
+}
+
+/// A length in points. ODF lengths are a number and a unit: `cm`, `mm`, `in` (or `inch`), `pt`,
+/// `pc` or `px` (`2.5cm`, `-0.5in`, `1e-3cm`, `2.5E+2pt`). A bare number is not a valid ODF
+/// length but some writers emit one; it is read as points. Unknown units, non-finite or absurd
+/// values (beyond ±10⁷ pt) are `None`.
 pub fn length(s: &str) -> Option<f64> {
-    let s = s.trim();
-    let split = s.find(|c: char| c.is_ascii_alphabetic() || c == '%').unwrap_or(s.len());
-    let (num, unit) = s.split_at(split);
-    let v: f64 = num.trim().parse().ok()?;
-    let pt = match unit.trim().to_ascii_lowercase().as_str() {
+    let (v, unit) = number_unit(s)?;
+    let pt = match unit.to_ascii_lowercase().as_str() {
         "cm" => v * 72.0 / 2.54,
         "mm" => v * 72.0 / 25.4,
         "in" | "inch" => v * 72.0,
@@ -21,26 +61,26 @@ pub fn length(s: &str) -> Option<f64> {
     (pt.is_finite() && pt.abs() < 1.0e7).then_some(pt)
 }
 
-/// A percentage (`45%`) as a fraction (0.45).
+/// A percentage (`45%`, `4.5e1%`) as a fraction (0.45).
 pub fn percent(s: &str) -> Option<f64> {
-    let v: f64 = s.trim().strip_suffix('%')?.trim().parse().ok()?;
-    (v.is_finite() && v.abs() < 1.0e6).then_some(v / 100.0)
+    let (v, unit) = number_unit(s)?;
+    (unit == "%" && v.abs() < 1.0e6).then_some(v / 100.0)
 }
 
-/// An angle in degrees: `45deg`, `0.5rad`, `50grad`, or a bare number. `tenths` reads a bare
-/// number as tenths of a degree (ODF 1.1 gradients and hatches write `draw:angle="450"`).
+/// An angle in degrees: `45deg`, `0.5rad`, `50grad`, or a bare number (`4.5e1` included). `tenths`
+/// reads a bare number as tenths of a degree (ODF 1.1 gradients and hatches write
+/// `draw:angle="450"`).
 pub fn angle(s: &str, tenths: bool) -> Option<f64> {
-    let s = s.trim();
-    let (v, scale) = if let Some(n) = s.strip_suffix("deg") {
-        (n, 1.0)
-    } else if let Some(n) = s.strip_suffix("grad") {
-        (n, 0.9)
-    } else if let Some(n) = s.strip_suffix("rad") {
-        (n, 180.0 / std::f64::consts::PI)
-    } else {
-        (s, if tenths { 0.1 } else { 1.0 })
+    let (v, unit) = number_unit(s)?;
+    let scale = match unit {
+        "deg" => 1.0,
+        "grad" => 0.9,
+        "rad" => 180.0 / std::f64::consts::PI,
+        "" if tenths => 0.1,
+        "" => 1.0,
+        _ => return None,
     };
-    let d = v.trim().parse::<f64>().ok()? * scale;
+    let d = v * scale;
     d.is_finite().then_some(d)
 }
 
@@ -115,6 +155,38 @@ mod tests {
         assert_eq!(length("bogus"), None);
         assert_eq!(length("1e300cm"), None);
         assert_eq!(length("3furlongs"), None);
+        assert_eq!(length("12"), Some(12.0));
+        assert_eq!(length(" 2 pt "), Some(2.0));
+    }
+
+    /// Regression: the unit started at the first letter, so the `e` of an exponent was read as the
+    /// unit and `1e-3cm` was rejected.
+    #[test]
+    fn numbers_with_exponents() {
+        let close = |a: Option<f64>, b: f64| a.is_some_and(|a| (a - b).abs() < 1e-9);
+        assert!(close(length("1e-3cm"), 72.0 / 2540.0));
+        assert!(close(length("2.5E+2pt"), 250.0));
+        assert!(close(length("1E2mm"), 100.0 * 72.0 / 25.4));
+        assert!(close(length("-1.5e1pt"), -15.0));
+        assert!(close(length(".5e1in"), 360.0));
+        assert!(close(length("3e2"), 300.0));
+        assert!(close(percent("4.5e1%"), 0.45));
+        assert!(close(percent("1E-1 %"), 0.001));
+        assert!(close(angle("4.5e1deg", false), 45.0));
+        assert!(close(angle("4.5e2", true), 45.0));
+        assert!(close(angle("1e2grad", false), 90.0));
+        // An `e` with no exponent digits is the start of a unit, which lengths don't know.
+        assert_eq!(length("1em"), None);
+        assert_eq!(length("1e"), None);
+        assert_eq!(length("1e+cm"), None);
+        assert_eq!(length("e3pt"), None);
+        assert_eq!(length("."), None);
+        assert_eq!(length("inf"), None);
+        assert_eq!(length("NaNpt"), None);
+        assert_eq!(length("1e400pt"), None);
+        assert_eq!(angle("1degx", false), None);
+        assert_eq!(angle("", false), None);
+        assert_eq!(percent("1e1"), None);
     }
 
     #[test]

@@ -2,8 +2,6 @@
 //! to the conventional OpenDocument prefix of its namespace (`draw:`, `fo:`, `style:` …), so a file
 //! that binds other prefixes reads the same. Names are then matched exactly.
 
-use std::collections::HashMap;
-
 pub use deckcraft_pptx::XmlEl as El;
 
 use crate::OdpError;
@@ -37,11 +35,16 @@ const NAMESPACES: &[(&str, &str)] = &[
     ("http://openoffice.org/2004/office", "ooo"),
 ];
 
+/// The prefix that names bound to a namespace this crate does not know move to, when the file
+/// writes them with one of the canonical prefixes (`xmlns:draw="urn:example"`). No reader
+/// matches it.
+const FOREIGN: &str = "foreign-ns";
+
 /// Parse a part and canonicalise its names.
 pub fn parse(bytes: &[u8]) -> Result<El, OdpError> {
     let doc = deckcraft_pptx::parse_xml(bytes).map_err(|e| OdpError::Xml(e.to_string()))?;
     let mut root = doc.root;
-    canonicalise(&mut root, &HashMap::new(), 0);
+    canonicalise(&mut root, &mut Vec::new(), 0);
     Ok(root)
 }
 
@@ -49,40 +52,73 @@ fn canonical_prefix(uri: &str) -> Option<&'static str> {
     NAMESPACES.iter().find(|(u, _)| *u == uri).map(|(_, p)| *p)
 }
 
+fn is_canonical(prefix: &str) -> bool {
+    NAMESPACES.iter().any(|(_, p)| *p == prefix)
+}
+
+/// A prefix binding in scope: the prefix as the file wrote it (`""` for the default namespace) and
+/// the prefix its names are rewritten to (`None`: left as written).
+type Binding = (String, Option<&'static str>);
+
+/// What a namespace declaration binds its prefix to.
+fn target(prefix: &str, uri: &str) -> Option<&'static str> {
+    match canonical_prefix(uri) {
+        Some(c) => Some(c),
+        // An unknown namespace under a canonical prefix: its names are not ODF names.
+        None if is_canonical(prefix) => Some(FOREIGN),
+        // An unknown namespace under its own prefix matches nothing anyway; an unknown default
+        // namespace leaves unprefixed names unprefixed.
+        None => None,
+    }
+}
+
+/// A name's new spelling under `scope` (innermost binding last), if it changes. Element names take
+/// the default namespace; unprefixed attributes have none. `xmlns` and `xml` are never rewritten.
+fn renamed(name: &str, scope: &[Binding], element: bool) -> Option<String> {
+    let (p, l) = match name.split_once(':') {
+        Some(("xmlns" | "xml", _)) => return None,
+        Some(pl) => pl,
+        None if element => ("", name),
+        None => return None,
+    };
+    let c = scope.iter().rev().find(|(q, _)| q == p)?.1?;
+    (c != p).then(|| format!("{c}:{l}"))
+}
+
 /// Rewrite prefixes in scope (declared on this element or an ancestor) to the canonical ones.
-fn canonicalise(el: &mut El, outer: &HashMap<String, String>, depth: usize) {
+///
+/// The bindings live on one stack, innermost last: an element pushes its own declarations and
+/// truncates them away when done, so the only allocations are one per declaration and one per
+/// name that actually changes (no map is copied per element).
+fn canonicalise(el: &mut El, scope: &mut Vec<Binding>, depth: usize) {
     if depth > crate::read::MAX_DEPTH {
         return;
     }
-    let mut map = outer.clone();
-    let mut local_decls = false;
+    let outer = scope.len();
     for (k, v) in &el.attrs {
-        if let Some(p) = k.strip_prefix("xmlns:")
-            && let Some(c) = canonical_prefix(v)
-        {
-            map.insert(p.to_string(), c.to_string());
-            local_decls = true;
-        }
+        let prefix = if k == "xmlns" {
+            ""
+        } else if let Some(p) = k.strip_prefix("xmlns:") {
+            p
+        } else {
+            continue;
+        };
+        scope.push((prefix.to_string(), target(prefix, v)));
     }
-    let map = if local_decls { map } else { outer.clone() };
-    let fix = |name: &mut String| {
-        if let Some((p, l)) = name.split_once(':')
-            && p != "xmlns"
-            && let Some(c) = map.get(p)
-            && c != p
-        {
-            *name = format!("{c}:{l}");
-        }
-    };
-    fix(&mut el.name);
+    if let Some(n) = renamed(&el.name, scope, true) {
+        el.name = n;
+    }
     for (k, _) in &mut el.attrs {
-        fix(k);
+        if let Some(n) = renamed(k, scope, false) {
+            *k = n;
+        }
     }
     for c in &mut el.children {
         if let deckcraft_pptx::XmlNode::El(e) = c {
-            canonicalise(e, &map, depth + 1);
+            canonicalise(e, scope, depth + 1);
         }
     }
+    scope.truncate(outer);
 }
 
 /// Exact-name attribute lookup.
@@ -135,4 +171,75 @@ pub fn esc(s: &str) -> String {
         }
     }
     o
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DRAW: &str = "urn:oasis:names:tc:opendocument:xmlns:drawing:1.0";
+    const SVG: &str = "urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0";
+
+    fn names(el: &El, out: &mut Vec<String>) {
+        out.push(el.name.clone());
+        out.extend(el.attrs.iter().map(|(k, _)| k.clone()));
+        for e in el.elements() {
+            names(e, out);
+        }
+    }
+
+    #[test]
+    fn other_prefixes_read_as_canonical() {
+        let x = format!(r#"<r xmlns:d="{DRAW}" xmlns:s="{SVG}"><d:frame s:x="1cm" d:name="a"><d:image/></d:frame></r>"#);
+        let r = parse(x.as_bytes()).unwrap();
+        let f = kid(&r, "draw:frame").unwrap();
+        assert_eq!(attr(f, "svg:x"), Some("1cm"));
+        assert_eq!(attr(f, "draw:name"), Some("a"));
+        assert!(kid(f, "draw:image").is_some());
+    }
+
+    /// Regression: a canonical prefix bound to another namespace kept its name, so its elements
+    /// and attributes were read as ODF `draw:` ones.
+    #[test]
+    fn a_canonical_prefix_bound_elsewhere_is_not_odf() {
+        let x =
+            format!(r#"<r xmlns:draw="urn:example:not-odf" xmlns:d="{DRAW}"><draw:frame draw:name="fake"/><d:frame d:name="real" draw:x="1"/></r>"#);
+        let r = parse(x.as_bytes()).unwrap();
+        let frames: Vec<&El> = kids(&r, "draw:frame").collect();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames.first().and_then(|f| attr(f, "draw:name")), Some("real"));
+        assert_eq!(frames.first().and_then(|f| attr(f, "draw:x")), None);
+        let mut all = Vec::new();
+        names(&r, &mut all);
+        assert!(all.iter().any(|n| n == "foreign-ns:frame"), "{all:?}");
+        // The declarations themselves keep their names.
+        assert_eq!(attr(&r, "xmlns:draw"), Some("urn:example:not-odf"));
+    }
+
+    #[test]
+    fn bindings_are_scoped() {
+        // An inner element re-binds `draw` elsewhere; the sibling after it sees the outer binding.
+        let x = format!(
+            r#"<r xmlns:draw="{DRAW}"><a xmlns:draw="urn:example"><draw:frame/></a><draw:frame/><b xmlns:x="{DRAW}"><x:page/></b><x:page/></r>"#
+        );
+        let r = parse(x.as_bytes()).unwrap();
+        assert!(kid(kid(&r, "a").unwrap(), "draw:frame").is_none());
+        assert_eq!(kids(&r, "draw:frame").count(), 1);
+        assert!(kid(kid(&r, "b").unwrap(), "draw:page").is_some());
+        // Undeclared outside `b`: left as written.
+        assert!(kid(&r, "x:page").is_some());
+    }
+
+    #[test]
+    fn default_namespace_names_elements_not_attributes() {
+        let x = format!(r#"<r><frame xmlns="{DRAW}" name="n"><image/></frame><frame/></r>"#);
+        let r = parse(x.as_bytes()).unwrap();
+        let f = kid(&r, "draw:frame").unwrap();
+        assert_eq!(attr(f, "name"), Some("n"));
+        assert!(kid(f, "draw:image").is_some());
+        assert!(kid(&r, "frame").is_some());
+        // `xml:` is never rewritten.
+        let r = parse(br#"<r xml:lang="en"/>"#).unwrap();
+        assert_eq!(attr(&r, "xml:lang"), Some("en"));
+    }
 }
