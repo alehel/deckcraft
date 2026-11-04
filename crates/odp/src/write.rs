@@ -140,7 +140,7 @@ impl Writer<'_> {
         let m = self.p.media(id)?;
         let ext =
             m.name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).filter(|e| e.len() <= 5 && e.chars().all(|c| c.is_ascii_alphanumeric()));
-        let ext = ext.unwrap_or_else(|| ext_for(&m.content_type).to_string());
+        let ext = ext.unwrap_or_else(|| crate::vocab::ext_for(&m.content_type).to_string());
         let dir = if m.content_type.starts_with("audio/") || m.content_type.starts_with("video/") { "Media" } else { "Pictures" };
         let path = format!("{dir}/m{}.{ext}", id.0);
         self.files.push((path.clone(), m.content_type.clone(), std::sync::Arc::clone(&m.data)));
@@ -162,11 +162,19 @@ pub(crate) struct PageCtx {
     /// The page's background, for shapes filled with it (`useBgFill`).
     pub background: (deckcraft_model::style::Fill, Option<deckcraft_color::Rgba>),
     ids: std::collections::HashSet<(u32, Option<u32>)>,
+    /// The glue point each connector end attaches to: (shape, connection site) → glue point.
+    glue: HashMap<(u32, u32), u32>,
 }
 
 impl PageCtx {
     pub fn new(master: &str, tag: String, is_master: bool, background: (deckcraft_model::style::Fill, Option<deckcraft_color::Rgba>)) -> Self {
-        PageCtx { master: master.to_string(), tag, is_master, background, ids: Default::default() }
+        PageCtx { master: master.to_string(), tag, is_master, background, ids: Default::default(), glue: HashMap::new() }
+    }
+
+    /// The glue point a connector end at `site` of `shape` attaches to.
+    pub fn glue_point(&self, shape: deckcraft_model::ShapeId, site: u32) -> u32 {
+        let fallback = || crate::GLUE_POINTS.iter().position(|s| *s == site).unwrap_or(0) as u32;
+        self.glue.get(&(shape.0, site)).copied().unwrap_or_else(fallback)
     }
 
     /// The `xml:id` of a shape (or one of its paragraphs), when something refers to it and it is
@@ -182,11 +190,19 @@ impl PageCtx {
     pub fn refer(&mut self, w: &Writer, shapes: &[deckcraft_model::Shape], animations: &[deckcraft_model::Animation]) {
         let mut wanted: Vec<(deckcraft_model::ShapeId, Option<u32>)> =
             animations.iter().flat_map(|a| [Some((a.shape, a.paragraph)), a.trigger.map(|t| (t, None))]).flatten().collect();
+        let mut ends = vec![];
         deckcraft_model::walk(shapes, &mut |sh, _| {
             if let ShapeKind::Connector { start, end } = &sh.kind {
-                wanted.extend([start, end].into_iter().flatten().map(|(id, _)| (*id, None)));
+                ends.extend([start, end].into_iter().flatten().copied());
             }
         });
+        for (id, site) in ends {
+            wanted.push((id, None));
+            if let Some(x) = deckcraft_model::find_shape(shapes, id).and_then(|t| t.xfrm.map(|x| (t, x))) {
+                let (t, x) = x;
+                self.glue.insert((id.0, site), crate::geometry::glue_point_of_site(&t.geom, x.w, x.h, site));
+            }
+        }
         for (id, para) in wanted {
             let Some(sh) = deckcraft_model::find_shape(shapes, id) else { continue };
             let para_ok = para.is_none_or(|i| sh.text.as_ref().is_some_and(|t| (i as usize) < t.paragraphs.len()));
@@ -194,24 +210,6 @@ impl PageCtx {
                 self.ids.insert((id.0, para));
             }
         }
-    }
-}
-
-fn ext_for(ct: &str) -> &'static str {
-    match ct {
-        "image/png" => "png",
-        "image/jpeg" => "jpg",
-        "image/gif" => "gif",
-        "image/svg+xml" => "svg",
-        "image/bmp" => "bmp",
-        "image/tiff" => "tif",
-        "image/webp" => "webp",
-        "image/x-emf" => "emf",
-        "image/x-wmf" => "wmf",
-        "video/mp4" => "mp4",
-        "audio/mpeg" => "mp3",
-        "audio/wav" => "wav",
-        _ => "bin",
     }
 }
 

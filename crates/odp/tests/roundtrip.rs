@@ -863,17 +863,23 @@ fn glued_connectors_round_trip() {
     let c = Shape {
         id: ShapeId(p.alloc_id().unwrap()),
         xfrm: Some(Xfrm::new(150.0, 80.0, 150.0, 120.0)),
-        kind: ShapeKind::Connector { start: Some((ids[0], 3)), end: Some((ids[1], 1)) },
+        // The box's right site to the ellipse's left one (an ellipse's eight sites run
+        // counter-clockwise from the top: its left is 2).
+        kind: ShapeKind::Connector { start: Some((ids[0], 3)), end: Some((ids[1], 2)) },
         geom: Geom::preset("straightConnector1"),
         line: Some(deckcraft_model::style::Line::solid(ColorRef::rgb(Rgba::BLACK), 1.5)),
         ..Default::default()
     };
     Arc::make_mut(&mut p.slides[0]).shapes.push(c);
-    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    let bytes = deckcraft_odp::export(&p).unwrap();
+    // LibreOffice's glue points run top, right, bottom, left.
+    let xml = part(&bytes, "content.xml");
+    assert!(xml.contains(r#"draw:start-glue-point="1""#) && xml.contains(r#"draw:end-glue-point="3""#));
+    let back = deckcraft_odp::import(&bytes).unwrap();
     let s = shapes_of(&back);
     let ShapeKind::Connector { start, end } = &s[2].kind else { panic!("{:?}", s[2].kind) };
     assert_eq!(*start, Some((s[0].id, 3)));
-    assert_eq!(*end, Some((s[1].id, 1)));
+    assert_eq!(*end, Some((s[1].id, 2)));
     let x = s[2].xfrm.unwrap();
     assert!((x.x - 150.0).abs() < 0.01 && (x.w - 150.0).abs() < 0.01 && (x.h - 120.0).abs() < 0.01);
 }

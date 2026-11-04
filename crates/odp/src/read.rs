@@ -94,7 +94,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
     for h in hrefs.into_iter().take(256) {
         if let Some(data) = pkg.get(&h) {
             let name = h.rsplit('/').next().unwrap_or(&h).to_string();
-            if let Some(id) = p.add_media(&name, mime_for(&name), data.to_vec()) {
+            if let Some(id) = p.add_media(&name, vocab::mime_for(&name), data.to_vec()) {
                 store.image_bullets.insert(h, id);
             }
         }
@@ -433,9 +433,12 @@ impl Reader<'_> {
             let resolve = |g: &Option<(String, u32)>| {
                 let (id, pt) = g.as_ref()?;
                 let (sid, _) = self.targets.get(id)?;
-                // LibreOffice numbers a shape's glue points top, right, bottom, left; ours run top,
-                // left, bottom, right.
-                Some((*sid, crate::GLUE_POINTS.get(*pt as usize).copied().unwrap_or(0)))
+                // The target's connection site nearest LibreOffice's glue point.
+                let site = match deckcraft_model::find_shape(&shapes, *sid).and_then(|t| t.xfrm.map(|x| (t, x))) {
+                    Some((t, x)) => geometry::site_of_glue_point(&t.geom, x.w, x.h, *pt),
+                    None => crate::GLUE_POINTS.get(*pt as usize).copied().unwrap_or(0),
+                };
+                Some((*sid, site))
             };
             let (a, b) = (resolve(&start), resolve(&end));
             if let Some(c) = deckcraft_model::find_shape_mut(&mut shapes, cid)
@@ -817,7 +820,7 @@ impl Reader<'_> {
     /// Audio or video (`draw:plugin`), its poster picture and play settings.
     fn media_clip(&mut self, frame: &El, pl: &El) -> Option<deckcraft_model::MediaClip> {
         let href = attr(pl, "xlink:href")?;
-        let mime = attr(pl, "draw:mime-type").map(str::to_string).unwrap_or_else(|| media_mime(href).to_string());
+        let mime = attr(pl, "draw:mime-type").map(str::to_string).unwrap_or_else(|| vocab::mime_for(href).to_string());
         let name = href.rsplit('/').next().unwrap_or(href).to_string();
         let media = match self.package_media(href, &mime) {
             Some(id) => id,
@@ -831,8 +834,8 @@ impl Reader<'_> {
             }
         };
         let param = |n: &str| kids(pl, "draw:param").find(|p| attr(p, "draw:name") == Some(n)).and_then(|p| attr(p, "draw:value"));
-        let video = mime.starts_with("video/")
-            || !mime.starts_with("audio/") && !matches!(name.rsplit('.').next(), Some("mp3" | "wav" | "ogg" | "m4a" | "flac" | "wma" | "aac"));
+        // Video unless the type (or, without one, the file's extension) says audio.
+        let video = mime.starts_with("video/") || !mime.starts_with("audio/") && !vocab::mime_for(&name).starts_with("audio/");
         let poster = self.frame_image(frame);
         let db = param("VolumeDB").and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(0.0);
         Some(deckcraft_model::MediaClip {
@@ -987,7 +990,7 @@ impl Reader<'_> {
 
     fn image_media(&mut self, img: &El) -> Option<MediaId> {
         if let Some(href) = attr(img, "xlink:href").filter(|h| !h.is_empty() && !h.contains("://")) {
-            let mime = attr(img, "draw:mime-type").map(str::to_string).unwrap_or_else(|| mime_for(href).to_string());
+            let mime = attr(img, "draw:mime-type").map(str::to_string).unwrap_or_else(|| vocab::mime_for(href).to_string());
             return self.package_media(href, &mime);
         }
         let b64 = kid(img, "office:binary-data")?.text();
@@ -1188,18 +1191,16 @@ impl Reader<'_> {
                 .map(|gr| Fill::Gradient(gradient(gr, &with_alpha, None)))
                 .unwrap_or_else(|| Fill::solid(with_alpha(color))),
             "hatch" => {
-                let h = g.get("draw:fill-hatch-name").and_then(|n| self.store.hatches.get(n)).cloned();
-                let hc = h.as_ref().and_then(|h| attr(h, "draw:color")).and_then(units::color).unwrap_or(Rgba::BLACK);
+                let h = g.get("draw:fill-hatch-name").and_then(|n| self.store.hatches.get(n));
+                let ha = |k: &str| h.and_then(|h| attr(h, k));
+                let hc = ha("draw:color").and_then(units::color).unwrap_or(Rgba::BLACK);
                 let solid = g.get("draw:fill-hatch-solid").map(String::as_str) == Some("true");
                 // Lines at the hatch's angle and spacing, as a tile picture.
                 let hatch = crate::hatch::Hatch::new(
-                    h.as_ref()
-                        .and_then(|h| attr(h, "draw:style"))
-                        .and_then(crate::hatch::HatchStyle::parse)
-                        .unwrap_or(crate::hatch::HatchStyle::Single),
+                    ha("draw:style").and_then(crate::hatch::HatchStyle::parse).unwrap_or(crate::hatch::HatchStyle::Single),
                     hc,
-                    h.as_ref().and_then(|h| attr(h, "draw:distance")).and_then(units::length).unwrap_or(5.0),
-                    h.as_ref().and_then(|h| attr(h, "draw:rotation")).and_then(|a| units::angle(a, true)).unwrap_or(0.0),
+                    ha("draw:distance").and_then(units::length).unwrap_or(5.0),
+                    ha("draw:rotation").and_then(|a| units::angle(a, true)).unwrap_or(0.0),
                     solid.then_some(color),
                 );
                 let tile = hatch.tile().and_then(|tile| {
@@ -1216,7 +1217,7 @@ impl Reader<'_> {
                     }),
                     None => {
                         let bg = if solid { with_alpha(color) } else { ColorRef::rgb(Rgba::WHITE).with(ColorTransform::Alpha(0)) };
-                        Fill::Pattern(PatternFill { preset: hatch_preset(h.as_ref()), fg: with_alpha(hc), bg })
+                        Fill::Pattern(PatternFill { preset: hatch_preset(&hatch), fg: with_alpha(hc), bg })
                     }
                 }
             }
@@ -1688,15 +1689,12 @@ fn srgb_steps(stops: &[(f64, Rgba)]) -> Vec<(f64, Rgba)> {
 }
 
 /// The closest DrawingML pattern to a hatch.
-fn hatch_preset(h: Option<&El>) -> String {
-    let Some(h) = h else { return "ltDnDiag".into() };
-    let style = attr(h, "draw:style").unwrap_or("single");
-    let rot = attr(h, "draw:rotation").and_then(|a| units::angle(a, true)).unwrap_or(0.0).rem_euclid(180.0);
-    let dist = attr(h, "draw:distance").and_then(units::length).unwrap_or(5.0);
-    let dense = dist < 4.0;
+fn hatch_preset(h: &crate::hatch::Hatch) -> String {
+    let rot = h.rotation.rem_euclid(180.0);
+    let dense = h.distance < 4.0;
     let near = |a: f64| (rot - a).abs() < 22.5 || (rot - a - 180.0).abs() < 22.5;
-    let p = match style {
-        "double" | "triple" => {
+    let p = match h.style {
+        crate::hatch::HatchStyle::Double | crate::hatch::HatchStyle::Triple => {
             if near(45.0) || near(135.0) {
                 if dense { "smCheck" } else { "openDmnd" }
             } else if dense {
@@ -1857,41 +1855,6 @@ fn duration_iso(s: &str) -> Option<u32> {
         num.clear();
     }
     (total.is_finite() && total >= 0.0).then(|| total.min(f64::from(u32::MAX)) as u32)
-}
-
-fn media_mime(name: &str) -> &'static str {
-    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
-    match ext.as_str() {
-        "mp4" | "m4v" => "video/mp4",
-        "mov" => "video/quicktime",
-        "webm" => "video/webm",
-        "mkv" => "video/x-matroska",
-        "avi" => "video/x-msvideo",
-        "wmv" => "video/x-ms-wmv",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "ogg" | "oga" => "audio/ogg",
-        "m4a" => "audio/mp4",
-        "flac" => "audio/flac",
-        _ => "application/octet-stream",
-    }
-}
-
-pub fn mime_for(name: &str) -> &'static str {
-    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
-    match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "bmp" => "image/bmp",
-        "tif" | "tiff" => "image/tiff",
-        "svg" => "image/svg+xml",
-        "webp" => "image/webp",
-        "wmf" => "image/x-wmf",
-        "emf" => "image/x-emf",
-        "svm" => "image/x-svm",
-        _ => "application/octet-stream",
-    }
 }
 
 fn sniff_image(d: &[u8]) -> (&'static str, &'static str) {

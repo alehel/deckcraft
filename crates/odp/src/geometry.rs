@@ -71,9 +71,69 @@ pub fn placed_box(m: Affine, w: f64, h: f64) -> (f64, f64, f64, f64, f64, bool) 
     (c.x - w2 / 2.0, c.y - h2 / 2.0, w2, h2, rot, det < 0.0)
 }
 
+/// The shape's geometry (preset or custom) at its size, without the renderer.
+pub fn shape_geometry(geom: &deckcraft_model::Geom, w: f64, h: f64) -> deckcraft_geom::preset::Geometry {
+    use deckcraft_geom::preset::{Geometry, SubPath, build};
+    match geom {
+        deckcraft_model::Geom::Preset { name, adj } => build(name, w, h, adj).or_else(|| build("rect", w, h, &[])).unwrap_or(Geometry {
+            paths: vec![],
+            text_rect: kurbo::Rect::new(0.0, 0.0, w, h),
+            handles: vec![],
+            sites: vec![],
+        }),
+        deckcraft_model::Geom::Custom { paths } => {
+            let mut out = vec![];
+            for p in paths {
+                let (pw, ph) = (if p.w > 0.0 { p.w } else { w }, if p.h > 0.0 { p.h } else { h });
+                let Ok(mut bp) = BezPath::from_svg(&p.d) else { continue };
+                bp.apply_affine(Affine::scale_non_uniform(w / pw.max(1e-9), h / ph.max(1e-9)));
+                out.push(SubPath { path: bp, fill: p.fill, stroke: p.stroke, even_odd: true });
+            }
+            Geometry { paths: out, text_rect: kurbo::Rect::new(0.0, 0.0, w, h), handles: vec![], sites: vec![] }
+        }
+    }
+}
+
+/// LibreOffice's default glue points 0–3: the middles of the top, right, bottom and left edges,
+/// as fractions of the box.
+const EDGE_MIDDLES: [(f64, f64); 4] = [(0.5, 0.0), (1.0, 0.5), (0.5, 1.0), (0.0, 0.5)];
+
+/// A shape's connection sites as fractions of its box (none for custom outlines).
+fn site_fractions(geom: &deckcraft_model::Geom, w: f64, h: f64) -> Vec<(f64, f64)> {
+    let (w, h) = (w.max(1e-6), h.max(1e-6));
+    shape_geometry(geom, w, h).sites.iter().map(|p| (p.x / w, p.y / h)).collect()
+}
+
+fn nearest(from: (f64, f64), to: impl Iterator<Item = (f64, f64)>) -> Option<usize> {
+    let d = |p: (f64, f64)| (p.0 - from.0).powi(2) + (p.1 - from.1).powi(2);
+    to.enumerate().min_by(|a, b| d(a.1).total_cmp(&d(b.1))).map(|(i, _)| i)
+}
+
+/// The default glue point nearest a shape's connection site. Shapes without sites are boxes,
+/// whose sites run top, left, bottom, right.
+pub fn glue_point_of_site(geom: &deckcraft_model::Geom, w: f64, h: f64, site: u32) -> u32 {
+    let sites = site_fractions(geom, w, h);
+    let at = sites.get(site as usize).copied();
+    let by_position = at.and_then(|p| nearest(p, EDGE_MIDDLES.into_iter()));
+    by_position.or_else(|| crate::GLUE_POINTS.iter().position(|s| *s == site)).unwrap_or(0) as u32
+}
+
+/// The connection site nearest a default glue point.
+pub fn site_of_glue_point(geom: &deckcraft_model::Geom, w: f64, h: f64, glue: u32) -> u32 {
+    let sites = site_fractions(geom, w, h);
+    let mid = EDGE_MIDDLES.get(glue as usize).copied();
+    let by_position = mid.and_then(|m| nearest(m, sites.into_iter()));
+    by_position.map(|i| i as u32).or_else(|| crate::GLUE_POINTS.get(glue as usize).copied()).unwrap_or(0)
+}
+
 /// Serialise a path in the model's syntax.
 pub fn path_d(p: &BezPath) -> String {
-    let f = |v: f64| units::trim(v, 3);
+    path_d_at(p, 3)
+}
+
+/// [`path_d`] with coordinates to `places` decimals (the same syntax as an enhanced path's).
+pub fn path_d_at(p: &BezPath, places: usize) -> String {
+    let f = |v: f64| units::trim(v, places);
     let mut out = String::new();
     for el in p.elements() {
         if !out.is_empty() {
@@ -308,44 +368,14 @@ enum Tok {
     Op(char),
 }
 
-/// Length in bytes of the unsigned ODF number at the start of `s` (0 if none):
-/// `integer`, `integer? '.' integer`, `integer '.'`, each with an optional
-/// `('e' | 'E') sign? integer` exponent.
+/// Length in bytes of the ODF number at the start of `s` (0 if none).
 fn scan_number(s: &str) -> usize {
-    let b = s.as_bytes();
-    let digits = |from: usize| b.get(from..).map_or(0, |r| r.iter().take_while(|c| c.is_ascii_digit()).count());
-    let int = digits(0);
-    let mut n = int;
-    if b.get(n) == Some(&b'.') {
-        let frac = digits(n + 1);
-        if int == 0 && frac == 0 {
-            return 0;
-        }
-        n += 1 + frac;
-    }
-    if n == 0 {
-        return 0;
-    }
-    if matches!(b.get(n), Some(b'e' | b'E')) {
-        let mut m = n + 1;
-        if matches!(b.get(m), Some(b'+' | b'-')) {
-            m += 1;
-        }
-        let e = digits(m);
-        if e > 0 {
-            n = m + e;
-        }
-    }
-    n
+    units::split_number(s).map_or(0, |(n, _)| n.len())
 }
 
-/// A whole token as an ODF number (optional sign, then [`scan_number`]); finite values only.
+/// A whole token as an ODF number; finite values only.
 fn parse_number(t: &str) -> Option<f64> {
-    let body = t.strip_prefix(['+', '-']).unwrap_or(t);
-    if body.is_empty() || scan_number(body) != body.len() {
-        return None;
-    }
-    t.parse::<f64>().ok().filter(|v| v.is_finite())
+    units::number(t)
 }
 
 fn tokenize(s: &str) -> Vec<Tok> {

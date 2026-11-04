@@ -5,7 +5,7 @@ use deckcraft_color::Rgba;
 /// Split a leading decimal number (sign, digits with an optional `.`, optional exponent `e±n`)
 /// from the unit after it: `2.5E+2pt` → (`2.5E+2`, `pt`). An `e` that no exponent digits follow
 /// belongs to the unit (`1em` → `1`, `em`). `None` when there is no number.
-fn split_number(s: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_number(s: &str) -> Option<(&str, &str)> {
     let b = s.as_bytes();
     let digits_from = |mut i: usize| {
         while b.get(i).is_some_and(u8::is_ascii_digit) {
@@ -34,6 +34,15 @@ fn split_number(s: &str) -> Option<(&str, &str)> {
     }
     // Every byte consumed is ASCII, so `i` is a char boundary.
     Some((s.get(..i)?, s.get(i..)?))
+}
+
+/// A whole token as a number (no unit), finite values only.
+pub(crate) fn number(t: &str) -> Option<f64> {
+    let (num, rest) = split_number(t)?;
+    if !rest.is_empty() {
+        return None;
+    }
+    num.parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
 /// A number followed by an optional unit (whitespace between them is allowed).

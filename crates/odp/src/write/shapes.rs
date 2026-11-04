@@ -9,7 +9,7 @@ use deckcraft_model::style::{Dash, Effects, Fill, GradientShape, Line, LineCap, 
 use deckcraft_model::table::Table;
 use deckcraft_model::text::{Action, Anchor, AutoFit, BodyProps, LevelStyle, ListStyle};
 use deckcraft_model::{Geom, Layout, PhType, Shape, ShapeKind, Xfrm};
-use kurbo::{Affine, BezPath, PathEl, Point};
+use kurbo::{Affine, BezPath, Point};
 
 use super::text;
 use super::{Auto, PageCtx, Writer, rad};
@@ -199,7 +199,7 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
             if let Some((id, site)) = e
                 && let Some(target) = pg.id(*id, None)
             {
-                let pt = crate::GLUE_POINTS.iter().position(|s| s == site).unwrap_or(0);
+                let pt = pg.glue_point(*id, *site);
                 let _ = write!(g, r#" draw:{k}-shape="{target}" draw:{k}-glue-point="{pt}""#);
             }
         }
@@ -249,7 +249,7 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
         // A bent or curved connector: its route on the page (1/100 mm, no view box), from its
         // first point to its last.
         let mut route = BezPath::new();
-        for sp in shape_geometry(s, x.w.max(1e-3), x.h.max(1e-3)).paths {
+        for sp in crate::geometry::shape_geometry(&s.geom, x.w.max(1e-3), x.h.max(1e-3)).paths {
             route.extend(sp.path);
         }
         route.apply_affine(Affine::scale(2540.0 / 72.0) * x.affine());
@@ -325,7 +325,7 @@ fn place_in(m: Affine, child: Xfrm) -> Xfrm {
 /// `draw:enhanced-geometry` drawing the shape's outline in a view box of its size (1/100 mm).
 fn enhanced_geometry(s: &Shape, x: &Xfrm) -> String {
     let (w, h) = (x.w.max(1e-3), x.h.max(1e-3));
-    let geo = shape_geometry(s, w, h);
+    let geo = crate::geometry::shape_geometry(&s.geom, w, h);
     let vw = (w * 2540.0 / 72.0).round().max(1.0);
     let vh = (h * 2540.0 / 72.0).round().max(1.0);
     let scale = Affine::scale_non_uniform(vw / w, vh / h);
@@ -333,29 +333,8 @@ fn enhanced_geometry(s: &Shape, x: &Xfrm) -> String {
     for sp in &geo.paths {
         let mut p = sp.path.clone();
         p.apply_affine(scale);
-        let mut first = true;
-        for el in p.elements() {
-            let f = |p: Point| format!("{} {}", trim(p.x, 0), trim(p.y, 0));
-            match el {
-                PathEl::MoveTo(a) => {
-                    if !first {
-                        path.push(' ');
-                    }
-                    let _ = write!(path, "M {}", f(*a));
-                }
-                PathEl::LineTo(a) => {
-                    let _ = write!(path, " L {}", f(*a));
-                }
-                PathEl::QuadTo(a, b) => {
-                    let _ = write!(path, " Q {} {}", f(*a), f(*b));
-                }
-                PathEl::CurveTo(a, b, c) => {
-                    let _ = write!(path, " C {} {} {}", f(*a), f(*b), f(*c));
-                }
-                PathEl::ClosePath => path.push_str(" Z"),
-            }
-            first = false;
-        }
+        // Whole view-box units.
+        path.push_str(&crate::geometry::path_d_at(&p, 0));
         if sp.fill == FillMode::None {
             path.push_str(" F");
         }
@@ -380,29 +359,6 @@ fn enhanced_geometry(s: &Shape, x: &Xfrm) -> String {
         x.flip_v,
         path.trim()
     )
-}
-
-/// The shape's geometry (preset or custom) at its size, without the renderer.
-fn shape_geometry(s: &Shape, w: f64, h: f64) -> deckcraft_geom::preset::Geometry {
-    use deckcraft_geom::preset::{Geometry, SubPath, build};
-    match &s.geom {
-        Geom::Preset { name, adj } => build(name, w, h, adj).or_else(|| build("rect", w, h, &[])).unwrap_or(Geometry {
-            paths: vec![],
-            text_rect: kurbo::Rect::new(0.0, 0.0, w, h),
-            handles: vec![],
-            sites: vec![],
-        }),
-        Geom::Custom { paths } => {
-            let mut out = vec![];
-            for p in paths {
-                let (pw, ph) = (if p.w > 0.0 { p.w } else { w }, if p.h > 0.0 { p.h } else { h });
-                let Ok(mut bp) = BezPath::from_svg(&p.d) else { continue };
-                bp.apply_affine(Affine::scale_non_uniform(w / pw.max(1e-9), h / ph.max(1e-9)));
-                out.push(SubPath { path: bp, fill: p.fill, stroke: p.stroke, even_odd: true });
-            }
-            Geometry { paths: out, text_rect: kurbo::Rect::new(0.0, 0.0, w, h), handles: vec![], sites: vec![] }
-        }
-    }
 }
 
 fn path_element(bp: &BezPath, style: &str, inner: &str) -> String {
