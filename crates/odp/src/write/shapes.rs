@@ -7,7 +7,7 @@ use deckcraft_geom::preset::FillMode;
 use deckcraft_model::resolve::{self, Ctx};
 use deckcraft_model::style::{Dash, Effects, Fill, GradientShape, Line, LineCap, LineJoin, PictureFill, PictureMode};
 use deckcraft_model::table::Table;
-use deckcraft_model::text::{Action, Anchor, AutoFit, BodyProps, LevelStyle, ListStyle, TextDir};
+use deckcraft_model::text::{Action, Anchor, AutoFit, BodyProps, LevelStyle, ListStyle};
 use deckcraft_model::{Geom, Layout, PhType, Shape, ShapeKind, Xfrm};
 use kurbo::{Affine, BezPath, PathEl, Point};
 
@@ -15,6 +15,7 @@ use super::text;
 use super::{Auto, PageCtx, Writer, rad};
 use crate::dom::esc;
 use crate::units::{cm, hex, pct, trim};
+use crate::vocab;
 
 const MAX_DEPTH: usize = 64;
 
@@ -66,22 +67,23 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
             // An ODF group has no space of its own: children are written at their page positions,
             // through the group's whole transform (rotation and flips included).
             let m = deckcraft_geom::group_child_affine(&x, child.rect());
+            // A child filled with the group's fill (`grpFill`) gets it here: ODF groups have none.
+            let group_fill = resolve::fill(ctx, s).0;
             let mut inner = String::new();
             for c in children {
-                match c.xfrm {
-                    Some(cx) => {
-                        let placed = Shape { xfrm: Some(place_in(m, cx)), ..c.clone() };
-                        inner.push_str(&shape(w, auto, ctx, pg, &placed, depth + 1));
-                    }
-                    None => inner.push_str(&shape(w, auto, ctx, pg, c, depth + 1)),
+                let mut placed = c.clone();
+                placed.xfrm = c.xfrm.map(|cx| place_in(m, cx));
+                if matches!(placed.fill, Some(Fill::Group)) {
+                    placed.fill.clone_from(&group_fill);
                 }
+                inner.push_str(&shape(w, auto, ctx, pg, &placed, depth + 1));
             }
             format!("<draw:g{common}>{inner}{desc}{events}</draw:g>")
         }
         ShapeKind::Picture { fill } => {
             let Some(href) = w.media_path(fill.media) else { return String::new() };
-            let (line, _) = resolve::line(ctx, s);
-            let mut g = line_attrs(w, ctx, &line, None);
+            let (line, ph_line) = resolve::line(ctx, s);
+            let mut g = line_attrs(w, ctx, &line, ph_line);
             g.push_str(r#" draw:fill="none""#);
             g.push_str(&picture_attrs(w, fill));
             if x.flip_h || x.flip_v {
@@ -92,38 +94,28 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
                 };
                 let _ = write!(g, r#" style:mirror="{m}""#);
             }
-            g.push_str(&shadow_attrs(ctx, resolve::effects(ctx, s).0.as_ref()));
+            let (effects, ph_fx) = resolve::effects(ctx, s);
+            g.push_str(&shadow_attrs(ctx, effects.as_ref(), ph_fx));
             let st = auto.style("graphic", "gr", Some("standard"), &format!("<style:graphic-properties{g}/>"));
-            let pos = position(&x);
             let mime = w.p.media(fill.media).map(|m| m.content_type.clone()).unwrap_or_default();
-            format!(
-                r#"<draw:frame draw:style-name="{st}"{common}{pos}><draw:image xlink:href="{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad" draw:mime-type="{}"><text:p/></draw:image>{desc}{events}</draw:frame>"#,
-                esc(&href),
-                esc(&mime)
-            )
+            let image = format!(r#"<draw:image {} draw:mime-type="{}"><text:p/></draw:image>"#, embed(&href), esc(&mime));
+            frame(&st, &common, &x, &image, &desc, &events)
         }
         ShapeKind::Table(t) => {
-            let st = auto.style("graphic", "gr", Some("standard"), r#"<style:graphic-properties draw:fill="none" draw:stroke="none"/>"#);
-            let pos = position(&x);
             let table = table(w, auto, ctx, pg, t);
-            format!(r#"<draw:frame draw:style-name="{st}"{common}{pos}>{table}{desc}</draw:frame>"#)
+            frame(&no_paint(auto), &common, &x, &table, &desc, &events)
         }
         ShapeKind::Media(m) => {
             let Some(href) = w.media_path(m.media) else { return String::new() };
             let mime = w.p.media(m.media).map(|i| i.content_type.clone()).unwrap_or_default();
-            let st = auto.style("graphic", "gr", Some("standard"), r#"<style:graphic-properties draw:fill="none" draw:stroke="none"/>"#);
-            let pos = position(&x);
-            let poster = m
-                .poster
-                .and_then(|p| w.media_path(p))
-                .map(|p| format!(r#"<draw:image xlink:href="{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"/>"#, esc(&p)))
-                .unwrap_or_default();
-            format!(
-                r#"<draw:frame draw:style-name="{st}"{common}{pos}><draw:plugin xlink:href="{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad" draw:mime-type="{}"><draw:param draw:name="Loop" draw:value="{}"/><draw:param draw:name="Mute" draw:value="false"/><draw:param draw:name="VolumeDB" draw:value="0"/><draw:param draw:name="Zoom" draw:value="fit"/></draw:plugin>{poster}{desc}</draw:frame>"#,
-                esc(&href),
+            let poster = m.poster.and_then(|p| w.media_path(p)).map(|p| format!("<draw:image {}/>", embed(&p))).unwrap_or_default();
+            let plugin = format!(
+                r#"<draw:plugin {} draw:mime-type="{}"><draw:param draw:name="Loop" draw:value="{}"/><draw:param draw:name="Mute" draw:value="false"/><draw:param draw:name="VolumeDB" draw:value="0"/><draw:param draw:name="Zoom" draw:value="fit"/></draw:plugin>{poster}"#,
+                embed(&href),
                 esc(&mime),
                 m.loop_play
-            )
+            );
+            frame(&no_paint(auto), &common, &x, &plugin, &desc, &events)
         }
         ShapeKind::Opaque { preview: Some(p), .. } | ShapeKind::Model3d { poster: Some(p), .. } => {
             let pic = Shape {
@@ -135,7 +127,10 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
             shape(w, auto, ctx, pg, &pic, depth + 1)
         }
         ShapeKind::Opaque { .. } | ShapeKind::Model3d { .. } => String::new(),
-        ShapeKind::Chart(c) => super::chart::frame(w, auto, ctx, &x, c, &common),
+        ShapeKind::Chart(c) => {
+            let object = super::chart::object(w, ctx, &x, c);
+            frame(&no_paint(auto), &common, &x, &object, &desc, &events)
+        }
         ShapeKind::Ink { strokes } => {
             // The strokes in a group that carries the ink's name, id, visibility and actions.
             let mut out = String::new();
@@ -171,14 +166,18 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
 /// An autoshape, text box, line or connector.
 #[allow(clippy::too_many_arguments)]
 fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape, x: &Xfrm, common: &str, desc: &str, events: &str) -> String {
-    let (fill, ph_fill) = resolve::fill(ctx, s);
+    let (fill, ph_fill) = match resolve::fill(ctx, s) {
+        // Filled with the page's background: that fill, here.
+        (Some(Fill::Background), _) => (Some(pg.background.0.clone()), pg.background.1),
+        f => f,
+    };
     let (line, ph_line) = resolve::line(ctx, s);
     let (effects, ph_fx) = resolve::effects(ctx, s);
     let body = resolve::body(ctx, s);
     let fill = fill.unwrap_or(Fill::None);
     let mut g = fill_attrs(w, ctx, &fill, ph_fill);
     g.push_str(&line_attrs(w, ctx, &line, ph_line));
-    g.push_str(&shadow_attrs_ph(ctx, effects.as_ref(), ph_fx));
+    g.push_str(&shadow_attrs(ctx, effects.as_ref(), ph_fx));
     g.push_str(&body_attrs(&body));
     // Text columns.
     let columns = match body.columns.filter(|n| *n > 1) {
@@ -189,9 +188,23 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
     let class = ph.and_then(class_of);
     let outline = matches!(ph, Some(PhType::Body | PhType::Obj));
     let text = text::body(w, auto, ctx, pg, s, outline && class.is_some());
-    // Straight lines and connectors are written by their end points; bent and curved ones keep
-    // their outline as a custom shape.
+    // Straight lines and connectors are written by their end points; bent and curved connectors
+    // by their route.
     let straight = matches!(s.geom.preset_name(), Some("line" | "straightConnector1"));
+    // Where a connector is glued (our sites run top, left, bottom, right; LibreOffice's glue
+    // points top, right, bottom, left).
+    let glue = |start: &Option<(deckcraft_model::ShapeId, u32)>, end: &Option<(deckcraft_model::ShapeId, u32)>| {
+        let mut g = String::new();
+        for (k, e) in [("start", start), ("end", end)] {
+            if let Some((id, site)) = e
+                && let Some(target) = pg.id(*id, None)
+            {
+                let pt = crate::GLUE_POINTS.iter().position(|s| s == site).unwrap_or(0);
+                let _ = write!(g, r#" draw:{k}-shape="{target}" draw:{k}-glue-point="{pt}""#);
+            }
+        }
+        g
+    };
     // Placeholders keep their class so LibreOffice treats them as title/outline objects.
     let (style_attr, class_attr) = match class {
         Some(c) => {
@@ -221,20 +234,7 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
             (x1, y1, x2, y2) = (a.x, a.y, b.x, b.y);
         }
         let (el, glue) = match &s.kind {
-            ShapeKind::Connector { start, end } => {
-                // A straight connector, glued where it was (our sites run top, left, bottom, right;
-                // LibreOffice's glue points top, right, bottom, left).
-                let mut g = String::from(r#" draw:type="line""#);
-                for (k, e) in [("start", start), ("end", end)] {
-                    if let Some((id, site)) = e
-                        && let Some(target) = pg.id(*id, None)
-                    {
-                        let pt = crate::GLUE_POINTS.iter().position(|s| s == site).unwrap_or(0);
-                        let _ = write!(g, r#" draw:{k}-shape="{target}" draw:{k}-glue-point="{pt}""#);
-                    }
-                }
-                ("draw:connector", g)
-            }
+            ShapeKind::Connector { start, end } => ("draw:connector", format!(r#" draw:type="line"{}"#, glue(start, end))),
             _ => ("draw:line", String::new()),
         };
         return format!(
@@ -244,6 +244,29 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
             cm(x2),
             cm(y2)
         );
+    }
+    if let ShapeKind::Connector { start, end } = &s.kind {
+        // A bent or curved connector: its route on the page (1/100 mm, no view box), from its
+        // first point to its last.
+        let mut route = BezPath::new();
+        for sp in shape_geometry(s, x.w.max(1e-3), x.h.max(1e-3)).paths {
+            route.extend(sp.path);
+        }
+        route.apply_affine(Affine::scale(2540.0 / 72.0) * x.affine());
+        let ends = route.elements().first().zip(route.elements().last()).and_then(|(a, b)| Some((a.end_point()?, b.end_point()?)));
+        if let Some((a, b)) = ends {
+            let kind = if s.geom.preset_name().is_some_and(|n| n.starts_with("curved")) { "curve" } else { "standard" };
+            let pt = |v: f64| cm(v * 72.0 / 2540.0);
+            return format!(
+                r#"<draw:connector{style_attr}{common} draw:type="{kind}"{} svg:x1="{}" svg:y1="{}" svg:x2="{}" svg:y2="{}" svg:d="{}">{text}{desc}{events}</draw:connector>"#,
+                glue(start, end),
+                pt(a.x),
+                pt(a.y),
+                pt(b.x),
+                pt(b.y),
+                crate::geometry::path_d(&route)
+            );
+        }
     }
     let is_frame = (s.text_box || class.is_some()) && matches!(&s.geom, Geom::Preset { name, .. } if name == "rect");
     let pos = position(x);
@@ -499,12 +522,7 @@ pub fn fill_attrs(w: &mut Writer, ctx: &Ctx, f: &Fill, ph: Option<Rgba>) -> Stri
                 return s;
             }
             let Some(href) = w.media_path(pf.media) else { return r#" draw:fill="none""#.into() };
-            let name = w.named.def(
-                "draw:fill-image",
-                "Bitmap",
-                &format!(r#"xlink:href="{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad""#, esc(&href)),
-                "",
-            );
+            let name = w.named.def("draw:fill-image", "Bitmap", &embed(&href), "");
             let repeat = match pf.mode {
                 PictureMode::Stretch { .. } => "stretch",
                 PictureMode::Tile { .. } => "repeat",
@@ -596,26 +614,10 @@ pub fn line_attrs(w: &mut Writer, ctx: &Ctx, l: &Line, ph: Option<Rgba>) -> Stri
         let _ = write!(s, r#" svg:stroke-opacity="{}""#, pct(a));
     }
     if let Some(j) = l.join {
-        let _ = write!(
-            s,
-            r#" draw:stroke-linejoin="{}""#,
-            match j {
-                LineJoin::Round => "round",
-                LineJoin::Bevel => "bevel",
-                LineJoin::Miter => "miter",
-            }
-        );
+        let _ = write!(s, r#" draw:stroke-linejoin="{}""#, vocab::write(vocab::LINE_JOINS, &j).unwrap_or("round"));
     }
     if let Some(cap) = l.cap {
-        let _ = write!(
-            s,
-            r#" svg:stroke-linecap="{}""#,
-            match cap {
-                LineCap::Flat => "butt",
-                LineCap::Round => "round",
-                LineCap::Square => "square",
-            }
-        );
+        let _ = write!(s, r#" svg:stroke-linecap="{}""#, vocab::write(vocab::LINE_CAPS, &cap).unwrap_or("butt"));
     }
     for (end, key) in [(&l.head, "start"), (&l.tail, "end")] {
         let Some(e) = end else { continue };
@@ -641,11 +643,23 @@ pub fn line_attrs(w: &mut Writer, ctx: &Ctx, l: &Line, ph: Option<Rgba>) -> Stri
     s
 }
 
-fn shadow_attrs(ctx: &Ctx, e: Option<&Effects>) -> String {
-    shadow_attrs_ph(ctx, e, None)
+/// A `draw:frame` around `inner` (a picture, table, media, chart): its style, the shape's common
+/// attributes, its position (rotation included), alt text and click action.
+fn frame(style: &str, common: &str, x: &Xfrm, inner: &str, desc: &str, events: &str) -> String {
+    format!(r#"<draw:frame draw:style-name="{style}"{common}{}>{inner}{desc}{events}</draw:frame>"#, position(x))
 }
 
-fn shadow_attrs_ph(ctx: &Ctx, e: Option<&Effects>, ph: Option<Rgba>) -> String {
+/// The graphic style of a frame that paints nothing itself.
+pub(crate) fn no_paint(auto: &mut Auto) -> String {
+    auto.style("graphic", "gr", Some("standard"), r#"<style:graphic-properties draw:fill="none" draw:stroke="none"/>"#)
+}
+
+/// The attributes of an embedded package part (`xlink:href` …).
+pub(crate) fn embed(href: &str) -> String {
+    format!(r#"xlink:href="{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad""#, esc(href))
+}
+
+fn shadow_attrs(ctx: &Ctx, e: Option<&Effects>, ph: Option<Rgba>) -> String {
     let Some(sh) = e.and_then(|e| e.outer_shadow.as_ref()) else { return r#" draw:shadow="hidden""#.into() };
     let (c, a) = color_alpha(ctx, &sh.color, ph);
     let dx = sh.dist * sh.dir.to_radians().cos();
@@ -661,21 +675,25 @@ fn shadow_attrs_ph(ctx: &Ctx, e: Option<&Effects>, ph: Option<Rgba>) -> String {
     s
 }
 
-fn body_attrs(b: &BodyProps) -> String {
-    let mut s = format!(
+/// A text body's insets as `fo:padding-*` (the model's defaults where unset).
+fn padding_attrs(b: &BodyProps) -> String {
+    format!(
         r#" fo:padding-left="{}" fo:padding-top="{}" fo:padding-right="{}" fo:padding-bottom="{}""#,
         cm(b.inset_l.unwrap_or(7.2)),
         cm(b.inset_t.unwrap_or(3.6)),
         cm(b.inset_r.unwrap_or(7.2)),
         cm(b.inset_b.unwrap_or(3.6))
-    );
-    let anchor = match b.anchor.unwrap_or(Anchor::Top) {
-        Anchor::Top => "top",
-        Anchor::Middle => "middle",
-        Anchor::Bottom => "bottom",
-        Anchor::Justified | Anchor::Distributed => "justify",
-    };
-    let _ = write!(s, r#" draw:textarea-vertical-align="{anchor}""#);
+    )
+}
+
+/// A text body's vertical anchor as `draw:textarea-vertical-align`.
+fn anchor_attr(b: &BodyProps) -> String {
+    format!(r#" draw:textarea-vertical-align="{}""#, vocab::write(vocab::ANCHORS, &b.anchor.unwrap_or(Anchor::Top)).unwrap_or("top"))
+}
+
+fn body_attrs(b: &BodyProps) -> String {
+    let mut s = padding_attrs(b);
+    s.push_str(&anchor_attr(b));
     if b.anchor_ctr == Some(true) {
         s.push_str(r#" draw:textarea-horizontal-align="center""#);
     } else {
@@ -690,10 +708,8 @@ fn body_attrs(b: &BodyProps) -> String {
     if b.wrap == Some(false) && matches!(b.autofit, Some(AutoFit::Shape)) {
         s.push_str(r#" draw:auto-grow-width="true""#);
     }
-    match b.vert {
-        Some(TextDir::EaVertical | TextDir::Vertical | TextDir::MongolianVertical) => s.push_str(r#" style:writing-mode="tb-rl""#),
-        Some(TextDir::Vertical270) => s.push_str(r#" style:writing-mode="tb-lr""#),
-        _ => {}
+    if let Some(m) = b.vert.as_ref().and_then(|v| vocab::write(vocab::WRITING_MODES, v)) {
+        let _ = write!(s, r#" style:writing-mode="{m}""#);
     }
     s
 }
@@ -789,20 +805,8 @@ fn table(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, t: &Table) ->
             }
             let body = deckcraft_render::table_cell_body(ctx, t, ri, ci, cell);
             let b = &body.body;
-            let _ = write!(
-                cp,
-                r#" fo:padding-left="{}" fo:padding-top="{}" fo:padding-right="{}" fo:padding-bottom="{}""#,
-                cm(b.inset_l.unwrap_or(7.2)),
-                cm(b.inset_t.unwrap_or(3.6)),
-                cm(b.inset_r.unwrap_or(7.2)),
-                cm(b.inset_b.unwrap_or(3.6))
-            );
-            let anchor = match b.anchor.unwrap_or(Anchor::Top) {
-                Anchor::Middle => "middle",
-                Anchor::Bottom => "bottom",
-                _ => "top",
-            };
-            let _ = write!(g, r#" draw:textarea-vertical-align="{anchor}""#);
+            cp.push_str(&padding_attrs(b));
+            g.push_str(&anchor_attr(b));
             let cs = auto.style("table-cell", "ce", None, &format!("<style:graphic-properties{g}/><style:table-cell-properties{cp}/>"));
             let shape = deckcraft_model::Shape::table_cell(body.clone());
             let text = text::body(w, auto, ctx, pg, &shape, false);
@@ -889,7 +893,12 @@ pub fn presentation_styles(w: &mut Writer, ctx: &Ctx, name: &str) -> String {
 
 /// A master page: background, the master's and layout's graphics, and the placeholders.
 pub fn master_page(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str, layout: Option<&Layout>) -> String {
-    let pg = PageCtx::new(name, format!("{name}-"), true);
+    let mut pg = PageCtx::new(name, format!("{name}-"), true, resolve::background(ctx, None));
+    // Connectors on the master and the layout glue to shapes there.
+    pg.refer(w, &ctx.master.shapes, &[]);
+    if let Some(l) = layout {
+        pg.refer(w, &l.shapes, &[]);
+    }
     let (bg, ph) = resolve::background(ctx, None);
     let bgx = fill_attrs(w, ctx, &bg, ph);
     let dp = auto.style("drawing-page", "dp", None, &format!(r#"<style:drawing-page-properties{bgx} draw:background-size="border"/>"#));

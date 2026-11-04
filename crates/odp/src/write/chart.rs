@@ -8,7 +8,7 @@ use deckcraft_model::chart::{Chart, ChartType};
 use deckcraft_model::resolve::Ctx;
 use deckcraft_model::style::Fill;
 
-use super::{Auto, Writer};
+use super::Writer;
 use crate::dom::esc;
 use crate::units::{cm, hex, pt, trim};
 
@@ -43,8 +43,8 @@ fn fill_color(ctx: &Ctx, f: Option<&Fill>, i: usize) -> Rgba {
     }
 }
 
-/// A `draw:frame` holding the chart, and the chart document in the package.
-pub fn frame(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, x: &Xfrm, c: &Chart, common: &str) -> String {
+/// The `draw:object` of a chart frame, with the chart document added to the package.
+pub fn object(w: &mut Writer, ctx: &Ctx, x: &Xfrm, c: &Chart) -> String {
     w.objects += 1;
     let dir = format!("Object {}", w.objects);
     let content = chart_document(ctx, c, x);
@@ -52,12 +52,7 @@ pub fn frame(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, x: &Xfrm, c: &Chart, co
     w.files.push((format!("{dir}/content.xml"), "text/xml".into(), std::sync::Arc::new(content.into_bytes())));
     w.files.push((format!("{dir}/styles.xml"), "text/xml".into(), std::sync::Arc::new(styles.into_bytes())));
     w.dirs.push((format!("{dir}/"), "application/vnd.oasis.opendocument.chart".into()));
-    let st = auto.style("graphic", "gr", Some("standard"), r#"<style:graphic-properties draw:fill="none" draw:stroke="none"/>"#);
-    let pos = format!(r#" svg:x="{}" svg:y="{}" svg:width="{}" svg:height="{}""#, cm(x.x), cm(x.y), cm(x.w.max(1.0)), cm(x.h.max(1.0)));
-    format!(
-        r#"<draw:frame draw:style-name="{st}"{common}{pos}><draw:object xlink:href="./{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"/></draw:frame>"#,
-        esc(&dir)
-    )
+    format!("<draw:object {}/>", super::shapes::embed(&format!("./{dir}")))
 }
 
 fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {

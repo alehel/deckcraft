@@ -475,6 +475,27 @@ fn page_names_are_unique() {
     assert_eq!((names.len(), unique.len()), (3, 3), "{names:?}");
 }
 
+/// An effect on a paragraph deep in nested lists finds that paragraph: ids come from the same
+/// walk that reads the paragraphs.
+#[test]
+fn paragraph_targets_match_deeply_nested_paragraphs() {
+    let depth = 40;
+    let open = "<text:list><text:list-item>".repeat(depth);
+    let close = "</text:list-item></text:list>".repeat(depth);
+    let doc = format!(
+        r#"<office:document {NS} xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0" xmlns:anim="urn:oasis:names:tc:opendocument:xmlns:animation:1.0" xmlns:smil="urn:oasis:names:tc:opendocument:xmlns:smil-compatible:1.0" office:mimetype="application/vnd.oasis.opendocument.presentation"><office:body><office:presentation><draw:page>
+<draw:frame xml:id="f1" svg:width="10cm" svg:height="5cm"><draw:text-box><text:p>top</text:p>{open}<text:p xml:id="deep">deep</text:p>{close}</draw:text-box></draw:frame>
+<anim:par presentation:node-type="timing-root"><anim:seq presentation:node-type="main-sequence"><anim:par smil:begin="indefinite"><anim:par smil:begin="0s"><anim:par smil:begin="0s" presentation:node-type="on-click" presentation:preset-class="entrance" presentation:preset-id="ooo-entrance-appear"><anim:set smil:dur="0.001s" smil:targetElement="deep" smil:attributeName="visibility" smil:to="visible"/></anim:par></anim:par></anim:par></anim:seq></anim:par>
+</draw:page></office:presentation></office:body></office:document>"#
+    );
+    let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+    let s = &p.slides[0];
+    let a = s.animations.first().expect("the effect reads");
+    let text = s.shapes[0].text.as_ref().unwrap();
+    let i = a.paragraph.unwrap() as usize;
+    assert_eq!(text.paragraphs[i].text(), "deep");
+}
+
 /// A presentation without masters still writes a package LibreOffice opens.
 #[test]
 fn a_deck_without_masters_exports() {
@@ -583,7 +604,12 @@ fn charts_round_trip_as_chart_documents() {
             legend: Some("b".into()),
             ..Default::default()
         };
-        let shape = Shape { xfrm: Some(Xfrm::new(50.0, 50.0, 400.0, 300.0)), kind: ShapeKind::Chart(Box::new(chart)), ..Default::default() };
+        let shape = Shape {
+            xfrm: Some(Xfrm::new(50.0, 50.0, 400.0, 300.0)),
+            kind: ShapeKind::Chart(Box::new(chart)),
+            descr: "Sales by quarter".into(),
+            ..Default::default()
+        };
         let p = deck_with(vec![shape]);
         let bytes = deckcraft_odp::export(&p).unwrap();
         let back = deckcraft_odp::import(&bytes).unwrap();
@@ -597,6 +623,8 @@ fn charts_round_trip_as_chart_documents() {
         assert_eq!(c.series[0].name, "North");
         assert_eq!(c.series[0].values, vec![Some(1.0), Some(2.5), None]);
         assert_eq!(c.legend.as_deref(), Some("b"));
+        // Its frame keeps the alt text, like any other frame.
+        assert_eq!(s[0].descr, "Sales by quarter");
     }
 }
 
@@ -848,4 +876,60 @@ fn glued_connectors_round_trip() {
     assert_eq!(*end, Some((s[1].id, 1)));
     let x = s[2].xfrm.unwrap();
     assert!((x.x - 150.0).abs() < 0.01 && (x.w - 150.0).abs() < 0.01 && (x.h - 120.0).abs() < 0.01);
+}
+
+/// A bent connector stays a connector glued at both ends, along the same route.
+#[test]
+fn bent_connectors_keep_their_ends_and_route() {
+    let a = Shape { xfrm: Some(Xfrm::new(50.0, 50.0, 100.0, 60.0)), geom: Geom::preset("rect"), ..Default::default() };
+    let b = Shape { xfrm: Some(Xfrm::new(300.0, 200.0, 100.0, 60.0)), geom: Geom::preset("rect"), ..Default::default() };
+    let mut p = deck_with(vec![a, b]);
+    let ids: Vec<ShapeId> = shapes_of(&p).iter().map(|s| s.id).collect();
+    let c = Shape {
+        id: ShapeId(p.alloc_id().unwrap()),
+        xfrm: Some(Xfrm::new(150.0, 80.0, 150.0, 120.0)),
+        kind: ShapeKind::Connector { start: Some((ids[0], 3)), end: Some((ids[1], 1)) },
+        geom: Geom::preset("bentConnector3"),
+        line: Some(deckcraft_model::style::Line::solid(ColorRef::rgb(Rgba::BLACK), 1.5)),
+        ..Default::default()
+    };
+    Arc::make_mut(&mut p.slides[0]).shapes.push(c);
+    let bytes = deckcraft_odp::export(&p).unwrap();
+    assert!(part(&bytes, "content.xml").contains(r#"draw:type="standard""#));
+    let back = deckcraft_odp::import(&bytes).unwrap();
+    let s = shapes_of(&back);
+    let ShapeKind::Connector { start, end } = &s[2].kind else { panic!("{:?}", s[2].kind) };
+    assert_eq!((*start, *end), (Some((s[0].id, 3)), Some((s[1].id, 1))));
+    let x = s[2].xfrm.unwrap();
+    assert!((x.x - 150.0).abs() < 0.5 && (x.y - 80.0).abs() < 0.5 && (x.w - 150.0).abs() < 0.5 && (x.h - 120.0).abs() < 0.5, "{x:?}");
+}
+
+/// A child filled with its group's fill, and a shape filled with the slide background, keep the
+/// fill they show (ODF groups have no fill, and shapes no "background" fill).
+#[test]
+fn group_and_background_fills_are_written_as_they_show() {
+    let red = Fill::solid(ColorRef::rgb(Rgba::rgb(200, 0, 0)));
+    let green = Fill::solid(ColorRef::rgb(Rgba::rgb(0, 150, 0)));
+    let child = Shape {
+        id: ShapeId(8001),
+        xfrm: Some(Xfrm::new(0.0, 0.0, 50.0, 50.0)),
+        geom: Geom::preset("rect"),
+        fill: Some(Fill::Group),
+        ..Default::default()
+    };
+    let group = Shape {
+        xfrm: Some(Xfrm::new(50.0, 50.0, 50.0, 50.0)),
+        fill: Some(red.clone()),
+        kind: ShapeKind::Group { children: vec![child], child: Xfrm::new(0.0, 0.0, 50.0, 50.0) },
+        ..Default::default()
+    };
+    let knockout =
+        Shape { xfrm: Some(Xfrm::new(200.0, 50.0, 50.0, 50.0)), geom: Geom::preset("rect"), fill: Some(Fill::Background), ..Default::default() };
+    let mut p = deck_with(vec![group, knockout]);
+    Arc::make_mut(&mut p.slides[0]).background = Some(deckcraft_model::Background::Fill { fill: green.clone() });
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    let s = shapes_of(&back);
+    let ShapeKind::Group { children, .. } = &s[0].kind else { panic!("{:?}", s[0].kind) };
+    assert_eq!(children[0].fill, Some(red));
+    assert_eq!(s[1].fill, Some(green));
 }

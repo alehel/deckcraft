@@ -100,8 +100,11 @@ pub fn view_box(s: Option<&str>) -> Option<[f64; 4]> {
 }
 
 /// SVG path data in a view box → one model path in view-box units (origin moved to 0,0).
+/// Longest `svg:d` read.
+pub const MAX_PATH_TEXT: usize = 4 << 20;
+
 pub fn svg_path(d: &str, vb: [f64; 4], closed_fill: bool) -> Option<CustomPath> {
-    if d.len() > 4 * 1024 * 1024 {
+    if d.len() > MAX_PATH_TEXT {
         return None;
     }
     let mut p = BezPath::from_svg(d).ok()?;

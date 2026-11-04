@@ -6,11 +6,10 @@ use std::sync::Arc;
 use deckcraft_color::{ColorTransform, Rgba, SchemeSlot};
 use deckcraft_geom::preset::FillMode;
 use deckcraft_model::style::{
-    ColorRef, Dash, Effects, Fill, Gradient, GradientShape, GradientStop, Line, LineCap, LineEnd, LineJoin, PatternFill, PictureAdjust, PictureFill,
-    PictureMode, Shadow,
+    ColorRef, Dash, Effects, Fill, Gradient, GradientShape, GradientStop, Line, LineEnd, PatternFill, PictureAdjust, PictureFill, PictureMode, Shadow,
 };
 use deckcraft_model::table::{Cell, Row, Table};
-use deckcraft_model::text::{Action, Align, Anchor, AutoFit, BodyProps, LevelStyle, ListStyle, Paragraph, TextBody, TextDir};
+use deckcraft_model::text::{Action, Align, Anchor, AutoFit, BodyProps, LevelStyle, ListStyle, Paragraph, TextBody};
 use deckcraft_model::{
     Background, CustomPath, Geom, LayoutType, MediaId, PhType, Placeholder, Presentation, Shape, ShapeId, ShapeKind, Size, Slide, SlideId, Xfrm,
     defaults,
@@ -22,7 +21,7 @@ use crate::geometry;
 use crate::package::Package;
 use crate::styles::{Props, Scope, Store, Style};
 use crate::text::{self, TextCtx};
-use crate::units;
+use crate::{units, vocab};
 
 /// Deepest element nesting followed (groups in groups …).
 pub const MAX_DEPTH: usize = 128;
@@ -108,6 +107,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         shapes: 0,
         master_index: HashMap::new(),
         page_names: HashMap::new(),
+        para_ids: vec![],
         package_media: HashMap::new(),
         targets: HashMap::new(),
         glue: vec![],
@@ -176,6 +176,8 @@ struct Reader<'a> {
     master_index: HashMap<String, usize>,
     /// Page names (`draw:name`) → slide ids, for `#name` links.
     page_names: HashMap<String, SlideId>,
+    /// The ids of the paragraphs of the text body read last.
+    para_ids: Vec<Option<String>>,
     /// Package parts already added as media, by reference: each part is copied once.
     package_media: HashMap<String, MediaId>,
     /// Element ids on the page being read (shapes and paragraphs), for its animations.
@@ -296,13 +298,10 @@ impl Reader<'_> {
         master.title_style = ListStyle::default();
         master.title_style.set(0, self.level_style(&title_style, scope, 0, false));
         master.body_style = ListStyle::default();
-        for lv in 0..9u8 {
-            let st = self.store.resolve(scope, "presentation", Some(&format!("{name}-outline{}", lv + 1)));
-            let mut s = st.clone();
-            if s.list.is_none() {
-                s.list.clone_from(&outline_style.list);
-            }
-            master.body_style.set(lv, self.level_style(&s, scope, lv, true));
+        // The same levels an outline placeholder on a slide reads.
+        for (lv, s) in self.store.outline_levels(scope, &name, None, &outline_style).iter().enumerate().take(9) {
+            let lv = lv as u8;
+            master.body_style.set(lv, self.level_style(s, scope, lv, true));
         }
         let bg = master.background.as_ref().and_then(background_rgb).unwrap_or(Rgba::WHITE);
         let ctx = Ctx { scope, master: name.clone(), bg, title_slide: false };
@@ -616,6 +615,8 @@ impl Reader<'_> {
             return None;
         }
         self.shapes += 1;
+        // Ids of a body read for a shape that was then dropped don't belong to this one.
+        self.para_ids.clear();
         let (style, presentation) = self.shape_style(e, ctx);
         let g = &style.graphic;
         let mut s = Shape {
@@ -677,36 +678,41 @@ impl Reader<'_> {
                 s.fill = Some(Fill::None);
                 s.text = Some(self.text_body(&tcx, e, g));
             }
-            "draw:polyline" | "draw:polygon" | "draw:path" | "draw:connector" => {
+            "draw:connector" => {
+                // Glued to the shapes at its ends, whatever its route.
+                s.kind = ShapeKind::Connector { start: None, end: None };
+                s.fill = Some(Fill::None);
+                let glue = |k: &str, g: &str| attr(e, k).map(|id| (id.to_string(), attr(e, g).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0)));
+                self.glue.push((s.id, glue("draw:start-shape", "draw:start-glue-point"), glue("draw:end-shape", "draw:end-glue-point")));
+                let d = attr(e, "svg:d").filter(|_| attr(e, "draw:type") != Some("line"));
+                match (d, attr(e, "svg:viewBox")) {
+                    // Straight: its end points.
+                    (None, _) => {
+                        s.xfrm = Some(line_xfrm(e));
+                        s.geom = Geom::preset("straightConnector1");
+                    }
+                    // A routed path in page coordinates (no view box of its own).
+                    (Some(_), None) => return self.connector_from_page_path(s, e),
+                    (Some(d), Some(vb)) => {
+                        let x = s.xfrm.unwrap_or_default();
+                        let vb = geometry::view_box(Some(vb)).unwrap_or([0.0, 0.0, x.w.max(1e-6), x.h.max(1e-6)]);
+                        s.geom = Geom::Custom { paths: vec![geometry::svg_path(d, vb, false)?] };
+                    }
+                }
+                s.text = Some(self.text_body(&tcx, e, g));
+            }
+            "draw:polyline" | "draw:polygon" | "draw:path" => {
                 let x = s.xfrm.unwrap_or_default();
                 let vb = geometry::view_box(attr(e, "svg:viewBox")).unwrap_or([0.0, 0.0, x.w.max(1e-6), x.h.max(1e-6)]);
                 let path = match name {
                     "draw:polyline" => attr(e, "draw:points").and_then(|p| geometry::points_path(p, vb, false)),
                     "draw:polygon" => attr(e, "draw:points").and_then(|p| geometry::points_path(p, vb, true)),
-                    _ => attr(e, "svg:d").and_then(|d| geometry::svg_path(d, vb, name == "draw:path")),
+                    _ => attr(e, "svg:d").and_then(|d| geometry::svg_path(d, vb, true)),
                 };
-                let straight = attr(e, "draw:type") == Some("line");
-                if name == "draw:connector" && (path.is_none() || straight) {
-                    // A straight connector: its end points, and the shapes it is glued to.
-                    s.xfrm = Some(line_xfrm(e));
-                    s.kind = ShapeKind::Connector { start: None, end: None };
-                    let glue = |k: &str, g: &str| attr(e, k).map(|id| (id.to_string(), attr(e, g).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0)));
-                    self.glue.push((s.id, glue("draw:start-shape", "draw:start-glue-point"), glue("draw:end-shape", "draw:end-glue-point")));
-                    s.geom = Geom::preset("straightConnector1");
+                if name == "draw:polyline" {
                     s.fill = Some(Fill::None);
-                } else {
-                    let path = path?;
-                    if name == "draw:polyline" || name == "draw:connector" {
-                        s.fill = Some(Fill::None);
-                    }
-                    if name == "draw:connector" {
-                        // A connector's svg:d is in page coordinates (no view box of its own).
-                        if attr(e, "svg:viewBox").is_none() {
-                            return self.connector_from_page_path(s, e);
-                        }
-                    }
-                    s.geom = Geom::Custom { paths: vec![path] };
                 }
+                s.geom = Geom::Custom { paths: vec![path?] };
                 s.text = Some(self.text_body(&tcx, e, g));
             }
             "draw:custom-shape" => self.custom_shape(e, &mut s, &tcx, g),
@@ -739,9 +745,8 @@ impl Reader<'_> {
         if let Some(click) = self.event_listener(e) {
             s.click = Some(click);
         }
-        // Paragraph ids, for effects that animate one paragraph.
-        let container = kid(e, "draw:text-box").unwrap_or(e);
-        for (i, id) in text::paragraph_ids(container).into_iter().enumerate() {
+        // Paragraph ids the text body had, for effects that animate one paragraph.
+        for (i, id) in std::mem::take(&mut self.para_ids).into_iter().enumerate() {
             if let Some(id) = id {
                 self.targets.insert(id, (s.id, Some(i as u32)));
             }
@@ -890,7 +895,7 @@ impl Reader<'_> {
 
     /// A connector whose `svg:d` is in page coordinates: a custom path in its own bounding box.
     fn connector_from_page_path(&mut self, mut s: Shape, e: &El) -> Option<Shape> {
-        let d = attr(e, "svg:d")?;
+        let d = attr(e, "svg:d").filter(|d| d.len() <= geometry::MAX_PATH_TEXT)?;
         // svg:d without a view box is in 1/100 mm.
         let mut p = kurbo::BezPath::from_svg(d).ok()?;
         p.apply_affine(kurbo::Affine::scale(72.0 / 2540.0));
@@ -927,18 +932,13 @@ impl Reader<'_> {
             "show" => return text::hyperlink(attr(l, "xlink:href").unwrap_or("")),
             _ => return None,
         };
-        Some(deckcraft_model::text::Hyperlink {
-            action,
-            tooltip: String::new(),
-            highlight_click: false,
-            sound: None,
-            stop_sound: false,
-            zoom_return: None,
-        })
+        Some(text::link(action))
     }
 
-    fn text_body(&self, cx: &TextCtx, container: &El, g: &Props) -> TextBody {
-        let mut paragraphs = text::paragraphs(cx, container);
+    /// A shape's text; the paragraphs' ids wait in `para_ids` for the shape to register them.
+    fn text_body(&mut self, cx: &TextCtx, container: &El, g: &Props) -> TextBody {
+        let (mut paragraphs, ids): (Vec<Paragraph>, Vec<Option<String>>) = text::paragraphs_with_ids(cx, container).into_iter().unzip();
+        self.para_ids = ids;
         let custom_shape = container.name == "draw:custom-shape";
         let body = body_props(g, custom_shape);
         // A text block pushed to the right of the frame (centred is `anchor_ctr`): we have no
@@ -1248,18 +1248,8 @@ impl Reader<'_> {
         // A zero width is a hairline.
         let width = g.get("svg:stroke-width").and_then(|v| units::length(v)).filter(|w| *w > 0.0).unwrap_or(0.5).min(1000.0);
         let mut l = Line::solid(color, width);
-        l.join = g.get("draw:stroke-linejoin").and_then(|j| match j.as_str() {
-            "miter" => Some(LineJoin::Miter),
-            "bevel" => Some(LineJoin::Bevel),
-            "round" => Some(LineJoin::Round),
-            _ => None,
-        });
-        l.cap = g.get("svg:stroke-linecap").and_then(|c| match c.as_str() {
-            "round" => Some(LineCap::Round),
-            "square" => Some(LineCap::Square),
-            "butt" => Some(LineCap::Flat),
-            _ => None,
-        });
+        l.join = g.get("draw:stroke-linejoin").and_then(|j| vocab::read(vocab::LINE_JOINS, j));
+        l.cap = g.get("svg:stroke-linecap").and_then(|c| vocab::read(vocab::LINE_CAPS, c));
         if stroke == "dash" {
             // A dash with no definition is LibreOffice's default dashing.
             l.dash = Some(match g.get("draw:stroke-dash").and_then(|n| self.store.dashes.get(n)) {
@@ -1499,13 +1489,7 @@ fn ph_kind(class: &str) -> Option<PhType> {
 }
 
 fn anchor(v: &str) -> Option<Anchor> {
-    Some(match v {
-        "top" => Anchor::Top,
-        "middle" => Anchor::Middle,
-        "bottom" => Anchor::Bottom,
-        "justify" => Anchor::Justified,
-        _ => return None,
-    })
+    vocab::read(vocab::ANCHORS, v)
 }
 
 fn body_props(g: &Props, custom_shape: bool) -> BodyProps {
@@ -1538,10 +1522,8 @@ fn body_props(g: &Props, custom_shape: bool) -> BodyProps {
     if g.get("style:shrink-to-fit").map(String::as_str) == Some("true") || g.get("draw:fit-to-size").is_some_and(|v| v == "shrink-to-fit") {
         b.autofit = Some(AutoFit::Shrink { font_scale: None, line_reduction: 0.0 });
     }
-    match g.get("style:writing-mode").map(String::as_str) {
-        Some("tb-rl" | "tb") => b.vert = Some(TextDir::EaVertical),
-        Some("tb-lr") => b.vert = Some(TextDir::Vertical270),
-        _ => {}
+    if let Some(v) = g.get("style:writing-mode").and_then(|m| vocab::read(vocab::WRITING_MODES, m)) {
+        b.vert = Some(v);
     }
     b
 }
@@ -1576,10 +1558,7 @@ fn custom_geom(eg: &geometry::Enhanced) -> Geom {
         "ellipse" | "mso-spt3" => return Geom::preset("ellipse"),
         _ => {}
     }
-    if eg.paths.is_empty() {
-        // No path draws nothing (the text, if any, still shows).
-        return Geom::Custom { paths: vec![] };
-    }
+    // No path draws nothing (the text, if any, still shows).
     Geom::Custom { paths: eg.paths.clone() }
 }
 

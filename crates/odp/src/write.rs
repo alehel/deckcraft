@@ -159,12 +159,14 @@ pub(crate) struct PageCtx {
     /// A master page: its date fields are the slides' date-time field, which each slide shows
     /// or hides.
     pub is_master: bool,
+    /// The page's background, for shapes filled with it (`useBgFill`).
+    pub background: (deckcraft_model::style::Fill, Option<deckcraft_color::Rgba>),
     ids: std::collections::HashSet<(u32, Option<u32>)>,
 }
 
 impl PageCtx {
-    pub fn new(master: &str, tag: String, is_master: bool) -> Self {
-        PageCtx { master: master.to_string(), tag, is_master, ids: Default::default() }
+    pub fn new(master: &str, tag: String, is_master: bool, background: (deckcraft_model::style::Fill, Option<deckcraft_color::Rgba>)) -> Self {
+        PageCtx { master: master.to_string(), tag, is_master, background, ids: Default::default() }
     }
 
     /// The `xml:id` of a shape (or one of its paragraphs), when something refers to it and it is
@@ -334,7 +336,6 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         cm(p.notes_size.width.max(1.0)),
         cm(p.notes_size.height.max(1.0)),
     );
-    let fonts = font_decls(&w.fonts, &embedded);
     let styles = format!(
         r##"<?xml version="1.0" encoding="UTF-8"?><office:document-styles {NS}>{fonts}<office:styles>{}<number:date-style style:name="D1" number:automatic-order="true"><number:month number:style="long"/><number:text>/</number:text><number:day number:style="long"/><number:text>/</number:text><number:year/></number:date-style><style:default-style style:family="graphic"><style:graphic-properties svg:stroke-color="#3465a4" draw:fill-color="#729fcf" fo:wrap-option="no-wrap"/><style:paragraph-properties style:writing-mode="lr-tb"/><style:text-properties fo:font-size="18pt" fo:language="en" fo:country="US"/></style:default-style><style:style style:name="standard" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0cm" svg:stroke-color="#3465a4" draw:fill="solid" draw:fill-color="#729fcf" fo:padding-top="0.125cm" fo:padding-bottom="0.125cm" fo:padding-left="0.25cm" fo:padding-right="0.25cm" draw:shadow="hidden"/></style:style>{common}</office:styles><office:automatic-styles>{page_layouts}{}</office:automatic-styles><office:master-styles>{masters}</office:master-styles></office:document-styles>"##,
         w.named.out, sauto.out
@@ -345,10 +346,7 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
     let mut manifest = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?><manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.3"><manifest:file-entry manifest:full-path="/" manifest:version="1.3" manifest:media-type="{mime}"/><manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="styles.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="meta.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="settings.xml" manifest:media-type="text/xml"/>"#
     );
-    for (path, ct) in &w.dirs {
-        let _ = write!(manifest, r#"<manifest:file-entry manifest:full-path="{}" manifest:media-type="{}"/>"#, esc(path), esc(ct));
-    }
-    for (path, ct, _) in &w.files {
+    for (path, ct) in w.dirs.iter().map(|(p, c)| (p, c)).chain(w.files.iter().map(|(p, c, _)| (p, c))) {
         let _ = write!(manifest, r#"<manifest:file-entry manifest:full-path="{}" manifest:media-type="{}"/>"#, esc(path), esc(ct));
     }
     manifest.push_str("</manifest:manifest>");
@@ -523,7 +521,7 @@ fn show_settings(p: &Presentation, names: &HashMap<u32, String>) -> String {
 fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str) -> String {
     let p = w.p;
     let Some(ctx) = Ctx::for_slide(p, s) else { return String::new() };
-    let mut pg = PageCtx::new(master_name, format!("pg{i}"), false);
+    let mut pg = PageCtx::new(master_name, format!("pg{i}"), false, resolve::background(&ctx, Some(s)));
     pg.refer(w, &s.shapes, &s.animations);
     // The page style: background, transition, visibility, footers.
     let mut pp = String::new();

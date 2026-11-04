@@ -41,16 +41,25 @@ struct ListCtx<'a> {
     start: Option<u32>,
 }
 
+/// A paragraph read from a text container, with its `xml:id` (or `text:id`) for animations.
+pub type IdParagraph = (Paragraph, Option<String>);
+
 /// Read the paragraphs of a text container (`draw:text-box`, a shape, a table cell).
 pub fn paragraphs(cx: &TextCtx, container: &El) -> Vec<Paragraph> {
+    paragraphs_with_ids(cx, container).into_iter().map(|(p, _)| p).collect()
+}
+
+/// [`paragraphs`], each with its id.
+pub fn paragraphs_with_ids(cx: &TextCtx, container: &El) -> Vec<IdParagraph> {
     let mut out = vec![];
     let shape_list = cx.levels.first().and_then(|s| s.list.as_ref());
     walk(cx, container, &ListCtx { style: shape_list, depth: 0, bulleted: false, in_list: false, start: None }, &mut out, 0);
     out
 }
 
-fn walk(cx: &TextCtx, el: &El, list: &ListCtx, out: &mut Vec<Paragraph>, guard: usize) {
-    if guard > 64 {
+/// `nesting` counts the elements walked into, to bound hostile nesting.
+fn walk(cx: &TextCtx, el: &El, list: &ListCtx, out: &mut Vec<IdParagraph>, nesting: usize) {
+    if nesting > 64 {
         return;
     }
     for e in el.elements() {
@@ -58,12 +67,12 @@ fn walk(cx: &TextCtx, el: &El, list: &ListCtx, out: &mut Vec<Paragraph>, guard: 
             return;
         }
         match e.name.as_str() {
-            "text:p" | "text:h" => out.push(paragraph(cx, e, list)),
+            "text:p" | "text:h" => out.push((paragraph(cx, e, list), attr(e, "xml:id").or_else(|| attr(e, "text:id")).map(str::to_string))),
             "text:list" => {
                 let own = attr(e, "text:style-name").and_then(|n| cx.store.list_style(cx.scope, n));
                 let style = own.or(list.style);
-                // The outermost list is level 0; each nested list one deeper.
-                let depth = if guard_is_list(el) { (list.depth + 1).min(MAX_LIST_DEPTH - 1) } else { list.depth };
+                // The outermost list is level 0; a list inside a list item one deeper.
+                let depth = if in_list_item(el) { (list.depth + 1).min(MAX_LIST_DEPTH - 1) } else { list.depth };
                 for item in e.elements() {
                     let bulleted = item.name == "text:list-item";
                     if !bulleted && item.name != "text:list-header" {
@@ -72,38 +81,19 @@ fn walk(cx: &TextCtx, el: &El, list: &ListCtx, out: &mut Vec<Paragraph>, guard: 
                     let style = attr(item, "text:style-override").and_then(|n| cx.store.list_style(cx.scope, n)).or(style);
                     let start = attr(item, "text:start-value").and_then(|v| v.parse::<u32>().ok());
                     let inner = ListCtx { style, depth, bulleted, in_list: true, start };
-                    walk(cx, item, &inner, out, guard + 1);
+                    walk(cx, item, &inner, out, nesting + 1);
                 }
             }
             // Text inside other wrappers (sections, soft page breaks) still counts.
-            "text:section" | "text:soft-page-break" => walk(cx, e, list, out, guard + 1),
+            "text:section" | "text:soft-page-break" => walk(cx, e, list, out, nesting + 1),
             _ => {}
         }
     }
 }
 
-/// The `xml:id` (or `text:id`) of each paragraph [`paragraphs`] reads from `container`, in order.
-pub fn paragraph_ids(container: &El) -> Vec<Option<String>> {
-    fn rec(el: &El, out: &mut Vec<Option<String>>, depth: usize) {
-        if depth > 64 || out.len() >= MAX_PARAGRAPHS {
-            return;
-        }
-        for e in el.elements() {
-            match e.name.as_str() {
-                "text:p" | "text:h" => out.push(attr(e, "xml:id").or_else(|| attr(e, "text:id")).map(str::to_string)),
-                "text:list" | "text:list-item" | "text:list-header" | "text:section" | "text:soft-page-break" => rec(e, out, depth + 1),
-                _ => {}
-            }
-        }
-    }
-    let mut out = vec![];
-    rec(container, &mut out, 0);
-    out
-}
-
-/// A `text:list` nested directly in a list item sits one level deeper than its parent list.
-fn guard_is_list(parent: &El) -> bool {
-    parent.name == "text:list-item" || parent.name == "text:list-header"
+/// Is this element a list item (or header), so a list in it is nested?
+fn in_list_item(el: &El) -> bool {
+    el.name == "text:list-item" || el.name == "text:list-header"
 }
 
 /// The level style of a list for level `depth` (0-based): the closest `text:level` at or below.
@@ -322,7 +312,12 @@ pub fn hyperlink(href: &str) -> Option<Hyperlink> {
     } else {
         return None;
     };
-    Some(Hyperlink { action, tooltip: String::new(), highlight_click: false, sound: None, stop_sound: false, zoom_return: None })
+    Some(link(action))
+}
+
+/// A plain link: an action, nothing else (no tooltip, sound or highlight).
+pub fn link(action: Action) -> Hyperlink {
+    Hyperlink { action, tooltip: String::new(), highlight_click: false, sound: None, stop_sound: false, zoom_return: None }
 }
 
 /// Automatic text colour over `behind`: white on a dark colour, else black (LibreOffice's rule).
@@ -390,12 +385,7 @@ pub fn para_props(p: &Props, tabs: Option<&El>) -> ParaProps {
             .take(64)
             .filter_map(|s| {
                 let pos = attr(s, "style:position").and_then(units::length)?;
-                let align = match attr(s, "style:type").unwrap_or("left") {
-                    "right" => "r",
-                    "center" => "ctr",
-                    "char" => "dec",
-                    _ => "l",
-                };
+                let align = crate::vocab::read(crate::vocab::TAB_TYPES, attr(s, "style:type").unwrap_or("left")).unwrap_or("l");
                 Some(TabStop { pos, align: align.into() })
             })
             .collect();

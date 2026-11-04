@@ -224,10 +224,7 @@ fn list_level(w: &mut Writer, ctx: Option<&Ctx>, level: usize, pp: &ParaProps, b
         }
         Bullet::Picture { .. } => match picture {
             Some(href) => {
-                format!(
-                    r#"<text:list-level-style-image text:level="{level}" xlink:href="{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad">{props}</text:list-level-style-image>"#,
-                    esc(&href)
-                )
+                format!(r#"<text:list-level-style-image text:level="{level}" {}>{props}</text:list-level-style-image>"#, super::shapes::embed(&href))
             }
             None => format!(
                 r#"<text:list-level-style-bullet text:level="{level}" text:bullet-char="•">{props}<style:text-properties{tp}/></text:list-level-style-bullet>"#
@@ -378,13 +375,10 @@ fn tab_stops(pp: &ParaProps) -> String {
     let Some(tabs) = &pp.tabs else { return String::new() };
     let mut s = String::from("<style:tab-stops>");
     for t in tabs.iter().take(64) {
-        let kind = match t.align.as_str() {
-            "r" => "right",
-            "ctr" => "center",
-            "dec" => "char",
-            _ => "left",
-        };
-        let _ = write!(s, r#"<style:tab-stop style:position="{}" style:type="{kind}"/>"#, cm(t.pos));
+        let kind = crate::vocab::write(crate::vocab::TAB_TYPES, &t.align.as_str()).unwrap_or("left");
+        // A decimal tab aligns on the decimal point.
+        let ch = if kind == "char" { r#" style:char=".""# } else { "" };
+        let _ = write!(s, r#"<style:tab-stop style:position="{}" style:type="{kind}"{ch}/>"#, cm(t.pos));
     }
     s.push_str("</style:tab-stops>");
     s

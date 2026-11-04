@@ -18,6 +18,7 @@ mod read;
 mod styles;
 mod text;
 mod units;
+mod vocab;
 mod write;
 
 use deckcraft_model::Presentation;

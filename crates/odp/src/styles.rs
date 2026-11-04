@@ -50,31 +50,16 @@ impl Style {
     /// Lay `over` on this style: each property it sets wins; relative font sizes apply to the
     /// size they replace.
     pub fn merge(&mut self, over: &Style) {
-        for (k, v) in &over.graphic {
-            self.graphic.insert(k.clone(), v.clone());
-        }
-        for (k, v) in &over.paragraph {
-            self.paragraph.insert(k.clone(), v.clone());
-        }
+        let lay = |base: &mut Props, over: &Props| base.extend(over.iter().map(|(k, v)| (k.clone(), v.clone())));
+        lay(&mut self.graphic, &over.graphic);
+        lay(&mut self.paragraph, &over.paragraph);
         merge_text(&mut self.text, &over.text);
-        for (k, v) in &over.page {
-            self.page.insert(k.clone(), v.clone());
-        }
-        for (k, v) in &over.cell {
-            self.cell.insert(k.clone(), v.clone());
-        }
-        for (k, v) in &over.column {
-            self.column.insert(k.clone(), v.clone());
-        }
-        for (k, v) in &over.row {
-            self.row.insert(k.clone(), v.clone());
-        }
-        for (k, v) in &over.table {
-            self.table.insert(k.clone(), v.clone());
-        }
-        for (k, v) in &over.chart {
-            self.chart.insert(k.clone(), v.clone());
-        }
+        lay(&mut self.page, &over.page);
+        lay(&mut self.cell, &over.cell);
+        lay(&mut self.column, &over.column);
+        lay(&mut self.row, &over.row);
+        lay(&mut self.table, &over.table);
+        lay(&mut self.chart, &over.chart);
         if over.list.is_some() {
             self.list.clone_from(&over.list);
         }
@@ -299,21 +284,7 @@ impl Store {
 
     /// The style's own properties merged over its parents', without the family default.
     pub fn chain(&self, scope: Scope, family: &str, name: &str) -> Style {
-        let mut chain = vec![];
-        let mut cur = self.lookup(scope, family, name);
-        while let Some(s) = cur {
-            if chain.len() >= MAX_CHAIN {
-                break;
-            }
-            chain.push(s);
-            // Parents are common styles (an automatic style can't be a parent).
-            cur = s.parent.as_deref().and_then(|p| self.common.get(&(family.to_string(), p.to_string())));
-        }
-        let mut out = Style { family: family.to_string(), ..Default::default() };
-        for s in chain.iter().rev() {
-            out.merge(s);
-        }
-        out
+        self.chain_until(scope, family, name, &|_| false)
     }
 
     /// The named style merged with its parents up to (not including) the first one `stop`
@@ -326,6 +297,7 @@ impl Store {
                 break;
             }
             chain.push(s);
+            // Parents are common styles (an automatic style can't be a parent).
             cur = s.parent.as_deref().filter(|p| !stop(p)).and_then(|p| self.common.get(&(family.to_string(), p.to_string())));
         }
         let mut out = Style { family: family.to_string(), ..Default::default() };
@@ -347,6 +319,11 @@ impl Store {
             let s = if self.exists(scope, "presentation", &name) {
                 let mut s = self.resolve(scope, "presentation", Some(&name));
                 s.merge(&own);
+                // A level without a list of its own uses the levels' list (the bullets of every
+                // level live in one list style).
+                if s.list.is_none() {
+                    s.list = out.last().map_or(&resolved.list, |l| &l.list).clone();
+                }
                 s
             } else {
                 out.last().cloned().unwrap_or_else(|| resolved.clone())
