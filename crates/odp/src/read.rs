@@ -102,6 +102,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         charts: HashMap::new(),
         formula_work: geometry::DOCUMENT_WORK,
         cells_left: table::MAX_DOCUMENT_CELLS,
+        plain_left: 16 << 20,
         package_media: parts,
         targets: HashMap::new(),
         glue: vec![],
@@ -120,8 +121,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
     let decls = Decls::read(body);
     // The date format, from a current-date declaration in one of our date styles (named after
     // the format).
-    let ours = |s: &str| s.strip_prefix("datetime").and_then(|n| n.parse::<u8>().ok()).filter(|n| (1..=13).contains(n));
-    if let Some(n) = decls.dates.values().filter(|d| d.0).find_map(|d| d.2.as_deref().and_then(ours)) {
+    if let Some(n) = decls.dates.values().filter(|d| d.0).find_map(|d| d.2.as_deref().and_then(text::date_format_of)) {
         r.p.header_footer.date_format = format!("datetime{n}");
     }
     for (i, page) in kids(body, "draw:page").take(MAX_PAGES).enumerate() {
@@ -152,10 +152,12 @@ const MAX_DECL_TEXT: usize = 1024;
 impl Decls {
     fn read(body: &El) -> Self {
         let mut d = Decls::default();
-        for e in body.elements() {
+        // A page refers to one of each; thousands are a hostile file's.
+        let decls = body.elements().filter(|e| e.name.ends_with("-decl")).take(4096);
+        for e in decls {
             let name = attr(e, "presentation:name").unwrap_or_default().to_string();
             let text = || {
-                let mut t = text::plain_text(e);
+                let mut t = text::plain_text(e, MAX_DECL_TEXT * 4);
                 if let Some((i, _)) = t.char_indices().nth(MAX_DECL_TEXT) {
                     t.truncate(i);
                 }
@@ -199,6 +201,8 @@ struct Reader<'a> {
     formula_work: usize,
     /// Table cells the document has left ([`table::MAX_DOCUMENT_CELLS`] in all).
     cells_left: usize,
+    /// Comment text the document has left, in bytes.
+    plain_left: usize,
     package_media: PartMedia,
     /// Element ids on the page being read (shapes and paragraphs), for its animations.
     targets: crate::anim::Targets,
@@ -456,7 +460,7 @@ impl Reader<'_> {
                 "anim:par" if attr(e, "presentation:node-type") == Some("timing-root") => timing = Some(e),
                 "officeooo:annotation" | "office:annotation" => {
                     if slide.comments.len() < 10_000 {
-                        slide.comments.push(comment(e));
+                        slide.comments.push(comment(e, &mut self.plain_left));
                     }
                 }
                 "anim:par" | "anim:seq" | "office:forms" => {}
@@ -1147,7 +1151,8 @@ fn embedded_fonts(pkg: &Package, store: &Store, p: &mut Presentation, parts: &mu
 }
 
 /// A comment (`officeooo:annotation`): author, initials, date, text and where it is pinned.
-fn comment(e: &El) -> deckcraft_model::Comment {
+/// A comment; its text from what is left of the document's `budget` for such texts.
+fn comment(e: &El, budget: &mut usize) -> deckcraft_model::Comment {
     let t = |n: &str| kid(e, n).map(|c| c.text()).unwrap_or_default();
     let initials = {
         let i = t("meta:creator-initials");
@@ -1157,7 +1162,15 @@ fn comment(e: &El) -> deckcraft_model::Comment {
         author: t("dc:creator"),
         initials,
         date: t("dc:date"),
-        text: kids(e, "text:p").map(text::plain_text).collect::<Vec<_>>().join("\n"),
+        text: kids(e, "text:p")
+            .take(1024)
+            .map(|p| {
+                let t = text::plain_text(p, (*budget).min(1 << 16));
+                *budget = budget.saturating_sub(t.len() + 1);
+                t
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
         x: attr(e, "svg:x").and_then(units::length).unwrap_or(0.0),
         y: attr(e, "svg:y").and_then(units::length).unwrap_or(0.0),
         resolved: attr(e, "loext:resolved") == Some("true"),

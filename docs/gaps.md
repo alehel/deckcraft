@@ -141,8 +141,8 @@ Detail in [file-format-parity.md](file-format-parity.md).
   vertical cell text and the table style's name; the first slide number; "advance on click" off;
   video autoplay; clicks that run a program; percentage paragraph spacing (written in points);
   shrink-to-fit line reduction; pattern fills read back as tiled pictures; a chart's secondary
-  axis and its number formats; the notes page size. LibreOffice itself
-  draws every text shadow grey and re-saves it as `1pt 1pt`, shows filled outlined text filled
+  axis and its number formats; the notes page size; white outlined text (written hollow for
+  LibreOffice) reads back unfilled. LibreOffice itself draws every text shadow grey and re-saves it as `1pt 1pt`, shows filled outlined text filled
   without its outline (white filled text is written hollow so it shows), drops link tooltips,
   keeps the date footer's format only as its own `D1`–style formats, and shows a one-line
   distributed paragraph left-aligned, and when it re-saves a list whose numbering restarts several

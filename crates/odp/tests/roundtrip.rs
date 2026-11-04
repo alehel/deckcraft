@@ -1330,7 +1330,7 @@ fn round_four_fixes_hold() {
     let mut sup = Run::new("2");
     (sup.props.baseline, sup.props.size) = (Some(0.3), Some(20.0));
     let mut minus = Paragraph { runs: vec![Run::new("n")], ..Default::default() };
-    minus.props.bullet = Some(Bullet::AutoNum { scheme: "arabicMinus".into(), start_at: 1 });
+    minus.props.bullet = Some(Bullet::AutoNum { scheme: "arabic2Minus".into(), start_at: 1 });
     let after_break = Paragraph { runs: vec![Run::new("a"), Run { kind: RunKind::Break, ..Run::new("") }, Run::new("  lead")], ..Default::default() };
     let body = TextBody {
         paragraphs: vec![
@@ -1392,7 +1392,7 @@ fn round_four_fixes_hold() {
     assert!(m.kern.is_some_and(|k| k > 0.0));
     let sp = &r.iter().find(|x| x.text == "2").unwrap().props;
     assert!(sp.size.is_some_and(|z| (z - 20.0).abs() < 0.2), "{:?}", sp.size);
-    assert!(matches!(&paras[2].props.bullet, Some(Bullet::AutoNum { scheme, .. }) if scheme == "arabicMinus"));
+    assert!(matches!(&paras[2].props.bullet, Some(Bullet::AutoNum { scheme, .. }) if scheme == "arabic2Minus"));
     assert_eq!(paras[3].text(), "a\u{b}  lead");
     let charts: Vec<&Chart> = s.iter().filter_map(|x| if let ShapeKind::Chart(c) = &x.kind { Some(&**c) } else { None }).collect();
     assert_eq!(
@@ -1433,4 +1433,74 @@ fn tables_share_a_budget_and_huge_coordinates_round_trip() {
     let bytes = deckcraft_odp::export(&p).unwrap();
     assert!(part(&bytes, "content.xml").len() < 20 << 20);
     deckcraft_odp::import(&bytes).unwrap();
+}
+
+/// Review, round 5: a single-colour pie recolouring one slice stays single-colour, a scatter series with a
+/// line colour stays unjoined, caps write both attributes (overriding a parent's other one), and a
+/// restart on a deeper level leaves the outer numbering going.
+#[test]
+fn round_five_fixes_hold() {
+    use deckcraft_model::chart::{Chart, ChartType, Series};
+    use deckcraft_model::text::Caps;
+    let red = Fill::solid(ColorRef::rgb(Rgba::rgb(200, 0, 0)));
+    let pie = Chart {
+        kind: ChartType::Pie,
+        vary_colors: false,
+        series: vec![Series {
+            name: "P".into(),
+            values: vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+            fill: Some(Fill::solid(ColorRef::rgb(Rgba::rgb(0, 150, 0)))),
+            point_fills: vec![(1, red.clone())],
+            ..Default::default()
+        }],
+        categories: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+        ..Default::default()
+    };
+    let scatter = Chart {
+        kind: ChartType::Scatter,
+        series: vec![Series {
+            name: "S".into(),
+            x_values: vec![Some(1.0), Some(2.0)],
+            values: vec![Some(1.0), Some(4.0)],
+            line: Some(deckcraft_model::Line { fill: Some(red), ..Default::default() }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let chart = |c: Chart, y: f64| Shape { xfrm: Some(Xfrm::new(20.0, y, 200.0, 100.0)), kind: ShapeKind::Chart(Box::new(c)), ..Default::default() };
+    let mut small = Run::new("small");
+    small.props.caps = Some(Caps::Small);
+    let mut all = Run::new("all");
+    all.props.caps = Some(Caps::All);
+    let num = |lvl: u8, start_at: u32, text: &str| {
+        let mut p = Paragraph { runs: vec![Run::new(text)], ..Default::default() };
+        (p.level, p.props.bullet) = (lvl, Some(Bullet::AutoNum { scheme: "arabicPeriod".into(), start_at }));
+        p
+    };
+    let body = TextBody {
+        paragraphs: vec![Paragraph { runs: vec![small, all], ..Default::default() }, num(0, 1, "one"), num(1, 1, "sub"), num(0, 1, "two")],
+        ..Default::default()
+    };
+    let text = Shape { xfrm: Some(Xfrm::new(20.0, 300.0, 400.0, 200.0)), text_box: true, text: Some(body), ..Default::default() };
+    let p = deck_with(vec![chart(pie, 20.0), chart(scatter, 150.0), text]);
+    let bytes = deckcraft_odp::export(&p).unwrap();
+    let content = part(&bytes, "content.xml");
+    assert!(content.contains(r#"fo:font-variant="small-caps" fo:text-transform="none""#));
+    assert!(content.contains(r#"fo:font-variant="normal" fo:text-transform="uppercase""#));
+    let scatter = &part(&bytes, "Object 2/content.xml");
+    // The series' own graphic properties: its line colour, and still no line.
+    let at = scatter.find(r##"svg:stroke-color="#c80000""##).expect("line colour");
+    let props = &scatter[scatter[..at].rfind('<').unwrap()..at + scatter[at..].find('>').unwrap()];
+    assert!(props.contains(r#"draw:stroke="none""#), "{props}");
+    // The restart on level 2 is on its own list, not the outer one.
+    assert!(content.contains(r#"<text:list text:continue-numbering="false">"#), "{content}");
+    let back = deckcraft_odp::import(&bytes).unwrap();
+    let s = shapes_of(&back);
+    let charts: Vec<&Chart> = s.iter().filter_map(|x| if let ShapeKind::Chart(c) = &x.kind { Some(&**c) } else { None }).collect();
+    assert!(!charts[0].vary_colors);
+    assert_eq!(charts[0].series[0].point_fills.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [1]);
+    assert_eq!(charts[1].kind, ChartType::Scatter);
+    let paras = &s.iter().find_map(|x| x.text.as_ref()).unwrap().paragraphs;
+    let caps: Vec<Option<Caps>> = paras[0].runs.iter().map(|r| r.props.caps).collect();
+    assert_eq!(caps, [Some(Caps::Small), Some(Caps::All)]);
 }

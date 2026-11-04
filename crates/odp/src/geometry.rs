@@ -138,7 +138,7 @@ pub fn path_d(p: &BezPath) -> String {
 
 /// [`path_d`] with coordinates to `places` decimals (the same syntax as an enhanced path's).
 pub fn path_d_at(p: &BezPath, places: usize) -> String {
-    let f = |v: f64| units::trim(v, places);
+    let f = |v: f64| units::coord(v, places);
     let mut out = String::new();
     for el in p.elements() {
         if !out.is_empty() {

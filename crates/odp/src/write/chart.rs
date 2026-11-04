@@ -118,10 +118,6 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
     for (i, s) in series.iter().enumerate() {
         let color = hex(fill_color(ctx, s.fill.as_ref(), i));
         let mut g = format!(r#" draw:fill-color="{color}" svg:stroke-color="{color}""#);
-        // Scatter series are markers, as DeckCraft draws them.
-        if c.kind == ChartType::Scatter {
-            g.push_str(r#" draw:stroke="none""#);
-        }
         if class == "line" || class == "scatter" || class == "radar" {
             let width = s.line.as_ref().and_then(|l| l.width).unwrap_or(2.25);
             let _ = write!(g, r#" svg:stroke-width="{}""#, cm(width));
@@ -131,6 +127,10 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
                 let lc = hex(ctx.color(color, None));
                 g = format!(r#" draw:fill-color="{lc}" svg:stroke-color="{lc}" svg:stroke-width="{}""#, cm(width));
             }
+        }
+        // Scatter series are markers, as DeckCraft draws them.
+        if c.kind == ChartType::Scatter {
+            g.push_str(r#" draw:stroke="none""#);
         }
         let mut chp = String::new();
         if s.data_labels.unwrap_or(c.data_labels) {
@@ -158,10 +158,8 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
             cols.push((s.name.clone(), s.values.clone()));
         }
         let vcol = cols.len();
-        // Points with their own colour: overridden ones, and every slice of a varied pie. The
-        // rest are unstyled runs (`chart:repeated`) that keep the series colour.
-        // A pie not varying its colours styles every slice in the series' colour (left unstyled,
-        // a pie's slices take a colour each).
+        // Points with their own colour, and every slice of a pie (unstyled, a pie's slices take a
+        // colour each); the rest are unstyled runs (`chart:repeated`) in the series' colour.
         let pie = matches!(c.kind, ChartType::Pie | ChartType::Doughnut);
         let varied = c.vary_colors && pie;
         let mut points = String::new();

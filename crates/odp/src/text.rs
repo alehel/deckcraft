@@ -270,14 +270,13 @@ fn inline(cx: &TextCtx, el: &El, text_props: &Props, link: Option<&Hyperlink>, r
                 "text:page-number" | "text:page-count" | "text:date" | "text:time" | "presentation:date-time" => {
                     flush_space(runs, &props, st, link);
                     // A date's format from our date styles (named after it); a time is a time.
-                    let ours = attr(e, "style:data-style-name")
-                        .filter(|s| s.strip_prefix("datetime").is_some_and(|n| n.parse::<u8>().is_ok_and(|n| (1..=13).contains(&n))));
-                    let field = match e.name.as_str() {
-                        "text:page-number" => "slidenum",
-                        "text:page-count" => "slidecount",
-                        _ if ours.is_some() => ours.unwrap_or("datetime1"),
-                        "text:time" => "datetime10",
-                        _ => "datetime1",
+                    let ours = attr(e, "style:data-style-name").and_then(date_format_of);
+                    let field = match (e.name.as_str(), ours) {
+                        ("text:page-number", _) => "slidenum".to_string(),
+                        ("text:page-count", _) => "slidecount".to_string(),
+                        (_, Some(n)) => format!("datetime{n}"),
+                        ("text:time", None) => "datetime10".to_string(),
+                        _ => "datetime1".to_string(),
                     };
                     let shown = e.text();
                     let shown = if shown.is_empty() || shown.starts_with('<') {
@@ -289,7 +288,7 @@ fn inline(cx: &TextCtx, el: &El, text_props: &Props, link: Option<&Hyperlink>, r
                     if let Some(l) = link {
                         p.link = Some(l.clone());
                     }
-                    runs.push(Run { text: shown, props: p, kind: RunKind::Field { field: field.into() } });
+                    runs.push(Run { text: shown, props: p, kind: RunKind::Field { field } });
                     st.at_start = false;
                 }
                 // Change tracking, bookmarks, annotations, notes: their text isn't shown.
@@ -308,19 +307,30 @@ fn inline(cx: &TextCtx, el: &El, text_props: &Props, link: Option<&Hyperlink>, r
     }
 }
 
+/// The PowerPoint date format (1–13) one of our date styles (`datetime4`) stands for.
+pub fn date_format_of(style: &str) -> Option<u8> {
+    let digits = style.strip_prefix("datetime")?;
+    let n = digits.parse::<u8>().ok().filter(|v| (1..=13).contains(v))?;
+    // Exactly as we write it (not `+5` or `07`).
+    (n.to_string() == digits).then_some(n)
+}
+
 /// The plain text of a paragraph-like element as ODF lays it out: white space collapsed to single
 /// spaces (dropped at the start), `text:s` as its spaces, `text:tab` and `text:line-break` as tab
-/// and new line, the text of other elements inside. For texts without formatting (comments,
-/// footer declarations).
-pub fn plain_text(el: &El) -> String {
-    fn walk(el: &El, out: &mut String, pending: &mut bool, depth: usize) {
-        if depth > 64 || out.len() > 1 << 20 {
+/// and new line, the text of other elements inside; at most `max` bytes. For texts without
+/// formatting (comments, footer declarations).
+pub fn plain_text(el: &El, max: usize) -> String {
+    fn walk(el: &El, out: &mut String, pending: &mut bool, depth: usize, max: usize) {
+        if depth > 64 || out.len() >= max {
             return;
         }
         for c in &el.children {
             match c {
                 deckcraft_pptx::XmlNode::Text(t) => {
                     for ch in t.chars() {
+                        if out.len() >= max {
+                            return;
+                        }
                         if ch.is_whitespace() {
                             *pending = true;
                         } else {
@@ -332,8 +342,9 @@ pub fn plain_text(el: &El) -> String {
                     }
                 }
                 deckcraft_pptx::XmlNode::El(e) => {
+                    let room = max.saturating_sub(out.len());
                     let literal = match e.name.as_str() {
-                        "text:s" => Some(" ".repeat(attr(e, "text:c").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).clamp(1, 1000))),
+                        "text:s" => Some(" ".repeat(attr(e, "text:c").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).clamp(1, 1000).min(room))),
                         "text:tab" => Some("\t".to_string()),
                         "text:line-break" => Some("\n".to_string()),
                         _ => None,
@@ -345,14 +356,20 @@ pub fn plain_text(el: &El) -> String {
                             }
                             out.push_str(&s);
                         }
-                        None => walk(e, out, pending, depth + 1),
+                        None => walk(e, out, pending, depth + 1, max),
                     }
                 }
             }
         }
     }
     let mut out = String::new();
-    walk(el, &mut out, &mut false, 0);
+    walk(el, &mut out, &mut false, 0, max);
+    // At a character boundary.
+    let mut end = out.len().min(max);
+    while !out.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.truncate(end);
     out
 }
 
@@ -532,7 +549,8 @@ pub fn num_scheme(fmt: &str, prefix: &str, suffix: &str) -> String {
         ("(", ")") => "ParenBoth",
         (_, ")") => "ParenR",
         (_, ".") => "Period",
-        (_, "-") => "Minus",
+        // DrawingML has a minus suffix for arabic numbers only (`arabic2Minus`, "1-").
+        (_, "-") if core == "arabic" => return "arabic2Minus".into(),
         (_, "") => "Plain",
         _ => "Period",
     };
@@ -657,8 +675,31 @@ pub fn run_props(store: &Store, t: &Props, auto: Rgba) -> RunProps {
 mod tests {
     use super::*;
 
+    /// Regression: the cap was checked per text node, and `text:s` could add up to its count
+    /// past it.
+    #[test]
+    fn plain_text_keeps_to_its_cap() {
+        let el = crate::dom::parse(br#"<p xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">ab<text:s text:c="500"/>cd</p>"#).unwrap();
+        assert_eq!(plain_text(&el, 10).len(), 10);
+        assert_eq!(plain_text(&el, 1 << 20).len(), 504);
+        let wide = crate::dom::parse("<p>ééééé</p>".as_bytes()).unwrap();
+        assert_eq!(plain_text(&wide, 5), "éé");
+    }
+
+    #[test]
+    fn date_formats_are_read_only_as_written() {
+        assert_eq!(date_format_of("datetime4"), Some(4));
+        assert_eq!(date_format_of("datetime13"), Some(13));
+        for bad in ["datetime0", "datetime14", "datetime+5", "datetime07", "datetime", "date4"] {
+            assert_eq!(date_format_of(bad), None, "{bad}");
+        }
+    }
+
     #[test]
     fn number_schemes() {
+        // Only arabic numbers have a minus suffix in DrawingML.
+        assert_eq!(num_scheme("1", "", "-"), "arabic2Minus");
+        assert_eq!(num_scheme("a", "", "-"), "alphaLcPeriod");
         assert_eq!(num_scheme("1", "", "."), "arabicPeriod");
         assert_eq!(num_scheme("a", "(", ")"), "alphaLcParenBoth");
         assert_eq!(num_scheme("I", "", ")"), "romanUcParenR");

@@ -461,6 +461,16 @@ pub fn expand_builds(animations: &[Animation], shapes: &[deckcraft_model::Shape]
         let roles = deckcraft_model::anim::paragraph_build_roles(text);
         let mut tops = 0;
         let limit = deckcraft_model::anim::MAX_BUILD_PARAGRAPHS.min(MAX_EFFECTS - out.len());
+        // A build that doesn't fit the budget whole plays as one block (not just its first part).
+        let needed = roles
+            .iter()
+            .enumerate()
+            .filter(|(i, r)| **r == BuildRole::Top || text.paragraphs.get(*i).is_some_and(deckcraft_model::anim::build_filled))
+            .count();
+        if needed > limit {
+            out.push(Effect { a: Animation { text_build: TextBuild::AsOne, ..a.clone() }, build: None });
+            continue;
+        }
         for (i, role) in roles.iter().enumerate().take(limit) {
             let start = match role {
                 BuildRole::Top => {
@@ -854,6 +864,19 @@ fn effect(out: &mut String, a: &Animation, build: Option<usize>, t: &str, ctx: &
 mod tests {
     use super::*;
     use deckcraft_model::anim::TRANSITIONS as KINDS;
+
+    /// Regression: a by-paragraph build past the page's effect budget kept its first paragraphs
+    /// only; it plays as one block instead.
+    #[test]
+    fn a_build_past_the_budget_plays_whole() {
+        use deckcraft_model::text::{Paragraph, Run, TextBody};
+        let paragraphs = (0..MAX_EFFECTS + 5).map(|i| Paragraph { runs: vec![Run::new(format!("p{i}"))], ..Default::default() }).collect();
+        let shape = deckcraft_model::Shape { text: Some(TextBody { paragraphs, ..Default::default() }), ..Default::default() };
+        let a = Animation { shape: shape.id, text_build: TextBuild::ByParagraph, ..Default::default() };
+        let out = expand_builds(&[a], std::slice::from_ref(&shape));
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].a.text_build, out[0].a.paragraph, out[0].build), (TextBuild::AsOne, None, None));
+    }
 
     #[test]
     fn clocks_and_durations() {

@@ -165,13 +165,15 @@ fn paragraph(
     // Numbering continues from the list before, or (a new run) restarts at the start its level
     // style gives: LibreOffice keeps a run's start there through its own saves, and adds an item's
     // start to it.
-    let continues = !(starts_run && matches!(bullet, Bullet::AutoNum { .. }));
-    let mut open = format!(r#"<text:list text:style-name="{lstyle}" text:continue-numbering="{continues}">"#);
+    // The restart goes on the list of the paragraph's own level: on an outer one it would
+    // restart the levels above too.
+    let restarts = starts_run && matches!(bullet, Bullet::AutoNum { .. });
+    let mut open = format!(r#"<text:list text:style-name="{lstyle}" text:continue-numbering="{}">"#, !(restarts && lv == 0));
     let mut close = String::new();
     for d in 0..=lv {
         let it = if d == lv { item } else { "text:list-item" };
         if d > 0 {
-            open.push_str("<text:list>");
+            open.push_str(if restarts && d == lv { r#"<text:list text:continue-numbering="false">"# } else { "<text:list>" });
         }
         let _ = write!(open, "<{it}>");
         close.insert_str(0, &format!("</{it}>{}", if d > 0 { "</text:list>" } else { "" }));
@@ -478,8 +480,9 @@ pub fn text_attrs(w: &mut Writer, ctx: &Ctx, r: &RunProps) -> String {
         None => {}
     }
     match r.caps {
-        Some(Caps::Small) => a.push_str(r#" fo:font-variant="small-caps""#),
-        Some(Caps::All) => a.push_str(r#" fo:text-transform="uppercase""#),
+        // Both attributes each time, so the paragraph's other one doesn't show through.
+        Some(Caps::Small) => a.push_str(r#" fo:font-variant="small-caps" fo:text-transform="none""#),
+        Some(Caps::All) => a.push_str(r#" fo:font-variant="normal" fo:text-transform="uppercase""#),
         Some(Caps::None) => a.push_str(r#" fo:font-variant="normal" fo:text-transform="none""#),
         None => {}
     }

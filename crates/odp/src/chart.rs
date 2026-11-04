@@ -274,9 +274,10 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
         if attr(s, "chart:attached-axis") == Some("secondary-y") {
             series.secondary_axis = true;
         }
-        // A pie's slices take a colour each, unless every slice is styled in the series' colour.
+        // A pie's slices take a colour each, unless most are styled in the series' colour (a
+        // varied pie matches it on one slice at most; a single-colour one may recolour a few).
         if i == 0 && matches!(c.kind, ChartType::Pie | ChartType::Doughnut) {
-            c.vary_colors = !(series.point_fills.is_empty() && styled_same > 0 && styled_same >= series.values.len());
+            c.vary_colors = styled_same * 2 <= series.values.len();
         }
         c.series.push(series);
     }

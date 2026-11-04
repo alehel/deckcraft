@@ -4,8 +4,14 @@ use deckcraft_color::Rgba;
 
 /// Hundredths of a millimetre (ODF's drawing unit) per point.
 pub const HMM_PER_PT: f64 = 2540.0 / 72.0;
-/// The largest magnitude a number is written with.
-const MAX_WRITTEN: f64 = 1e9;
+/// The largest coordinate or length written (a huge one in a hostile file would otherwise be
+/// written out to hundreds of digits).
+pub const MAX_COORD: f64 = 1e9;
+
+/// A coordinate or length as written: within [`MAX_COORD`].
+pub fn coord(v: f64, places: usize) -> String {
+    trim(if v.is_finite() { v.clamp(-MAX_COORD, MAX_COORD) } else { 0.0 }, places)
+}
 
 /// Points per centimetre.
 pub const PT_PER_CM: f64 = 72.0 / 2.54;
@@ -117,12 +123,12 @@ pub fn color(s: &str) -> Option<Rgba> {
 /// Points as an ODF length in centimetres (`2.54cm`), trimmed.
 pub fn cm(pt: f64) -> String {
     let v = if pt.is_finite() { pt * 2.54 / 72.0 } else { 0.0 };
-    format!("{}cm", trim(v, 4))
+    format!("{}cm", coord(v, 4))
 }
 
 /// Points as `12pt`.
 pub fn pt(v: f64) -> String {
-    format!("{}pt", trim(if v.is_finite() { v } else { 0.0 }, 2))
+    format!("{}pt", coord(v, 2))
 }
 
 pub fn pct(fraction: f64) -> String {
@@ -130,9 +136,7 @@ pub fn pct(fraction: f64) -> String {
 }
 
 pub fn trim(v: f64, places: usize) -> String {
-    // Saturated, so no number written is longer than a few characters (a huge coordinate in a
-    // hostile file would otherwise be written out to hundreds of digits).
-    let v = if v.is_finite() { v.clamp(-MAX_WRITTEN, MAX_WRITTEN) } else { 0.0 };
+    let v = if v.is_finite() { v } else { 0.0 };
     let s = format!("{v:.places$}");
     let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s };
     if s == "-0" { "0".into() } else { s }
@@ -168,6 +172,16 @@ pub fn clock(s: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: clamping lived in `trim`, so chart values past 1e9 (axis bounds, data) were
+    /// written clamped. Only coordinates are.
+    #[test]
+    fn only_coordinates_are_clamped() {
+        assert_eq!(trim(1e12, 2), "1000000000000");
+        assert_eq!(coord(1e12, 2), "1000000000");
+        assert_eq!(coord(-1e300, 2), "-1000000000");
+        assert_eq!(coord(f64::NAN, 2), "0");
+    }
 
     #[test]
     fn lengths_in_every_unit() {

@@ -369,21 +369,21 @@ fn enhanced_geometry(s: &Shape, x: &Xfrm) -> String {
     } else {
         format!(
             r#" draw:text-areas="{} {} {} {}""#,
-            trim(tr.x0 * vw / w, 0),
-            trim(tr.y0 * vh / h, 0),
-            trim(tr.x1 * vw / w, 0),
-            trim(tr.y1 * vh / h, 0)
+            crate::units::coord(tr.x0 * vw / w, 0),
+            crate::units::coord(tr.y0 * vh / h, 0),
+            crate::units::coord(tr.x1 * vw / w, 0),
+            crate::units::coord(tr.y1 * vh / h, 0)
         )
     };
     let (kind, modifiers) = match &s.geom {
-        Geom::Preset { name, adj } => (format!("ooxml-{name}"), adj.iter().map(|a| trim(*a, 3)).collect::<Vec<_>>().join(" ")),
+        Geom::Preset { name, adj } => (format!("ooxml-{name}"), adj.iter().map(|a| crate::units::coord(*a, 3)).collect::<Vec<_>>().join(" ")),
         Geom::Custom { .. } => ("non-primitive".to_string(), String::new()),
     };
     let mods = if modifiers.is_empty() { String::new() } else { format!(r#" draw:modifiers="{modifiers}""#) };
     format!(
         r#"<draw:enhanced-geometry svg:viewBox="0 0 {} {}"{ta} draw:type="{}"{mods} draw:mirror-horizontal="{}" draw:mirror-vertical="{}" draw:enhanced-path="{}"/>"#,
-        trim(vw, 0),
-        trim(vh, 0),
+        crate::units::coord(vw, 0),
+        crate::units::coord(vh, 0),
         esc(&kind),
         x.flip_h,
         x.flip_v,
