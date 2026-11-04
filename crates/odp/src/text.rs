@@ -163,6 +163,10 @@ fn paragraph(cx: &TextCtx, p: &El, list: &ListCtx) -> Paragraph {
     let (mut props, base_run) = props_at(cx, &style, list);
     if !cx.inherit {
         complete(&mut props);
+    } else if !list.in_list {
+        // Out of a list the master level's list indents don't apply.
+        props.margin_left.get_or_insert(0.0);
+        props.indent.get_or_insert(0.0);
     }
     let mut para = Paragraph { level: list.depth.min(8) as u8, props, runs: vec![], def_props: RunProps::default(), end_props: base_run.clone() };
     let mut st = RunState { space_pending: false, at_start: true };

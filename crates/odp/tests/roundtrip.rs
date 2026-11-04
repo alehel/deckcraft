@@ -348,6 +348,27 @@ fn transparent_cells_and_trailing_spaces_read() {
     assert_eq!(sh[1].text.as_ref().unwrap().paragraphs[0].text(), "ends with ");
 }
 
+/// An outline paragraph out of a list has no indent, though its master level's list has one;
+/// level 2 of a list takes the second outline style, not the first.
+#[test]
+fn outline_levels_resolve_from_the_master() {
+    let doc = format!(
+        r#"<office:document {NS} xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0" office:mimetype="application/vnd.oasis.opendocument.presentation"><office:styles>
+<style:style style:name="M-outline1" style:family="presentation"><style:graphic-properties><text:list-style style:name="L"><text:list-level-style-bullet text:level="1" text:bullet-char="●"><style:list-level-properties text:space-before="1cm" text:min-label-width="0.5cm"/></text:list-level-style-bullet><text:list-level-style-bullet text:level="2" text:bullet-char="–"><style:list-level-properties text:space-before="2cm" text:min-label-width="0.5cm"/></text:list-level-style-bullet></text:list-style></style:graphic-properties><style:text-properties fo:font-size="32pt"/></style:style>
+<style:style style:name="M-outline2" style:family="presentation" style:parent-style-name="M-outline1"><style:text-properties fo:font-size="20pt"/></style:style>
+</office:styles><office:master-styles><style:master-page style:name="M"/></office:master-styles><office:body><office:presentation><draw:page draw:master-page-name="M">
+<draw:frame presentation:class="outline" presentation:style-name="M-outline1" svg:x="1cm" svg:y="1cm" svg:width="20cm" svg:height="10cm"><draw:text-box><text:p>plain</text:p><text:list><text:list-item><text:p>one</text:p><text:list><text:list-item><text:p>two</text:p></text:list-item></text:list></text:list-item></text:list></draw:text-box></draw:frame>
+</draw:page></office:presentation></office:body></office:document>"#
+    );
+    let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+    let paras = &p.slides[0].shapes.iter().find_map(|s| s.text.clone()).unwrap().paragraphs;
+    assert_eq!(paras[0].props.margin_left, Some(0.0));
+    assert_eq!(paras[0].props.bullet, Some(Bullet::None));
+    let size = |i: usize| paras[i].runs[0].props.size;
+    assert_eq!((size(1), size(2)), (Some(32.0), Some(20.0)));
+    assert!(paras[2].props.margin_left.unwrap() > paras[1].props.margin_left.unwrap());
+}
+
 /// A presentation without masters still writes a package LibreOffice opens.
 #[test]
 fn a_deck_without_masters_exports() {
