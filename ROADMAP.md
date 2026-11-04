@@ -150,7 +150,7 @@ app's JSON control channel (`deckcraft --control PORT`).
 
 | Date | What landed |
 |---|---|
-| 2026-11-04 | OpenDocument presentations open and save: `.odp`, `.otp` and flat `.fodp` are read (styles, masters, placeholders, lists, custom-shape geometry, tables, pictures, charts, notes, transitions, footers, gradients, hatches, shadows, arrowheads, transitions and animations) and `.odp`/`.otp` written with resolved formatting, each used layout as a master page and charts as chart documents. Compared with LibreOffice 24.2 renders of its 23 bundled templates and synthetic decks: ~95% pixel similarity reading and writing. Open dialogs, Save As, Export, the web app and the macOS, Windows and Linux file associations offer them |
+| 2026-11-04 | OpenDocument presentations open and save: `.odp`, `.otp` and flat `.fodp` are read (styles, masters, placeholders, lists, custom-shape geometry, tables, pictures, charts, notes, transitions, footers, comments, audio and video, embedded fonts, gradients, hatches, shadows, arrowheads, transitions and animations) and `.odp`/`.otp` written with resolved formatting, each used layout as a master page and charts as chart documents. Compared with LibreOffice 24.2 renders of its 23 bundled templates and synthetic decks: ~96% pixel similarity reading and writing. Open dialogs, Save As, Export, the web app and the macOS, Windows and Linux file associations offer them |
 | 2026-11-02 | Native and PPTX saves retain optional table right-to-left direction, including explicit false and omission; two-save round-trip tests keep labeled columns in order |
 | 2026-11-02 | Text runs preserve alternate-language metadata independently from the main language through native and PPTX saves |
 | 2026-11-02 | Picture compression measures displayed dimensions through nested group transforms; checklist score unchanged |
@@ -331,7 +331,7 @@ app's JSON control channel (`deckcraft --control PORT`).
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-11-04 | minor | Progress log: OpenDocument `.odp`/`.otp`/`.fodp` open and save. Parity row re-scored (M → P); stage unchanged |
+| 2026-11-04 | minor | Progress log: OpenDocument `.odp`/`.otp`/`.fodp` open and save. Parity row re-scored (M → D); stage unchanged |
 | 2026-11-02 | trivial | Progress log: run alternate-language metadata round-trips through native and PPTX formats; product parity scores unchanged |
 | 2026-11-03 | trivial | Reuse Slides brings referenced custom table styles along; scores unchanged |
 | 2026-11-02 | trivial | File › About replaces Account; product links, credits and appearance retained |

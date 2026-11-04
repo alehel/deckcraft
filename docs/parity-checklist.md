@@ -2,7 +2,7 @@
 
 > **Generated:** 2026-10-14 (bullets/numbering remain D after empty-line marker review; summary by `cargo xtask parity`; rows re-scored by the 2026-10-14 community PR wave, duplicate Thesaurus, AutoCorrect, Artistic effects and Corrections rows folded; Preview in editor re-scored 2026-10-13; earlier rows re-scored 2026-10-10 against PowerPoint for Mac 16.113.4; video/animated GIF row re-scored 2026-10-11, #171) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
-> **Last updated:** 2026-11-04 · OpenDocument .odp open/save re-scored M → P (animations round-trip; hatches, picture crop and comments pending).
+> **Last updated:** 2026-11-04 · OpenDocument .odp open/save re-scored M → D (animations, comments, media, charts and tables round-trip; only rare objects remain).
 >
 > **Previously (2026-11-03):** Community PR wave 10: reflection transforms survive resaves (row stays P, rendering partial); Reuse Slides fits the destination size and brings referenced custom table styles (row stays P, picker has no thumbnails); Compress Pictures measures grouped pictures at displayed size (stays D). Scores unchanged.
 >
@@ -17,12 +17,12 @@ The summary between `<!-- SUMMARY -->
 |---|---|---|---|---|---|
 | P0 | 72 | 61 | 11 | 0 | 92% |
 | P1 | 65 | 45 | 16 | 4 | 82% |
-| P2 | 54 | 18 | 25 | 11 | 56% |
+| P2 | 54 | 19 | 24 | 11 | 57% |
 
 | Area | Parity |
 |---|---|
 | Application shell | 81% |
-| Files | 78% |
+| Files | 79% |
 | Slides | 92% |
 | Views | 98% |
 | Masters & themes | 92% |
@@ -78,7 +78,7 @@ Open P0 items: Contextual tabs (Shape Format, Picture Format, Table Design/Layou
 | Files | Password protection | P2 | M |
 | Files | Reuse slides from another file | P1 | P |
 | Files | Drag and drop files onto the window | P1 | D |
-| Files | OpenDocument .odp open/save (hatches, picture crop, comments pending) | P2 | P |
+| Files | OpenDocument .odp open/save (rare objects remain: SVG pictures, 3-D scenes) | P2 | D |
 | Slides | New slide by layout | P0 | D |
 | Slides | Duplicate, delete, hide slides | P0 | D |
 | Slides | Reorder slides (thumbnails, sorter) | P0 | D |
