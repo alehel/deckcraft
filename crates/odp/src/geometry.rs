@@ -155,60 +155,144 @@ pub struct Enhanced {
 }
 
 const MAX_EQUATIONS: usize = 4096;
-const MAX_EVAL_DEPTH: usize = 64;
+/// Nesting allowed across one whole evaluation: equation references and nested sub-expressions
+/// (parentheses, signs, function arguments) all count against this one depth.
+const MAX_DEPTH: usize = 256;
+/// Steps (equations entered, expressions read) one shape's evaluation may take in total, over all
+/// its equations, path parameters and text areas.
+const MAX_WORK: usize = 1_000_000;
+/// 1/100 mm per point (`logwidth`/`logheight` are in 1/100 mm).
+const HMM_PER_PT: f64 = 2540.0 / 72.0;
+/// [`Eval::low`] when the value being computed depends on nothing unfinished.
+const COMPLETE: usize = usize::MAX;
 
-struct Eval<'a> {
-    vb: [f64; 4],
-    modifiers: &'a [f64],
-    formulas: HashMap<&'a str, &'a str>,
-    cache: HashMap<String, f64>,
+/// What is known about an equation during an evaluation.
+enum Slot {
+    /// Being evaluated, entered at this depth: a reference back to it is a cycle.
+    InProgress(usize),
+    /// Computed completely.
+    Done(f64),
 }
 
-impl Eval<'_> {
-    fn keyword(&self, k: &str) -> Option<f64> {
+/// Evaluates parameters and equations of one `draw:enhanced-geometry`.
+struct Eval<'a> {
+    /// `svg:viewBox` (x, y, w, h).
+    vb: [f64; 4],
+    /// The shape's size in 1/100 mm (`logwidth`, `logheight`).
+    log: [f64; 2],
+    /// `draw:path-stretchpoint-x`/`-y` (`xstretch`, `ystretch`).
+    stretch: [Option<f64>; 2],
+    modifiers: &'a [f64],
+    formulas: &'a HashMap<&'a str, Vec<Tok>>,
+    slots: HashMap<&'a str, Slot>,
+    /// Current nesting, shared by every equation and sub-expression.
+    depth: usize,
+    /// Steps taken so far, shared by the whole evaluation.
+    work: usize,
+    /// The shallowest depth of an unfinished equation the value being computed has read (a
+    /// cycle), 0 if a depth or work cut-off fired, [`COMPLETE`] otherwise. Only values whose
+    /// own evaluation leaves this at or below their depth are cached.
+    low: usize,
+}
+
+impl<'a> Eval<'a> {
+    fn new(vb: [f64; 4], size: (f64, f64), stretch: [Option<f64>; 2], modifiers: &'a [f64], formulas: &'a HashMap<&'a str, Vec<Tok>>) -> Self {
+        let log = |v: f64| if v.is_finite() && v > 0.0 { v * HMM_PER_PT } else { 0.0 };
+        Eval { vb, log: [log(size.0), log(size.1)], stretch, modifiers, formulas, slots: HashMap::new(), depth: 0, work: 0, low: COMPLETE }
+    }
+
+    /// The identifiers of ODF 1.3 §19.171 (`draw:formula`), also the constants of handle
+    /// positions, path parameters and text areas.
+    fn identifier(&self, k: &str) -> Option<f64> {
         let [x, y, w, h] = self.vb;
         Some(match k {
+            "pi" => std::f64::consts::PI,
+            // The view box.
             "left" => x,
             "top" => y,
             "right" => x + w,
             "bottom" => y + h,
-            "width" | "logwidth" => w,
-            "height" | "logheight" => h,
-            "xstretch" | "ystretch" => 0.0,
+            "width" => w,
+            "height" => h,
+            // The shape's own size (`svg:width`/`svg:height`) in 1/100 mm.
+            "logwidth" => self.log[0],
+            "logheight" => self.log[1],
+            // The stretch points' values.
+            "xstretch" => self.stretch[0].unwrap_or(0.0),
+            "ystretch" => self.stretch[1].unwrap_or(0.0),
+            // Line and fill styles live outside the geometry; a shape is taken to have both.
             "hasstroke" | "hasfill" => 1.0,
-            "pi" => std::f64::consts::PI,
             _ => return None,
         })
     }
 
-    /// A parameter of the path or a handle: number, `?name`, `$n` or keyword.
-    fn param(&mut self, t: &str, depth: usize) -> f64 {
-        let t = t.trim();
-        if let Some(name) = t.strip_prefix('?') {
-            return self.equation(name, depth);
+    /// Go one level deeper and take a step; false (and the result marked cut off) past the
+    /// shared depth or work budget.
+    fn enter(&mut self) -> bool {
+        self.work = self.work.saturating_add(1);
+        if self.depth >= MAX_DEPTH || self.work > MAX_WORK {
+            self.low = 0;
+            return false;
         }
-        if let Some(n) = t.strip_prefix('$') {
-            return n.parse::<usize>().ok().and_then(|i| self.modifiers.get(i).copied()).unwrap_or(0.0);
-        }
-        if let Some(v) = self.keyword(t) {
-            return v;
-        }
-        t.parse::<f64>().ok().filter(|v| v.is_finite()).unwrap_or(0.0)
+        self.depth += 1;
+        true
     }
 
-    fn equation(&mut self, name: &str, depth: usize) -> f64 {
-        if let Some(v) = self.cache.get(name) {
-            return *v;
+    fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+
+    /// A parameter of the path, a text area or a handle: number, `?name`, `$n` or identifier.
+    fn param(&mut self, t: &str) -> f64 {
+        let t = t.trim();
+        if let Some(name) = t.strip_prefix('?') {
+            return self.equation(name);
         }
-        if depth > MAX_EVAL_DEPTH {
+        if let Some(n) = t.strip_prefix('$') {
+            return self.modifier(n);
+        }
+        if let Some(v) = self.identifier(&t.to_ascii_lowercase()) {
+            return v;
+        }
+        parse_number(t).unwrap_or(0.0)
+    }
+
+    fn modifier(&self, n: &str) -> f64 {
+        n.parse::<usize>().ok().and_then(|i| self.modifiers.get(i).copied()).filter(|v| v.is_finite()).unwrap_or(0.0)
+    }
+
+    /// The value of the equation `name` (0 if there is none, it is part of a cycle being
+    /// evaluated, or the budget ran out). Cached only when computed completely.
+    fn equation(&mut self, name: &str) -> f64 {
+        let formulas = self.formulas;
+        let Some((&key, toks)) = formulas.get_key_value(name) else { return 0.0 };
+        match self.slots.get(key) {
+            Some(Slot::Done(v)) => return *v,
+            Some(Slot::InProgress(d)) => {
+                self.low = self.low.min(*d);
+                return 0.0;
+            }
+            None => {}
+        }
+        if !self.enter() {
             return 0.0;
         }
-        let Some(f) = self.formulas.get(name).copied() else { return 0.0 };
-        let toks = tokenize(f);
-        let mut p = Parser { toks: &toks, i: 0 };
-        let v = p.expr(self, depth + 1, 0);
+        let depth = self.depth;
+        self.slots.insert(key, Slot::InProgress(depth));
+        let outer = std::mem::replace(&mut self.low, COMPLETE);
+        let v = Parser { toks, i: 0 }.expr(self);
         let v = if v.is_finite() { v } else { 0.0 };
-        self.cache.insert(name.to_string(), v);
+        self.leave();
+        let own = self.low;
+        if own >= depth {
+            // Complete, or every cycle it met closes on itself.
+            self.slots.insert(key, Slot::Done(v));
+            self.low = outer;
+        } else {
+            // Read a value cut off or still unfinished further out: evaluate it afresh next time.
+            self.slots.remove(key);
+            self.low = outer.min(own);
+        }
         v
     }
 }
@@ -221,36 +305,75 @@ enum Tok {
     Op(char),
 }
 
+/// Length in bytes of the unsigned ODF number at the start of `s` (0 if none):
+/// `integer`, `integer? '.' integer`, `integer '.'`, each with an optional
+/// `('e' | 'E') sign? integer` exponent.
+fn scan_number(s: &str) -> usize {
+    let b = s.as_bytes();
+    let digits = |from: usize| b.get(from..).map_or(0, |r| r.iter().take_while(|c| c.is_ascii_digit()).count());
+    let int = digits(0);
+    let mut n = int;
+    if b.get(n) == Some(&b'.') {
+        let frac = digits(n + 1);
+        if int == 0 && frac == 0 {
+            return 0;
+        }
+        n += 1 + frac;
+    }
+    if n == 0 {
+        return 0;
+    }
+    if matches!(b.get(n), Some(b'e' | b'E')) {
+        let mut m = n + 1;
+        if matches!(b.get(m), Some(b'+' | b'-')) {
+            m += 1;
+        }
+        let e = digits(m);
+        if e > 0 {
+            n = m + e;
+        }
+    }
+    n
+}
+
+/// A whole token as an ODF number (optional sign, then [`scan_number`]); finite values only.
+fn parse_number(t: &str) -> Option<f64> {
+    let body = t.strip_prefix(['+', '-']).unwrap_or(t);
+    if body.is_empty() || scan_number(body) != body.len() {
+        return None;
+    }
+    t.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
 fn tokenize(s: &str) -> Vec<Tok> {
+    let s = s.char_indices().nth(4096).and_then(|(i, _)| s.get(..i)).unwrap_or(s);
+    let name_len = |r: &str| r.char_indices().find(|(_, c)| !(c.is_alphanumeric() || *c == '_')).map_or(r.len(), |(i, _)| i);
     let mut out = vec![];
-    let cs: Vec<char> = s.chars().take(4096).collect();
     let mut i = 0;
-    while i < cs.len() {
-        let c = cs[i];
+    while let Some(rest) = s.get(i..) {
+        let Some(c) = rest.chars().next() else { break };
         if c.is_whitespace() {
-            i += 1;
+            i += c.len_utf8();
         } else if c.is_ascii_digit() || c == '.' {
-            let st = i;
-            while i < cs.len() && (cs[i].is_ascii_digit() || cs[i] == '.' || cs[i] == 'e' && i + 1 < cs.len() && cs[i + 1].is_ascii_digit()) {
+            let n = scan_number(rest);
+            if n == 0 {
+                out.push(Tok::Op(c));
                 i += 1;
+            } else {
+                out.push(Tok::Num(rest.get(..n).and_then(|t| t.parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(0.0)));
+                i += n;
             }
-            out.push(Tok::Num(cs[st..i].iter().collect::<String>().parse().unwrap_or(0.0)));
         } else if c == '?' || c == '$' {
-            let st = i;
-            i += 1;
-            while i < cs.len() && (cs[i].is_alphanumeric() || cs[i] == '_') {
-                i += 1;
-            }
-            out.push(Tok::Ref(cs[st..i].iter().collect()));
+            let n = 1 + rest.get(1..).map_or(0, name_len);
+            out.push(Tok::Ref(rest.get(..n).unwrap_or_default().to_string()));
+            i += n;
         } else if c.is_alphabetic() {
-            let st = i;
-            while i < cs.len() && (cs[i].is_alphanumeric() || cs[i] == '_') {
-                i += 1;
-            }
-            out.push(Tok::Ident(cs[st..i].iter().collect::<String>().to_ascii_lowercase()));
+            let n = name_len(rest);
+            out.push(Tok::Ident(rest.get(..n).unwrap_or_default().to_ascii_lowercase()));
+            i += n;
         } else {
             out.push(Tok::Op(c));
-            i += 1;
+            i += c.len_utf8();
         }
     }
     out
@@ -265,20 +388,20 @@ impl Parser<'_> {
     fn peek(&self) -> Option<&Tok> {
         self.toks.get(self.i)
     }
-    fn expr(&mut self, ev: &mut Eval, depth: usize, nest: usize) -> f64 {
-        let mut v = self.term(ev, depth, nest);
+    fn expr(&mut self, ev: &mut Eval) -> f64 {
+        let mut v = self.term(ev);
         while let Some(Tok::Op(c @ ('+' | '-'))) = self.peek().cloned() {
             self.i += 1;
-            let r = self.term(ev, depth, nest);
+            let r = self.term(ev);
             v = if c == '+' { v + r } else { v - r };
         }
         v
     }
-    fn term(&mut self, ev: &mut Eval, depth: usize, nest: usize) -> f64 {
-        let mut v = self.unary(ev, depth, nest);
+    fn term(&mut self, ev: &mut Eval) -> f64 {
+        let mut v = self.unary(ev);
         while let Some(Tok::Op(c @ ('*' | '/'))) = self.peek().cloned() {
             self.i += 1;
-            let r = self.unary(ev, depth, nest);
+            let r = self.unary(ev);
             v = if c == '*' {
                 v * r
             } else if r != 0.0 {
@@ -289,23 +412,29 @@ impl Parser<'_> {
         }
         v
     }
-    fn unary(&mut self, ev: &mut Eval, depth: usize, nest: usize) -> f64 {
-        if nest > MAX_EVAL_DEPTH {
+    /// Every nesting (signs, parentheses, arguments, references) passes through here, so this
+    /// is where the shared depth and work budget are charged.
+    fn unary(&mut self, ev: &mut Eval) -> f64 {
+        if !ev.enter() {
+            // Out of budget: stop reading this formula.
+            self.i = self.toks.len();
             return 0.0;
         }
-        match self.peek().cloned() {
+        let v = match self.peek().cloned() {
             Some(Tok::Op('-')) => {
                 self.i += 1;
-                -self.unary(ev, depth, nest + 1)
+                -self.unary(ev)
             }
             Some(Tok::Op('+')) => {
                 self.i += 1;
-                self.unary(ev, depth, nest + 1)
+                self.unary(ev)
             }
-            _ => self.primary(ev, depth, nest),
-        }
+            _ => self.primary(ev),
+        };
+        ev.leave();
+        v
     }
-    fn args(&mut self, ev: &mut Eval, depth: usize, nest: usize) -> Vec<f64> {
+    fn args(&mut self, ev: &mut Eval) -> Vec<f64> {
         let mut out = vec![];
         if self.peek() != Some(&Tok::Op('(')) {
             return out;
@@ -316,7 +445,7 @@ impl Parser<'_> {
             return out;
         }
         loop {
-            out.push(self.expr(ev, depth, nest + 1));
+            out.push(self.expr(ev));
             match self.peek() {
                 Some(Tok::Op(',')) => self.i += 1,
                 Some(Tok::Op(')')) => {
@@ -331,14 +460,14 @@ impl Parser<'_> {
         }
         out
     }
-    fn primary(&mut self, ev: &mut Eval, depth: usize, nest: usize) -> f64 {
+    fn primary(&mut self, ev: &mut Eval) -> f64 {
         let Some(t) = self.peek().cloned() else { return 0.0 };
         self.i += 1;
         match t {
             Tok::Num(v) => v,
-            Tok::Ref(r) => ev.param(&r, depth),
+            Tok::Ref(r) => ev.param(&r),
             Tok::Op('(') => {
-                let v = self.expr(ev, depth, nest + 1);
+                let v = self.expr(ev);
                 if self.peek() == Some(&Tok::Op(')')) {
                     self.i += 1;
                 }
@@ -346,7 +475,7 @@ impl Parser<'_> {
             }
             Tok::Ident(name) => {
                 if self.peek() == Some(&Tok::Op('(')) {
-                    let a = self.args(ev, depth, nest);
+                    let a = self.args(ev);
                     let g = |i: usize| a.get(i).copied().unwrap_or(0.0);
                     match name.as_str() {
                         "abs" => g(0).abs(),
@@ -368,11 +497,78 @@ impl Parser<'_> {
                         _ => 0.0,
                     }
                 } else {
-                    ev.keyword(&name).unwrap_or(0.0)
+                    ev.identifier(&name).unwrap_or(0.0)
                 }
             }
             Tok::Op(_) => 0.0,
         }
+    }
+}
+
+/// Where view-box points land in the evaluated paths: shifted to the origin and, when a stretch
+/// point applies (ODF 1.3 §19.204–19.205), scaled uniformly into the shape box with the part past
+/// the stretch point moved to the box's far edge.
+struct Frame {
+    origin: Point,
+    scale: f64,
+    /// The coordinate space of the output: the view box's size, or the shape's when stretched.
+    size: (f64, f64),
+    /// Stretch point (view-box units) and how far points past it move, per axis.
+    split_x: Option<(f64, f64)>,
+    split_y: Option<(f64, f64)>,
+}
+
+impl Frame {
+    fn new(vb: [f64; 4], w: f64, h: f64, stretch: [Option<f64>; 2]) -> Frame {
+        let plain = Frame { origin: Point::new(vb[0], vb[1]), scale: 1.0, size: (vb[2], vb[3]), split_x: None, split_y: None };
+        if !(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
+            return plain;
+        }
+        let (kx, ky) = (w / vb[2], h / vb[3]);
+        let k = kx.min(ky);
+        if !(k.is_finite() && k > 0.0) {
+            return plain;
+        }
+        // The box is relatively wider than the view box: stretch horizontally (and vice versa).
+        let split_x = stretch[0].filter(|_| kx > k * (1.0 + 1e-9)).map(|s| (s, w - vb[2] * k));
+        let split_y = stretch[1].filter(|_| ky > k * (1.0 + 1e-9)).map(|s| (s, h - vb[3] * k));
+        if split_x.is_none() && split_y.is_none() {
+            return plain;
+        }
+        Frame { scale: k, size: (w, h), split_x, split_y, ..plain }
+    }
+
+    /// A view-box point in the output space.
+    fn map(&self, p: Point) -> Point {
+        let axis = |v: f64, o: f64, split: Option<(f64, f64)>| {
+            let m = (v - o) * self.scale;
+            match split {
+                Some((s, shift)) if v > s => m + shift,
+                _ => m,
+            }
+        };
+        Point::new(axis(p.x, self.origin.x, self.split_x), axis(p.y, self.origin.y, self.split_y))
+    }
+
+    fn map_path(&self, p: &BezPath) -> BezPath {
+        let m = |a: Point| self.map(a);
+        p.elements()
+            .iter()
+            .map(|el| match *el {
+                PathEl::MoveTo(a) => PathEl::MoveTo(m(a)),
+                PathEl::LineTo(a) => PathEl::LineTo(m(a)),
+                PathEl::QuadTo(a, b) => PathEl::QuadTo(m(a), m(b)),
+                PathEl::CurveTo(a, b, c) => PathEl::CurveTo(m(a), m(b), m(c)),
+                PathEl::ClosePath => PathEl::ClosePath,
+            })
+            .collect()
+    }
+
+    /// A rectangle in view-box units (left, top, right, bottom) as fractions of the output.
+    fn fractions(&self, r: [f64; 4]) -> [f64; 4] {
+        let (a, b) = (self.map(Point::new(r[0], r[1])), self.map(Point::new(r[2], r[3])));
+        let (w, h) = self.size;
+        [a.x.min(b.x) / w, a.y.min(b.y) / h, a.x.max(b.x) / w, a.y.max(b.y) / h]
     }
 }
 
@@ -393,78 +589,29 @@ fn arity(cmd: char) -> Option<usize> {
 pub fn enhanced(g: &El, w: f64, h: f64) -> Option<Enhanced> {
     let kind = attr(g, "draw:type").unwrap_or("non-primitive").to_string();
     let vb = view_box(attr(g, "svg:viewBox")).filter(|v| v[2] > 0.0 && v[3] > 0.0).unwrap_or([0.0, 0.0, 21600.0, 21600.0]);
-    let modifiers: Vec<f64> = attr(g, "draw:modifiers")
-        .unwrap_or("")
-        .split_whitespace()
-        .take(64)
-        .map(|t| t.parse::<f64>().ok().filter(|v| v.is_finite()).unwrap_or(0.0))
-        .collect();
+    let modifiers: Vec<f64> = attr(g, "draw:modifiers").unwrap_or("").split_whitespace().take(64).map(|t| parse_number(t).unwrap_or(0.0)).collect();
+    let mut order = vec![];
     let mut formulas = HashMap::new();
     for e in kids(g, "draw:equation").take(MAX_EQUATIONS) {
         if let (Some(n), Some(f)) = (attr(e, "draw:name"), attr(e, "draw:formula")) {
-            formulas.insert(n, f);
+            order.push(n);
+            formulas.insert(n, tokenize(f));
         }
     }
-    let mut ev = Eval { vb, modifiers: &modifiers, formulas, cache: HashMap::new() };
-    let path = attr(g, "draw:enhanced-path").unwrap_or("");
-    let mut paths = eval_path(path, &mut ev);
-    // Stretch points: past them the path moves instead of stretching, so corners keep their
-    // shape when the box's proportions differ from the view box's.
-    let sx = attr(g, "draw:path-stretchpoint-x").map(|v| ev.param(v, 0));
-    let sy = attr(g, "draw:path-stretchpoint-y").map(|v| ev.param(v, 0));
-    if (sx.is_some() || sy.is_some()) && w > 0.0 && h > 0.0 {
-        let (kx, ky) = (w / vb[2], h / vb[3]);
-        let k = kx.min(ky);
-        let map = |p: Point| -> Point {
-            let (x, y) = (p.x, p.y);
-            let nx = match sx {
-                Some(s) if kx > k => {
-                    if x + vb[0] <= s {
-                        x * k
-                    } else {
-                        x * k + (w - vb[2] * k)
-                    }
-                }
-                _ => x * kx,
-            };
-            let ny = match sy {
-                Some(s) if ky > k => {
-                    if y + vb[1] <= s {
-                        y * k
-                    } else {
-                        y * k + (h - vb[3] * k)
-                    }
-                }
-                _ => y * ky,
-            };
-            Point::new(nx, ny)
-        };
-        for cp in &mut paths {
-            let Ok(bp) = BezPath::from_svg(&cp.d) else { continue };
-            let mut out = BezPath::new();
-            for el in bp.elements() {
-                out.push(match *el {
-                    PathEl::MoveTo(a) => PathEl::MoveTo(map(a)),
-                    PathEl::LineTo(a) => PathEl::LineTo(map(a)),
-                    PathEl::QuadTo(a, b) => PathEl::QuadTo(map(a), map(b)),
-                    PathEl::CurveTo(a, b, c) => PathEl::CurveTo(map(a), map(b), map(c)),
-                    PathEl::ClosePath => PathEl::ClosePath,
-                });
-            }
-            cp.d = path_d(&out);
-            cp.w = w;
-            cp.h = h;
-        }
+    // Stretch points are plain numbers (data type double).
+    let stretch = ["draw:path-stretchpoint-x", "draw:path-stretchpoint-y"].map(|k| attr(g, k).and_then(parse_number));
+    let mut ev = Eval::new(vb, (w, h), stretch, &modifiers, &formulas);
+    // In document order first, so chains of equations that build on earlier ones are computed
+    // one link at a time instead of all at once from the deepest reference.
+    for n in order {
+        ev.equation(n);
     }
+    let frame = Frame::new(vb, w, h, stretch);
+    let paths = eval_path(attr(g, "draw:enhanced-path").unwrap_or(""), &mut ev, &frame);
     let text_area = attr(g, "draw:text-areas").and_then(|t| {
         let toks: Vec<&str> = t.split_whitespace().take(4).collect();
-        if toks.len() < 4 {
-            return None;
-        }
-        let v: Vec<f64> = toks.iter().map(|t| ev.param(t, 0)).collect();
-        let fx = |x: f64| (x - vb[0]) / vb[2];
-        let fy = |y: f64| (y - vb[1]) / vb[3];
-        Some([fx(v[0].min(v[2])), fy(v[1].min(v[3])), fx(v[0].max(v[2])), fy(v[1].max(v[3]))])
+        let [l, t, r, b] = toks.as_slice() else { return None };
+        Some(frame.fractions([l, t, r, b].map(|p| ev.param(p))))
     });
     Some(Enhanced {
         kind,
@@ -476,9 +623,9 @@ pub fn enhanced(g: &El, w: f64, h: f64) -> Option<Enhanced> {
     })
 }
 
-/// Split the path into commands and their parameters, evaluate them into sub-paths.
-fn eval_path(src: &str, ev: &mut Eval) -> Vec<CustomPath> {
-    let [vx, vy, vw, vh] = ev.vb;
+/// Split the path into commands and their parameters, evaluate them into sub-paths placed by
+/// `frame`.
+fn eval_path(src: &str, ev: &mut Eval, frame: &Frame) -> Vec<CustomPath> {
     let mut out: Vec<CustomPath> = vec![];
     let mut bp = BezPath::new();
     let (mut fill, mut stroke) = (true, true);
@@ -491,15 +638,14 @@ fn eval_path(src: &str, ev: &mut Eval) -> Vec<CustomPath> {
     let mut quadrant_x = true;
     let flush = |bp: &mut BezPath, fill: &mut bool, stroke: &mut bool, out: &mut Vec<CustomPath>| {
         if !bp.elements().is_empty() {
-            let mut p = std::mem::take(bp);
-            p.apply_affine(Affine::translate((-vx, -vy)));
-            out.push(CustomPath { w: vw, h: vh, d: path_d(&p), fill: if *fill { FillMode::Norm } else { FillMode::None }, stroke: *stroke });
+            let p = frame.map_path(&std::mem::take(bp));
+            let (w, h) = frame.size;
+            out.push(CustomPath { w, h, d: path_d(&p), fill: if *fill { FillMode::Norm } else { FillMode::None }, stroke: *stroke });
         }
         *fill = true;
         *stroke = true;
     };
-    while i < toks.len() {
-        let t = toks[i];
+    while let Some(&t) = toks.get(i) {
         let first = t.chars().next().unwrap_or(' ');
         // A command letter (single upper-case letter that isn't a keyword).
         if t.len() == 1 && first.is_ascii_uppercase() && arity(first).is_some() {
@@ -537,12 +683,11 @@ fn eval_path(src: &str, ev: &mut Eval) -> Vec<CustomPath> {
             i += 1;
             continue;
         };
-        if i + n > toks.len() {
-            break;
-        }
-        let v: Vec<f64> = toks[i..i + n].iter().map(|t| ev.param(t, 0)).collect();
+        let Some(args) = toks.get(i..i + n) else { break };
+        let v: Vec<f64> = args.iter().map(|t| ev.param(t)).collect();
         i += n;
-        let pt = |k: usize| Point::new(v[k], v[k + 1]);
+        let g = |k: usize| v.get(k).copied().unwrap_or(0.0);
+        let pt = |k: usize| Point::new(g(k), g(k + 1));
         match cmd {
             'M' => {
                 bp.move_to(pt(0));
@@ -593,8 +738,8 @@ fn eval_path(src: &str, ev: &mut Eval) -> Vec<CustomPath> {
             }
             'T' | 'U' => {
                 // Centre, radii, start and end angle (degrees, counter-clockwise on the page).
-                let (c, r) = (pt(0), Vec2::new(v[2].abs(), v[3].abs()));
-                let (a0, a1) = (v[4], v[5]);
+                let (c, r) = (pt(0), Vec2::new(g(2).abs(), g(3).abs()));
+                let (a0, a1) = (g(4), g(5));
                 let mut sweep = a1 - a0;
                 if sweep <= 0.0 {
                     sweep += 360.0;
@@ -646,8 +791,8 @@ fn eval_path(src: &str, ev: &mut Eval) -> Vec<CustomPath> {
             }
             'G' => {
                 // OOXML arcTo: radii, start angle and sweep in degrees, clockwise.
-                let r = Vec2::new(v[0].abs(), v[1].abs());
-                let (st, sw) = (v[2].to_radians(), v[3].to_radians());
+                let r = Vec2::new(g(0).abs(), g(1).abs());
+                let (st, sw) = (g(2).to_radians(), g(3).to_radians());
                 // The ellipse angle of a visual angle.
                 let param = |a: f64| (a.sin() * r.x).atan2(a.cos() * r.y);
                 let (s, e) = (param(st), param(st + sw));
@@ -734,7 +879,7 @@ mod tests {
     #[test]
     fn formulas_with_functions_and_self_reference_terminate() {
         let g = geom(
-            r#"<draw:enhanced-geometry svg:viewBox="0 0 100 100" draw:enhanced-path="M ?a ?b L ?c 0 N"><draw:equation draw:name="a" draw:formula="if(-1, 5, max(10, 20)) + sqrt(16)*cos(0)"/><draw:equation draw:name="b" draw:formula="?b + 1"/><draw:equation draw:name="c" draw:formula="logwidth/2 + 3/0"/></draw:enhanced-geometry>"#,
+            r#"<draw:enhanced-geometry svg:viewBox="0 0 100 100" draw:enhanced-path="M ?a ?b L ?c 0 N"><draw:equation draw:name="a" draw:formula="if(-1, 5, max(10, 20)) + sqrt(16)*cos(0)"/><draw:equation draw:name="b" draw:formula="?b + 1"/><draw:equation draw:name="c" draw:formula="width/2 + 3/0"/></draw:enhanced-geometry>"#,
         );
         let e = enhanced(&g, 10.0, 10.0).unwrap();
         assert!(e.paths[0].d.starts_with("M 24 "), "{}", e.paths[0].d);
@@ -750,5 +895,178 @@ mod tests {
         assert_eq!(e.paths.len(), 2);
         assert!(e.paths[0].d.contains('C'));
         assert_eq!(e.paths[1].fill, FillMode::None);
+    }
+
+    /// Evaluate `formula` as equation `x` of a geometry with the given view box, shape size (pt),
+    /// stretch points and modifiers.
+    fn eval_one(formula: &str, vb: [f64; 4], size: (f64, f64), stretch: [Option<f64>; 2], modifiers: &[f64]) -> f64 {
+        let formulas = HashMap::from([("x", tokenize(formula))]);
+        Eval::new(vb, size, stretch, modifiers, &formulas).equation("x")
+    }
+
+    /// `draw:equation`s `f{i}` = `?f{i-1} + 1` (`f0` = 1), listed in the order given.
+    fn chain(names: impl Iterator<Item = usize>) -> String {
+        names
+            .map(|i| {
+                let f = if i == 0 { "1".to_string() } else { format!("?f{} + 1", i - 1) };
+                format!(r#"<draw:equation draw:name="f{i}" draw:formula="{f}"/>"#)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn formula_identifiers_follow_odf() {
+        let vb = [10.0, 20.0, 100.0, 50.0];
+        // 72 × 36 pt is 2540 × 1270 (1/100 mm).
+        let v = |f: &str| eval_one(f, vb, (72.0, 36.0), [Some(30.0), Some(-4.5)], &[7.0, 8.0]);
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(near(v("left"), 10.0) && near(v("top"), 20.0));
+        assert!(near(v("right"), 110.0) && near(v("bottom"), 70.0));
+        assert!(near(v("width"), 100.0) && near(v("height"), 50.0));
+        assert!(near(v("logwidth"), 2540.0), "{}", v("logwidth"));
+        assert!(near(v("logheight"), 1270.0), "{}", v("logheight"));
+        assert!(near(v("xstretch"), 30.0) && near(v("ystretch"), -4.5));
+        assert!(near(v("hasstroke"), 1.0) && near(v("hasfill"), 1.0));
+        assert!(near(v("pi"), std::f64::consts::PI));
+        assert!(near(v("$1 - $0 + $9"), 1.0));
+        assert!(near(v("LogWidth / width"), 25.4));
+        assert!(near(v("nosuchname + 2"), 2.0));
+        // No stretch point reads as 0; a degenerate shape has no logical size.
+        assert_eq!(eval_one("xstretch + logwidth", vb, (0.0, f64::NAN), [None, None], &[]), 0.0);
+        // The same table serves path parameters.
+        let g = geom(
+            r#"<draw:enhanced-geometry svg:viewBox="0 0 2540 2540" draw:path-stretchpoint-x="700" draw:enhanced-path="M logwidth xstretch L right bottom N"/>"#,
+        );
+        let e = enhanced(&g, 72.0, 72.0).unwrap();
+        assert_eq!(e.paths[0].d, "M 2540 700 L 2540 2540");
+    }
+
+    #[test]
+    fn a_cut_off_value_is_never_cached() {
+        // A chain longer than the shared depth allows, evaluated from its top.
+        let src: Vec<(String, Vec<Tok>)> =
+            (0..400).map(|i| (format!("f{i}"), tokenize(&if i == 0 { "1".to_string() } else { format!("?f{} + 1", i - 1) }))).collect();
+        let formulas: HashMap<&str, Vec<Tok>> = src.iter().map(|(n, t)| (n.as_str(), t.clone())).collect();
+        let mut ev = Eval::new([0.0, 0.0, 1.0, 1.0], (1.0, 1.0), [None, None], &[], &formulas);
+        let top = ev.equation("f399");
+        assert!(top < 400.0, "the cut-off fired: {top}");
+        // Nothing that saw the cut-off was kept, and the depth is unwound.
+        assert!(!ev.slots.contains_key("f399") && !ev.slots.contains_key("f300"));
+        assert!(ev.slots.values().all(|s| matches!(s, Slot::Done(_))));
+        assert_eq!(ev.depth, 0);
+        // Bottom up, every link is complete and the top comes out right.
+        for i in 0..400 {
+            ev.equation(&format!("f{i}"));
+        }
+        assert_eq!(ev.equation("f399"), 400.0);
+
+        // Listed top first: a link reachable within the budget is right even after the top's
+        // evaluation cut off below it.
+        let g = geom(&format!(
+            r#"<draw:enhanced-geometry svg:viewBox="0 0 1000 1000" draw:enhanced-path="M ?f399 ?f100 N">{}</draw:enhanced-geometry>"#,
+            chain((0..400).rev())
+        ));
+        let e = enhanced(&g, 10.0, 10.0).unwrap();
+        assert!(e.paths[0].d.ends_with(" 101"), "{}", e.paths[0].d);
+        // Listed bottom first (the usual order), any length works.
+        let g = geom(&format!(
+            r#"<draw:enhanced-geometry svg:viewBox="0 0 1000 1000" draw:enhanced-path="M ?f2000 0 N">{}</draw:enhanced-geometry>"#,
+            chain(0..=2000)
+        ));
+        assert_eq!(enhanced(&g, 10.0, 10.0).unwrap().paths[0].d, "M 2001 0");
+    }
+
+    #[test]
+    fn cycles_read_as_zero_and_terminate() {
+        let src = [("a", "?b + 1"), ("b", "?a + 1"), ("c", "?a * 10"), ("s", "?s + 1")];
+        let formulas: HashMap<&str, Vec<Tok>> = src.iter().map(|(n, f)| (*n, tokenize(f))).collect();
+        let mut ev = Eval::new([0.0, 0.0, 1.0, 1.0], (1.0, 1.0), [None, None], &[], &formulas);
+        // a → b → a (in progress, 0): b = 1, a = 2. a closes the cycle and is kept; b, which
+        // read the unfinished a, is not.
+        assert_eq!(ev.equation("a"), 2.0);
+        assert!(matches!(ev.slots.get("a"), Some(Slot::Done(v)) if *v == 2.0));
+        assert!(!ev.slots.contains_key("b"));
+        assert_eq!(ev.equation("c"), 20.0);
+        assert_eq!(ev.equation("s"), 1.0);
+        assert_eq!(ev.depth, 0);
+        assert_eq!(ev.low, COMPLETE);
+    }
+
+    #[test]
+    fn hostile_formulas_stay_within_the_shared_budget() {
+        // Every link reads the next one twice and the list is top first: without a shared budget
+        // this is 2^4096 evaluations.
+        let eqs: String = (0..4096)
+            .map(|i| {
+                let f = if i == 4095 { "1".to_string() } else { format!("?f{0} + ?f{0}", i + 1) };
+                format!(r#"<draw:equation draw:name="f{i}" draw:formula="{f}"/>"#)
+            })
+            .collect();
+        let deep = format!("{}1{}", "(".repeat(4000), ")".repeat(4000));
+        let g = geom(&format!(
+            r#"<draw:enhanced-geometry svg:viewBox="0 0 10 10" draw:enhanced-path="M ?f0 ?d L ?f2 ?f4000 N" draw:text-areas="?f0 ?d ?f1 ?f3">{eqs}<draw:equation draw:name="d" draw:formula="{deep}"/></draw:enhanced-geometry>"#
+        ));
+        let started = std::time::Instant::now();
+        let e = enhanced(&g, 10.0, 10.0).unwrap();
+        assert!(started.elapsed().as_secs() < 20);
+        assert!(e.paths[0].d.split(' ').filter_map(|t| t.parse::<f64>().ok()).all(f64::is_finite));
+    }
+
+    #[test]
+    fn stretch_points_map_paths_and_text_area_alike() {
+        // A 100×100 view box in a 200×100 pt box, stretched at x = 50.
+        let g = geom(
+            r#"<draw:enhanced-geometry svg:viewBox="0 0 100 100" draw:path-stretchpoint-x="50" draw:enhanced-path="M 0 0 L 40 0 60 0 100 0 100 100 0 100 Z N" draw:text-areas="10 10 90 90"/>"#,
+        );
+        let e = enhanced(&g, 200.0, 100.0).unwrap();
+        assert_eq!(e.paths[0].d, "M 0 0 L 40 0 L 160 0 L 200 0 L 200 100 L 0 100 Z");
+        assert_eq!((e.paths[0].w, e.paths[0].h), (200.0, 100.0));
+        // The text area moves with the outline: 10 → 10 pt and 90 → 190 pt of 200.
+        let ta = e.text_area.unwrap();
+        let want = [0.05, 0.1, 0.95, 0.9];
+        assert!(ta.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-9), "{ta:?}");
+
+        // Taller than the view box: stretched vertically, in a view box that does not start at 0.
+        let g = geom(
+            r#"<draw:enhanced-geometry svg:viewBox="10 10 100 100" draw:path-stretchpoint-x="50" draw:path-stretchpoint-y="60" draw:enhanced-path="M 10 10 L 110 110 N" draw:text-areas="10 ?t 110 110"><draw:equation draw:name="t" draw:formula="ystretch + 10"/></draw:enhanced-geometry>"#,
+        );
+        let e = enhanced(&g, 50.0, 100.0).unwrap();
+        assert_eq!(e.paths[0].d, "M 0 0 L 50 100");
+        let ta = e.text_area.unwrap();
+        // y = 70 is past the stretch point: (70 − 10) × 0.5 + 50 = 80 of 100.
+        assert!((ta[1] - 0.8).abs() < 1e-9 && (ta[3] - 1.0).abs() < 1e-9, "{ta:?}");
+
+        // Same proportions: nothing to stretch, the path stays in view-box units.
+        let g = geom(
+            r#"<draw:enhanced-geometry svg:viewBox="0 0 100 100" draw:path-stretchpoint-x="50" draw:enhanced-path="M 0 0 L 100 100 N" draw:text-areas="10 10 90 90"/>"#,
+        );
+        let e = enhanced(&g, 30.0, 30.0).unwrap();
+        assert_eq!((e.paths[0].d.as_str(), e.paths[0].w), ("M 0 0 L 100 100", 100.0));
+        assert!((e.text_area.unwrap()[2] - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn numbers_take_exponents_with_signs() {
+        let v = |f: &str| eval_one(f, [0.0, 0.0, 1.0, 1.0], (1.0, 1.0), [None, None], &[]);
+        assert!((v("1e-3 + 2.5E+2") - 250.001).abs() < 1e-12);
+        assert_eq!(v("3E2*2"), 600.0);
+        assert_eq!(v("-.5e1"), -5.0);
+        assert_eq!(v("5. + .5"), 5.5);
+        // An `e` with no digits after it is not an exponent.
+        assert_eq!(v("2e+width"), 2.0);
+        assert_eq!(v("1e999"), 0.0);
+        assert_eq!(scan_number("2E5x"), 3);
+        assert_eq!(scan_number("1e+"), 1);
+        assert_eq!(scan_number("."), 0);
+        assert_eq!(parse_number("+1.5e-1"), Some(0.15));
+        for bad in ["nan", "inf", "-infinity", "1e", "1.2.3", "", "+", "0x10"] {
+            assert_eq!(parse_number(bad), None, "{bad}");
+        }
+        let g = geom(
+            r#"<draw:enhanced-geometry svg:viewBox="0 0 1000 1000" draw:modifiers="2.5E+2" draw:path-stretchpoint-x="1e2" draw:enhanced-path="M 1e2 $0 L xstretch 5E-1 N"/>"#,
+        );
+        let e = enhanced(&g, 10.0, 10.0).unwrap();
+        assert_eq!(e.modifiers, vec![250.0]);
+        assert_eq!(e.paths[0].d, "M 100 250 L 100 0.5");
     }
 }
