@@ -2412,3 +2412,28 @@ fn a_pictures_svg_original_is_kept_beside_its_fallback() {
     }
     assert!(!part(&deckcraft_odp::export(&q).unwrap(), "content.xml").contains("image/svg+xml"));
 }
+
+/// Moving files between apps: an empty placeholder is written as one still showing its prompt
+/// (`presentation:placeholder="true"`, no text), as LibreOffice writes it; it was written as an
+/// empty text frame, so LibreOffice showed no prompt and typed text took the frame's formatting.
+#[test]
+fn an_empty_placeholder_keeps_its_prompt() {
+    let mut p = defaults::new_presentation(None);
+    let s = Arc::make_mut(&mut p.slides[0]);
+    for sh in &mut s.shapes {
+        if sh.ph_type().is_some_and(PhType::is_title) {
+            sh.text = Some(TextBody { paragraphs: vec![Paragraph::default()], ..Default::default() });
+        } else if sh.ph.is_some() {
+            sh.text = Some(TextBody::from_text("Typed"));
+        }
+    }
+    let bytes = deckcraft_odp::export(&p).unwrap();
+    let content = part(&bytes, "content.xml");
+    let title = content.split("<draw:frame").find(|f| f.contains(r#"presentation:class="title""#)).unwrap();
+    assert!(title.contains(r#"presentation:placeholder="true""#) && title.contains("<draw:text-box/>"), "{title}");
+    let typed = content.split("<draw:frame").find(|f| f.contains("Typed")).unwrap();
+    assert!(!typed.contains("presentation:placeholder"), "{typed}");
+    let back = deckcraft_odp::import(&bytes).unwrap();
+    let t = back.slides[0].shapes.iter().find(|s| s.ph_type().is_some_and(PhType::is_title)).unwrap();
+    assert!(t.text.as_ref().is_none_or(|t| t.paragraphs.iter().all(|p| p.is_empty())));
+}

@@ -318,6 +318,14 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
     }
     let pos = position(x);
     if is_frame {
+        // An empty placeholder is one still showing its prompt, as LibreOffice writes it (its
+        // formatting is then the master's for whatever is typed in).
+        let empty = class.is_some() && s.text.as_ref().is_none_or(|t| t.paragraphs.iter().all(|p| p.is_empty()));
+        if empty {
+            return format!(
+                r#"<draw:frame{style_attr}{class_attr} presentation:placeholder="true"{common}{pos}><draw:text-box/>{desc}{events}</draw:frame>"#
+            );
+        }
         return format!(r#"<draw:frame{style_attr}{class_attr}{common}{pos}><draw:text-box>{text}</draw:text-box>{desc}{events}</draw:frame>"#);
     }
     let geo = enhanced_geometry(s, x);
