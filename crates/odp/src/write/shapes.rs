@@ -112,7 +112,18 @@ pub fn shape(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
             g.push_str(&effect_attrs(ctx, effects.as_ref(), ph_fx));
             let st = auto.style("graphic", "gr", Some("standard"), &format!("<style:graphic-properties{g}/>"));
             let mime = w.p.media(fill.media).map(|m| m.content_type.clone()).unwrap_or_default();
-            let image = format!(r#"<draw:image {} draw:mime-type="{}"><text:p/></draw:image>"#, embed(&href), esc(&mime));
+            // Its vector original first (what other apps draw), the picture as its fallback.
+            let svg = fill
+                .vector()
+                .and_then(|v| w.media_path(v))
+                .map(|p| format!(r#"<draw:image {} draw:mime-type="image/svg+xml"><text:p/></draw:image>"#, embed(&p)));
+            let raster = format!(
+                r#"<draw:image {} draw:mime-type="{}">{}</draw:image>"#,
+                embed(&href),
+                esc(&mime),
+                if svg.is_some() { "" } else { "<text:p/>" }
+            );
+            let image = format!("{}{raster}", svg.unwrap_or_default());
             frame(&st, &common, &x, &image, &desc, &events)
         }
         ShapeKind::Table(t) => {

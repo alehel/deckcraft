@@ -214,6 +214,26 @@ pub struct PictureFill {
     /// picture; the original is kept to change or remove the effect.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artistic: Option<Artistic>,
+    /// The vector original of the picture (an SVG), for formats that keep one beside it, while
+    /// the picture is still the raster it came with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector: Option<PictureVector>,
+}
+
+/// A picture's vector original: the SVG, and the raster `media` it was read beside. It applies
+/// only while the picture is still that raster (a replaced or processed picture drops it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PictureVector {
+    pub raster: MediaId,
+    pub svg: MediaId,
+}
+
+impl PictureFill {
+    /// The vector original that still applies to this picture.
+    pub fn vector(&self) -> Option<MediaId> {
+        self.vector.filter(|v| v.raster == self.media).map(|v| v.svg)
+    }
 }
 
 /// An applied artistic effect: its `a14` name (e.g. `artisticBlur`) and the original picture.

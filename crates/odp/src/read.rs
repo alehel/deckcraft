@@ -1048,6 +1048,7 @@ impl Reader<'_> {
             s.fill = None;
             s.line = None;
         } else if let Some(pic) = self.frame_image(e) {
+            let vector = self.frame_svg(e).filter(|svg| *svg != pic).map(|svg| deckcraft_model::style::PictureVector { raster: pic, svg });
             let adjust = picture_adjust(g);
             let alpha = g.get("draw:image-opacity").and_then(|v| units::percent(v)).filter(|a| *a < 1.0);
             s.kind = if is_object {
@@ -1055,6 +1056,7 @@ impl Reader<'_> {
             } else {
                 ShapeKind::Picture {
                     fill: PictureFill {
+                        vector,
                         media: pic,
                         crop: self.crop(g, pic),
                         mode: PictureMode::default(),
@@ -1243,6 +1245,14 @@ impl Reader<'_> {
             }
         }
         None
+    }
+
+    /// A frame's SVG image (beside the raster one it shows), kept for other apps to draw.
+    fn frame_svg(&mut self, frame: &El) -> Option<MediaId> {
+        let svg = kids(frame, "draw:image").find(|i| {
+            attr(i, "draw:mime-type") == Some("image/svg+xml") || attr(i, "xlink:href").is_some_and(|h| h.to_ascii_lowercase().ends_with(".svg"))
+        })?;
+        self.image_media(svg)
     }
 
     /// A package part as media, added once however many shapes refer to it.
