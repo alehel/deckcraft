@@ -4,6 +4,48 @@ use serde::{Deserialize, Serialize};
 
 use crate::style::{ColorRef, Fill, Line};
 
+/// Where an axis draws tick marks: none, inside the plot, outside it, or across the axis.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TickMark {
+    #[default]
+    None,
+    In,
+    Out,
+    Cross,
+}
+
+impl TickMark {
+    /// The tick mark drawn inside the plot (`inner`), outside it (`outer`), both or neither.
+    pub fn from_sides(inner: bool, outer: bool) -> TickMark {
+        match (inner, outer) {
+            (true, true) => TickMark::Cross,
+            (true, false) => TickMark::In,
+            (false, true) => TickMark::Out,
+            (false, false) => TickMark::None,
+        }
+    }
+
+    /// Whether it is drawn (inside the plot, outside it).
+    pub fn sides(self) -> (bool, bool) {
+        (matches!(self, TickMark::In | TickMark::Cross), matches!(self, TickMark::Out | TickMark::Cross))
+    }
+}
+
+/// An axis' major and minor tick marks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AxisTicks {
+    pub major: TickMark,
+    pub minor: TickMark,
+}
+
+impl AxisTicks {
+    pub fn is_none(&self) -> bool {
+        *self == AxisTicks::default()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ChartType {
@@ -364,6 +406,11 @@ pub struct Chart {
     /// The category axis runs backwards (`c:orientation val="maxMin"`): right to left, or on a
     /// horizontal bar chart top to bottom (the default puts the first category at the bottom).
     pub cat_reversed: bool,
+    /// The category (x) and value (y) axes' tick marks.
+    #[serde(skip_serializing_if = "AxisTicks::is_none")]
+    pub x_ticks: AxisTicks,
+    #[serde(skip_serializing_if = "AxisTicks::is_none")]
+    pub y_ticks: AxisTicks,
     /// A combo chart's secondary value axis: bounds, major unit and number format.
     pub y2_min: Option<f64>,
     pub y2_max: Option<f64>,
@@ -477,6 +524,8 @@ impl Default for Chart {
             y_format: None,
             y_hidden: false,
             cat_reversed: false,
+            x_ticks: AxisTicks::default(),
+            y_ticks: AxisTicks::default(),
             y2_min: None,
             y2_max: None,
             y2_major: None,

@@ -1,7 +1,7 @@
 //! Charts: an embedded chart document (`Object N/content.xml`, `office:chart`) read into the
 //! model's chart, and written back as one.
 
-use deckcraft_model::chart::{Chart, ChartType, Series};
+use deckcraft_model::chart::{AxisTicks, Chart, ChartType, Series, TickMark};
 use deckcraft_model::style::{ColorRef, Fill, Line};
 
 use crate::dom::{El, attr, kid, kids, repeat};
@@ -161,6 +161,7 @@ pub fn read(content: &El) -> Option<Chart> {
     c.minor_gridlines = y.is_some_and(|y| kids(y, "chart:grid").any(|g| attr(g, "chart:class") == Some("minor")));
     if let Some(y) = y {
         let ys = style(y);
+        c.y_ticks = ticks(&ys);
         let num = |k: &str| ys.chart_prop(k).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite());
         c.y_min = num("chart:minimum");
         c.y_max = num("chart:maximum");
@@ -184,6 +185,7 @@ pub fn read(content: &El) -> Option<Chart> {
             c.categories =
                 grid.range(cats).into_iter().map(|(t, n)| if t.is_empty() { n.map(|v| v.to_string()).unwrap_or_default() } else { t }).collect();
         }
+        c.x_ticks = ticks(&style(x));
         if style(x).chart_prop("chart:reverse-direction") == Some("true") {
             c.cat_reversed = true;
         }
@@ -313,6 +315,15 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
             series.fill = Some(default_color(i));
         }
         c.series.push(series);
+    }
+}
+
+/// An axis' tick marks; unset, ODF's defaults: major ones outside, no minor ones.
+fn ticks(s: &crate::styles::Style) -> AxisTicks {
+    let on = |k: &str, default: bool| s.chart_prop(k).map_or(default, |v| v == "true");
+    AxisTicks {
+        major: TickMark::from_sides(on("chart:tick-marks-major-inner", false), on("chart:tick-marks-major-outer", true)),
+        minor: TickMark::from_sides(on("chart:tick-marks-minor-inner", false), on("chart:tick-marks-minor-outer", false)),
     }
 }
 

@@ -389,12 +389,26 @@ fn read_axes<'a>(c: &mut Chart, pa: &'a El, primary_val: &Option<String>) -> (Op
         c.y_log_base = sc.and_then(|s| s.child_val("logBase")).and_then(|v| v.parse().ok()).filter(|b: &f64| b.is_finite() && *b >= 2.0);
         c.y_format = format_code(v);
         c.y_hidden = deleted(v);
+        c.y_ticks = ticks(v);
     }
     if let Some(a) = cat_ax {
         c.cat_reversed = a.child("scaling").and_then(|s| s.child_val("orientation")).is_some_and(|o| o == "maxMin");
         c.axis_titles.0 = a.child("title").map(|t| rich_text(t).unwrap_or_else(|| "Axis Title".into()));
+        c.x_ticks = ticks(a);
     }
     (val_ax, cat_ax)
+}
+
+/// An axis' tick marks (none where it names none).
+fn ticks(a: &El) -> deckcraft_model::chart::AxisTicks {
+    use deckcraft_model::chart::TickMark;
+    let t = |k: &str| match a.child_val(k) {
+        Some("in") => TickMark::In,
+        Some("out") => TickMark::Out,
+        Some("cross") => TickMark::Cross,
+        _ => TickMark::None,
+    };
+    deckcraft_model::chart::AxisTicks { major: t("majorTickMark"), minor: t("minorTickMark") }
 }
 
 /// Text sizes and colours as the file sets them.
@@ -728,6 +742,20 @@ mod tests {
         assert_eq!(fmt("").as_deref(), Some("#,##0"));
         assert_eq!(fmt(r#"<c:numFmt formatCode="General" sourceLinked="1"/>"#).as_deref(), Some("#,##0"));
         assert_eq!(fmt(r#"<c:numFmt formatCode="0.0" sourceLinked="0"/>"#).as_deref(), Some("0.0"));
+    }
+
+    /// Tick marks are read per axis, and written back from the model (a saved chart had them
+    /// fixed: none, or outside on a scatter's x axis), so they survive a trip through ODP.
+    #[test]
+    fn axis_tick_marks_are_read_and_written() {
+        use deckcraft_model::chart::{AxisTicks, TickMark};
+        let xml = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:val><c:numRef><c:numCache><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:majorTickMark val="cross"/><c:minorTickMark val="in"/></c:catAx><c:valAx><c:axId val="2"/><c:majorTickMark val="out"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#;
+        let mut c = read_chart_xml(xml.as_bytes()).unwrap();
+        let want = (AxisTicks { major: TickMark::Cross, minor: TickMark::In }, AxisTicks { major: TickMark::Out, minor: TickMark::None });
+        assert_eq!((c.x_ticks, c.y_ticks), want);
+        c.raw = None;
+        let back = read_chart_xml(&crate::write::chart::chart_xml(&c).0).unwrap();
+        assert_eq!((back.x_ticks, back.y_ticks), want);
     }
 
     #[test]

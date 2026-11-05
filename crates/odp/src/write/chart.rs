@@ -99,14 +99,16 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
     let axis_text = format!(r#"<style:text-properties fo:font-size="{text_size}" fo:color="{text_color}"/>"#);
     let yprops = y_props(c);
     let y_style = style(format!(
-        r##"<style:chart-properties chart:display-label="{}"{yprops}{spacing}/><style:graphic-properties svg:stroke-color="#b3b3b3"/>{axis_text}"##,
-        !c.y_hidden
+        r##"<style:chart-properties chart:display-label="{}"{}{yprops}{spacing}/><style:graphic-properties svg:stroke-color="#b3b3b3"/>{axis_text}"##,
+        !c.y_hidden,
+        ticks(c.y_ticks)
     ));
     // A pie runs clockwise from the top, as LibreOffice draws one whose value axis is reversed.
     let pie_axis_style = style(r#"<style:chart-properties chart:display-label="false" chart:reverse-direction="true"/>"#.to_string());
     let legend_style = style(format!(r#"<style:graphic-properties draw:stroke="none" draw:fill="none"/>{axis_text}"#));
     let x_style = style(format!(
-        r##"<style:chart-properties chart:display-label="true" chart:reverse-direction="{}"/><style:graphic-properties svg:stroke-color="#b3b3b3"/>{axis_text}"##,
+        r##"<style:chart-properties chart:display-label="true"{} chart:reverse-direction="{}"/><style:graphic-properties svg:stroke-color="#b3b3b3"/>{axis_text}"##,
+        ticks(c.x_ticks),
         c.cat_reversed
     ));
     let grid_style = style(r##"<style:graphic-properties svg:stroke-color="#d9d9d9"/>"##.to_string());
@@ -253,6 +255,14 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
 }
 
 /// The value axis' scale: minimum, maximum, major unit, logarithmic, hidden labels.
+/// An axis' tick-mark attributes, every one said (unsaid, LibreOffice draws major ones outside).
+fn ticks(t: deckcraft_model::chart::AxisTicks) -> String {
+    let ((mi, mo), (ni, no)) = (t.major.sides(), t.minor.sides());
+    format!(
+        r#" chart:tick-marks-major-inner="{mi}" chart:tick-marks-major-outer="{mo}" chart:tick-marks-minor-inner="{ni}" chart:tick-marks-minor-outer="{no}""#
+    )
+}
+
 fn y_props(c: &Chart) -> String {
     let mut yprops = String::new();
     for (k, v) in [("chart:minimum", c.y_min), ("chart:maximum", c.y_max), ("chart:interval-major", c.y_major)] {

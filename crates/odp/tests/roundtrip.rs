@@ -2456,3 +2456,52 @@ fn an_ellipsoid_gradient_stays_an_ellipsoid() {
         .collect();
     assert_eq!(styles, ["ellipsoid", "ellipsoid"]);
 }
+
+/// Moving files between apps: a chart's tick marks are read and written as they are, every one
+/// said. They were never read and never written, so LibreOffice drew its default (major ticks
+/// outside) on charts without any, laying the plot out around them; and charts with ticks lost
+/// them once they were written as none.
+#[test]
+fn chart_tick_marks_are_kept_and_always_said() {
+    use deckcraft_model::chart::{AxisTicks, Chart, ChartType, TickMark};
+    let axis_style = |chart: &str, axis: &str| -> String {
+        let name = chart.split(&format!("chart:name=\"{axis}\" chart:style-name=\"")).nth(1).and_then(|s| s.split('"').next()).unwrap().to_string();
+        chart.split(&format!("style:name=\"{name}\"")).nth(1).and_then(|s| s.split("</style:style>").next()).unwrap().to_string()
+    };
+    let save = |c: Chart| {
+        let p = deck_with(vec![Shape { xfrm: Some(Xfrm::new(20.0, 20.0, 300.0, 150.0)), kind: ShapeKind::Chart(Box::new(c)), ..Default::default() }]);
+        deckcraft_odp::export(&p).unwrap()
+    };
+    // DeckCraft's own chart, which has none, says so.
+    let chart = part(&save(Chart::sample(ChartType::Column)), "Object 1/content.xml");
+    for axis in ["primary-x", "primary-y"] {
+        let st = axis_style(&chart, axis);
+        assert!(st.contains(r#"chart:tick-marks-major-outer="false""#) && st.contains(r#"chart:tick-marks-major-inner="false""#), "{axis}: {st}");
+    }
+    // Ticks survive a save and reading back.
+    let mut c = Chart::sample(ChartType::Column);
+    c.x_ticks = AxisTicks { major: TickMark::Cross, minor: TickMark::In };
+    c.y_ticks = AxisTicks { major: TickMark::Out, minor: TickMark::None };
+    let back = deckcraft_odp::import(&save(c)).unwrap();
+    let ShapeKind::Chart(b) = &shapes_of(&back)[0].kind else { panic!() };
+    assert_eq!(
+        (b.x_ticks, b.y_ticks),
+        (AxisTicks { major: TickMark::Cross, minor: TickMark::In }, AxisTicks { major: TickMark::Out, minor: TickMark::None })
+    );
+    // Unsaid, an axis has ODF's default: major ticks outside, no minor ones.
+    let bytes = save(Chart::sample(ChartType::Column));
+    let unsaid = part(&bytes, "Object 1/content.xml").replace(r#" chart:tick-marks-major-inner="false" chart:tick-marks-major-outer="false" chart:tick-marks-minor-inner="false" chart:tick-marks-minor-outer="false""#, "");
+    let mut zin = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for i in 0..zin.len() {
+        let mut f = zin.by_index(i).unwrap();
+        let name = f.name().to_string();
+        let mut data = vec![];
+        std::io::Read::read_to_end(&mut f, &mut data).unwrap();
+        z.start_file(name.as_str(), zip::write::SimpleFileOptions::default()).unwrap();
+        z.write_all(if name == "Object 1/content.xml" { unsaid.as_bytes() } else { &data }).unwrap();
+    }
+    let back = deckcraft_odp::import(&z.finish().unwrap().into_inner()).unwrap();
+    let ShapeKind::Chart(c) = &shapes_of(&back)[0].kind else { panic!() };
+    assert_eq!((c.x_ticks.major, c.y_ticks.major, c.y_ticks.minor), (TickMark::Out, TickMark::Out, TickMark::None));
+}
