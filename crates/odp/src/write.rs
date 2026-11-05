@@ -333,8 +333,10 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
     // used).
     let mut layouts_written = PageLayouts::default();
     for (mi, m) in p.masters.iter().enumerate() {
-        let page = want(mi, None, &mut pages);
+        want(mi, None, &mut pages);
         for l in &m.layouts {
+            // Named for the page it's drawn on (its own, when it has a look of its own).
+            let page = want(mi, has_own_look(l).then_some(l.id), &mut pages);
             layouts_written.write(p, m, &page, l);
         }
     }

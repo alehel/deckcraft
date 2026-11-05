@@ -1630,20 +1630,14 @@ fn gradient_opacity_and_stops_survive_saves() {
         counts.push(g.stops.len());
     }
     // A two-colour gradient on PowerPoint's curve is written as its ramp's stops (LibreOffice
-    // blends in sRGB), read back blending in sRGB: drawn the same, and stable from then on.
-    assert!(counts.windows(2).all(|w| w[0] == w[1]) && counts[0] > 2, "{counts:?}");
+    // blends in sRGB, so it draws the same), and read back as the two stops and the curve it was.
+    assert_eq!(counts, [2, 2, 2]);
     let Some(Fill::Gradient(g)) = &shapes_of(&p)[1].fill else { panic!() };
-    assert_eq!(g.blend, deckcraft_model::style::GradientBlend::Srgb);
+    assert_eq!(g.blend, deckcraft_model::style::GradientBlend::PowerPoint);
     let ramp = deckcraft_render::gradient_ramp(&[(0.0, red), (1.0, blue)], deckcraft_model::style::GradientBlend::PowerPoint);
-    let back: Vec<(f64, Rgba)> = g
-        .stops
-        .iter()
-        .map(|s| (s.pos, s.color.resolve(&deckcraft_color::ColorScheme { name: String::new(), colors: [Rgba::BLACK; 12] }, None)))
-        .collect();
-    assert_eq!(back.len(), ramp.len());
-    for ((p, a), (q, b)) in back.iter().zip(&ramp) {
-        assert!((p - q).abs() < 1e-3 && a.r.abs_diff(b.r) <= 1 && a.b.abs_diff(b.b) <= 1, "{back:?}");
-    }
+    // (Gradients are named styles, in styles.xml.)
+    let styles = part(&deckcraft_odp::export(&p).unwrap(), "styles.xml");
+    assert!(styles.matches("<loext:gradient-stop ").count() >= ramp.len(), "{styles}");
     // An sRGB two-stop gradient saved as `.pptx` repeats its first stop (PowerPoint draws two on a
     // curve, more straight).
     let srgb = Gradient {
@@ -1656,10 +1650,14 @@ fn gradient_opacity_and_stops_survive_saves() {
     };
     let p = deck_with(vec![shape(srgb, 20.0)]);
     let pptx = deckcraft_pptx::export(&p).unwrap();
-    let mut z = zip::ZipArchive::new(std::io::Cursor::new(pptx)).unwrap();
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(pptx.clone())).unwrap();
     let mut slide = String::new();
     std::io::Read::read_to_string(&mut z.by_name("ppt/slides/slide1.xml").unwrap(), &mut slide).unwrap();
     assert_eq!(slide.matches("<a:gs ").count(), 3, "{slide}");
+    // And reads back as the two stops blending in sRGB it was.
+    let back = deckcraft_pptx::import(&pptx).unwrap();
+    let Some(Fill::Gradient(g)) = &shapes_of(&back)[0].fill else { panic!() };
+    assert_eq!((g.stops.len(), g.blend), (2, deckcraft_model::style::GradientBlend::Srgb));
 }
 
 /// Review series 2, round 1: slide date placeholders keep their format, a lone varied series
@@ -2006,4 +2004,67 @@ fn every_layout_reads_back_as_itself_within_bounds() {
     // Each made layout: its 64 placeholders and the footers it keeps; and the masters' defaults.
     assert!(shapes <= 1024 * (64 + 3) + 10 * 11 * 16, "{shapes}");
     assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
+}
+
+/// Review series 2, round 4: a master's layouts are its page layouts alone, in their order (not
+/// the built defaults with ours claimed onto them), so a deleted layout stays deleted, a renamed
+/// one is one layout, and the order holds; a layout with its own look is named for its own page,
+/// so it isn't read twice.
+#[test]
+fn a_masters_layouts_are_its_page_layouts_alone() {
+    use deckcraft_model::LayoutType;
+    let mut p = sample();
+    let m = Arc::make_mut(&mut p.masters[0]);
+    let used: Vec<_> = p.slides.iter().map(|s| s.layout).collect();
+    // Delete an unused layout, rename another, reverse the order.
+    let gone = m.layouts.iter().position(|l| !used.contains(&l.id) && l.kind == LayoutType::Comparison).unwrap();
+    m.layouts.remove(gone);
+    let only = m.layouts.iter_mut().find(|l| l.kind == LayoutType::TitleOnly).unwrap();
+    only.name = "Headline".into();
+    m.layouts.reverse();
+    // A layout with a look of its own that no slide uses.
+    let mut look = m.layouts.iter().find(|l| l.kind == LayoutType::Blank).unwrap().clone();
+    (look.id, look.name) = (deckcraft_model::LayoutId(90_201), "Dark".into());
+    look.background = Some(deckcraft_model::Background::Fill { fill: Fill::solid(ColorRef::rgb(Rgba::rgb(5, 5, 5))) });
+    m.layouts.push(look);
+    let names = |p: &Presentation| p.masters.iter().map(|m| m.layouts.iter().map(|l| l.name.clone()).collect::<Vec<_>>()).collect::<Vec<_>>();
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    let mut want = names(&p);
+    let dark = want[0].pop().unwrap();
+    assert_eq!(names(&back)[0], want[0]);
+    // The look layout: on a master of its own (a known loss), once, with its background.
+    let darks: Vec<_> = back.masters.iter().flat_map(|m| &m.layouts).filter(|l| l.name == dark).collect();
+    assert_eq!(darks.len(), 1, "{:?}", names(&back));
+    let dark_master = back.masters.iter().find(|m| m.layouts.iter().any(|l| l.name == dark)).unwrap();
+    assert_eq!(dark_master.background, Some(deckcraft_model::Background::Fill { fill: Fill::solid(ColorRef::rgb(Rgba::rgb(5, 5, 5))) }));
+    // And it holds.
+    let again = deckcraft_odp::import(&deckcraft_odp::export(&back).unwrap()).unwrap();
+    assert_eq!(names(&again), names(&back));
+}
+
+/// Every layout is written, so page layouts have room for many masters' (a cap shared with date
+/// styles cut a hundred masters' last layouts), and a layout's placeholders keep their order
+/// (footers had moved first).
+#[test]
+fn many_masters_keep_their_layouts_and_placeholder_order() {
+    let mut p = sample();
+    let first = p.masters[0].clone();
+    for k in 1..100 {
+        let mut m = (*first).clone();
+        m.id = deckcraft_model::MasterId(80_000 + k);
+        m.name = format!("Copy {k}");
+        for (j, l) in m.layouts.iter_mut().enumerate() {
+            l.id = deckcraft_model::LayoutId(100_000 + k * 100 + j as u32);
+        }
+        p.masters.push(Arc::new(m));
+    }
+    let last = Arc::make_mut(p.masters.last_mut().unwrap());
+    last.layouts[5].name = "Zed".into();
+    let zed = last.layouts[5].id;
+    Arc::make_mut(&mut p.slides[3]).layout = zed;
+    let order = |p: &Presentation| p.masters[0].layouts.iter().map(|l| l.shapes.iter().map(|s| s.ph_type()).collect::<Vec<_>>()).collect::<Vec<_>>();
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    let l = back.masters.iter().flat_map(|m| &m.layouts).find(|l| l.id == back.slides[3].layout).unwrap();
+    assert_eq!(l.name, "Zed");
+    assert_eq!(order(&back), order(&p));
 }

@@ -142,8 +142,11 @@ pub struct Store {
     pub spaces_used: std::cell::Cell<usize>,
 }
 
-/// Most date and time styles, and most page layouts, read (a deck has a few).
+/// Most date and time styles read (a deck has a few).
 const MAX_DATA_STYLES: usize = 1024;
+
+/// Most page layouts read (every layout of every master is one).
+const MAX_PAGE_LAYOUTS: usize = 4096;
 
 /// Most spaces a document's `text:s` elements expand to in all.
 pub const MAX_EXPANDED_SPACES: usize = 1 << 22;
@@ -265,7 +268,7 @@ impl Store {
                         self.layer_mut(auto).date_formats.insert(name, n);
                     }
                 }
-                "style:presentation-page-layout" if self.presentation_layouts.len() < MAX_DATA_STYLES => {
+                "style:presentation-page-layout" if self.presentation_layouts.len() < MAX_PAGE_LAYOUTS => {
                     self.presentation_layouts.push((name, el.clone()));
                 }
                 "style:page-layout" => {

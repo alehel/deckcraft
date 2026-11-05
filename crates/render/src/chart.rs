@@ -583,16 +583,12 @@ fn build_legend_items(rctx: &Ctx, c: &Chart, pie: bool, waterfall: bool) -> Vec<
         // A map draws its own colour scale.
         vec![]
     } else if pie {
-        // Each slice's colour, as `draw_pie` gives it.
         let s = c.series.first();
-        let slice = |i: usize| {
-            let own = s.and_then(|s| s.point_fills.iter().find(|(k, _)| *k == i)).and_then(|(_, f)| match f {
-                Fill::Solid { color: cc } => Some(rctx.color(cc, None)),
-                _ => None,
-            });
-            own.unwrap_or_else(|| if s.is_none_or(|s| c.varies(s)) { series_color(rctx, c, i) } else { series_fill(rctx, c, 0, s) })
-        };
-        c.categories.iter().enumerate().map(|(i, n)| (n.clone(), Paint::Color(slice(i)), None)).collect()
+        c.categories
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), Paint::Color(s.map_or_else(|| series_color(rctx, c, i), |s| slice_color(rctx, c, s, i))), None))
+            .collect()
     } else {
         c.series
             .iter()
@@ -1115,6 +1111,16 @@ mod bar_label_tests {
     }
 }
 
+/// Slice `i`'s colour: its own, else a colour per slice when the pie varies them, else the
+/// series' (the pie and its legend).
+fn slice_color(rctx: &Ctx, c: &Chart, s: &deckcraft_model::chart::Series, i: usize) -> Rgba {
+    let own = s.point_fills.iter().find(|(k, _)| *k == i).and_then(|(_, f)| match f {
+        Fill::Solid { color: cc } => Some(rctx.color(cc, None)),
+        _ => None,
+    });
+    own.unwrap_or_else(|| if c.varies(s) { series_color(rctx, c, i) } else { series_fill(rctx, c, 0, Some(s)) })
+}
+
 fn draw_pie(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, m: Affine, area: Rect, base: f64, text_col: Rgba) {
     let Some(s) = c.series.first() else { return };
     let vals: Vec<f64> = s.values.iter().map(|v| v.unwrap_or(0.0).max(0.0)).collect();
@@ -1134,12 +1140,7 @@ fn draw_pie(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, m: Affine, area: Rec
         p.extend(arc.append_iter(0.1));
         p.close_path();
         ctx.set_transform(m);
-        let col = s
-            .point_fills
-            .iter()
-            .find(|(k, _)| *k == i)
-            .and_then(|(_, f)| if let Fill::Solid { color: cc } = f { Some(rctx.color(cc, None)) } else { None })
-            .unwrap_or_else(|| if c.varies(s) { series_color(rctx, c, i) } else { series_fill(rctx, c, 0, Some(s)) });
+        let col = slice_color(rctx, c, s, i);
         ctx.set_paint(color(col, 1.0));
         ctx.fill_path(&p);
         ctx.set_paint(color(Rgba::WHITE, 1.0));

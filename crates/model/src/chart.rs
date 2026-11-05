@@ -575,8 +575,6 @@ impl Chart {
         }
         c
     }
-    /// A series' own chart type: its own in a combo chart (columns when it names none), else the
-    /// chart's.
     /// Whether series `s` is drawn a colour per point (where a point has none of its own): a pie's
     /// series, or a chart's lone unfilled series (not a waterfall's, which colours by sign), when
     /// the chart varies its colours. Otherwise its points take the series' colour.
@@ -584,6 +582,8 @@ impl Chart {
         self.vary_colors && (self.kind.is_pie() || self.series.len() == 1 && s.fill.is_none() && self.kind != ChartType::Waterfall)
     }
 
+    /// A series' own chart type: its own in a combo chart (columns when it names none), else the
+    /// chart's.
     pub fn series_kind(&self, s: &Series) -> ChartType {
         match (self.kind, s.kind) {
             (ChartType::Combo, Some(k)) if k != ChartType::Combo => k,

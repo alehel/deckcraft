@@ -273,6 +273,14 @@ pub(super) fn gradient(gr: &El, paint: Paint) -> Gradient {
     if stops.len() < 2 {
         stops = vec![(0.0, start), (1.0, end)];
     }
+    // How it blends: straight in sRGB, as LibreOffice draws it; unless it's our writing of a
+    // two-colour gradient on PowerPoint's curve (its ramp's stops), which is that again.
+    let blend = if powerpoint_ramp(&stops) {
+        stops = vec![stops[0], stops[stops.len() - 1]];
+        GradientBlend::PowerPoint
+    } else {
+        GradientBlend::Srgb
+    };
     // Each stop with the opacity where it is (exactly, not in 255ths), still in ODF's order.
     let stops: Vec<GradientStop> = stops
         .into_iter()
@@ -302,8 +310,7 @@ pub(super) fn gradient(gr: &El, paint: Paint) -> Gradient {
                 shape: GradientShape::Linear { angle: 90.0 - angle, scaled: false },
                 flip: None,
                 rotate_with_shape: true,
-                // LibreOffice blends straight in sRGB, however many stops.
-                blend: GradientBlend::Srgb,
+                blend,
                 tile: [0.0; 4],
             }
         }
@@ -318,7 +325,7 @@ pub(super) fn gradient(gr: &El, paint: Paint) -> Gradient {
                 shape: GradientShape::Path { path: path.into(), focus: [cx, cy, 1.0 - cx, 1.0 - cy] },
                 flip: None,
                 rotate_with_shape: true,
-                blend: GradientBlend::Srgb,
+                blend,
                 // The circle is centred on (cx, cy): move the tile, keeping its size.
                 tile: if path == "circle" { [cx - 0.5, cy - 0.5, 0.5 - cx, 0.5 - cy] } else { [0.0; 4] },
             }
@@ -328,10 +335,23 @@ pub(super) fn gradient(gr: &El, paint: Paint) -> Gradient {
             shape: GradientShape::Linear { angle: (90.0 - angle).rem_euclid(360.0), scaled: false },
             flip: None,
             rotate_with_shape: true,
-            blend: GradientBlend::Srgb,
+            blend,
             tile: [0.0; 4],
         },
     }
+}
+
+/// Whether stops are exactly the ramp the writer writes for a two-colour gradient on PowerPoint's
+/// curve, from the first stop's colour to the last's (to the rounding of their hex colours).
+fn powerpoint_ramp(stops: &[(f64, Rgba)]) -> bool {
+    let (Some(first), Some(last)) = (stops.first(), stops.last()) else { return false };
+    let ramp = deckcraft_render::gradient_ramp(&[(0.0, first.1), (1.0, last.1)], GradientBlend::PowerPoint);
+    ramp.len() > 2
+        && ramp.len() == stops.len()
+        && ramp
+            .iter()
+            .zip(stops)
+            .all(|((p, a), (q, b))| (p - q).abs() < 1e-3 && a.r.abs_diff(b.r) <= 1 && a.g.abs_diff(b.g) <= 1 && a.b.abs_diff(b.b) <= 1)
 }
 
 pub(super) fn dash(d: &El, width: f64) -> Dash {
