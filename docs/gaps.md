@@ -153,7 +153,10 @@ Detail in [file-format-parity.md](file-format-parity.md).
   numbers with `.`, `)` or `()` (for example circled numbers, or other scripts) is written as `1.`;
   a single-colour pie that recolours half its slices or more reads back as a varied one
   (LibreOffice's varied pies have a series colour too, so the file can't tell them apart).
-  LibreOffice itself draws every text shadow grey and re-saves it as `1pt 1pt`, shows filled
+  LibreOffice itself draws a table's text black on reopening its own file when the cell and
+  paragraph styles it saved make it another colour (DeckCraft draws the saved colour), shows table
+  columns it saved as `0cm` optimal-width one letter wide (DeckCraft fits them to the frame), draws
+  every text shadow grey and re-saves it as `1pt 1pt`, shows filled
   outlined text filled without its outline (white filled text is written hollow so it shows), drops
   link tooltips and WebM audio, shows date and time fields in its locale's order of its own formats
   (so `datetime3`, `4` and `6` look alike, `8` and `9` show the date only, and its re-save keeps the
