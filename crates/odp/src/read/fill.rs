@@ -25,6 +25,18 @@ impl Reader<'_> {
         }
     }
 
+    /// A gradient within the document's budget of stops (every shape has its own): past it, its
+    /// end stops only.
+    fn budget_stops(&mut self, mut g: Gradient) -> Gradient {
+        if g.stops.len() > self.gradient_stops_left && g.stops.len() > 2 {
+            // A new list (a shortened one would keep its room for them all).
+            let ends = [g.stops.first().cloned(), g.stops.last().cloned()];
+            g.stops = ends.into_iter().flatten().collect();
+        }
+        self.gradient_stops_left = self.gradient_stops_left.saturating_sub(g.stops.len());
+        g
+    }
+
     pub(super) fn fill(&mut self, g: &Props) -> Fill {
         // An opacity gradient wins over a flat opacity.
         let store = std::rc::Rc::clone(&self.store);
@@ -46,14 +58,14 @@ impl Reader<'_> {
             "none" => Fill::None,
             "solid" => match &og {
                 // A solid colour under an opacity gradient: the colour, faded by the gradient.
-                Some(og) => Fill::Gradient(gradient(og, Paint::Faded(color))),
+                Some(og) => Fill::Gradient(self.budget_stops(gradient(og, Paint::Faded(color)))),
                 None => Fill::solid(with_alpha(color)),
             },
             "gradient" => match g.get("draw:fill-gradient-name").and_then(|n| self.store.gradients.get(n)) {
                 // Under an opacity gradient each stop takes the opacity where it is.
                 Some(gr) => {
                     let a = alpha.unwrap_or(1.0);
-                    Fill::Gradient(gradient(gr, Paint::Colors(og_ends.unwrap_or((a, a)))))
+                    Fill::Gradient(self.budget_stops(gradient(gr, Paint::Colors(og_ends.unwrap_or((a, a))))))
                 }
                 None => Fill::solid(with_alpha(color)),
             },

@@ -135,18 +135,25 @@ pub struct Store {
     data_styles: usize,
     /// Page layouts (`style:presentation-page-layout`): where a page's placeholders go, by name.
     pub presentation_layouts: Vec<(String, El)>,
+    /// Where each name is in `presentation_layouts` (the first of a name).
+    presentation_layout_at: HashMap<String, usize>,
     /// Display names, for writing styles back (`Default-title` etc. are plain already).
     pub common_names: Vec<(String, String)>,
     /// Spaces the document's `text:s` elements have expanded to so far (each one asks for up to
     /// a thousand), against [`MAX_EXPANDED_SPACES`].
     pub spaces_used: std::cell::Cell<usize>,
+    /// Paragraphs the document's text has read so far, against [`MAX_DOCUMENT_PARAGRAPHS`].
+    pub paragraphs_used: std::cell::Cell<usize>,
 }
 
 /// Most date and time styles read (a deck has a few).
 const MAX_DATA_STYLES: usize = 1024;
 
-/// Most page layouts read (every layout of every master is one).
-const MAX_PAGE_LAYOUTS: usize = 4096;
+/// Most page layouts read (every layout of every master is one; each copies its kind's default).
+const MAX_PAGE_LAYOUTS: usize = 2048;
+
+/// Most paragraphs read from a document's text in all (each costs some kilobytes, however short).
+pub const MAX_DOCUMENT_PARAGRAPHS: usize = 100_000;
 
 /// Most spaces a document's `text:s` elements expand to in all.
 pub const MAX_EXPANDED_SPACES: usize = 1 << 22;
@@ -269,6 +276,7 @@ impl Store {
                     }
                 }
                 "style:presentation-page-layout" if self.presentation_layouts.len() < MAX_PAGE_LAYOUTS => {
+                    self.presentation_layout_at.entry(name.clone()).or_insert(self.presentation_layouts.len());
                     self.presentation_layouts.push((name, el.clone()));
                 }
                 "style:page-layout" => {
@@ -411,7 +419,7 @@ impl Store {
 
     /// The page layout of that name (the first, should a file name two alike).
     pub fn presentation_layout(&self, name: &str) -> Option<&El> {
-        self.presentation_layouts.iter().find(|(n, _)| n == name).map(|(_, el)| el)
+        self.presentation_layout_at.get(name).and_then(|i| self.presentation_layouts.get(*i)).map(|(_, el)| el)
     }
 
     /// The date format a number style in `scope` (its file's, else a common one) stands for.

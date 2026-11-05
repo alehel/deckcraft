@@ -2267,3 +2267,73 @@ fn charts_and_vertical_text_as_libreoffice_reads_them() {
     let ShapeKind::Chart(orig) = &shapes_of(&p)[1].kind else { panic!() };
     assert!((c.gap_width - orig.gap_width).abs() < 0.01 && (c.overlap - orig.overlap).abs() < 0.01);
 }
+
+/// Final fuzzing: document budgets for what every shape or frame holds a copy of: paragraphs
+/// (each costs kilobytes, however short), gradient stops, and chart points (a chart shown by many
+/// frames); and other apps' page layouts are read without copying the whole master each time.
+#[test]
+fn per_copy_costs_have_document_budgets() {
+    let ns = format!(
+        r#"{NS} xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" xmlns:xlink="http://www.w3.org/1999/xlink""#
+    );
+    let doc = |styles: &str, body: &str| {
+        format!(
+            r#"<office:document {ns} office:mimetype="application/vnd.oasis.opendocument.presentation"><office:styles>{styles}</office:styles><office:master-styles><style:master-page style:name="M"/></office:master-styles><office:body><office:presentation>{body}</office:presentation></office:body></office:document>"#
+        )
+    };
+    let frame = |inner: &str| format!(r#"<draw:frame svg:x="1cm" svg:y="1cm" svg:width="5cm" svg:height="5cm">{inner}</draw:frame>"#);
+    // Paragraphs: six bodies of 20 000.
+    let body = frame(&format!("<draw:text-box>{}</draw:text-box>", "<text:p>x</text:p>".repeat(20_000))).repeat(6);
+    let p = deckcraft_odp::import(doc("", &format!("<draw:page>{body}</draw:page>")).as_bytes()).unwrap();
+    let paragraphs: usize = p.slides[0].shapes.iter().filter_map(|s| s.text.as_ref()).map(|t| t.paragraphs.len()).sum();
+    assert!(paragraphs <= 100_000, "{paragraphs}");
+    // Gradient stops: a 256-stop axial gradient (514 stops laid out) on 5000 shapes.
+    let stops: String = (0..256)
+        .map(|i| {
+            format!(
+                r##"<loext:gradient-stop svg:offset="{}" loext:color-type="rgb" loext:color-value="#{:06x}"/>"##,
+                f64::from(i) / 255.0,
+                (i * 7919) & 0xff_ffff
+            )
+        })
+        .collect();
+    let styles = format!(
+        r#"<draw:gradient draw:name="g" draw:style="axial" draw:border="10%">{stops}</draw:gradient><style:style style:name="gr" style:family="graphic"><style:graphic-properties draw:fill="gradient" draw:fill-gradient-name="g"/></style:style>"#
+    );
+    let rects = r#"<draw:rect draw:style-name="gr" svg:x="1cm" svg:y="1cm" svg:width="1cm" svg:height="1cm"/>"#.repeat(5000);
+    let p = deckcraft_odp::import(doc(&styles, &format!("<draw:page>{rects}</draw:page>")).as_bytes()).unwrap();
+    let total: usize = p.slides[0].shapes.iter().filter_map(|s| if let Some(Fill::Gradient(g)) = &s.fill { Some(g.stops.len()) } else { None }).sum();
+    assert!(total <= (1 << 20) + 2 * 5000, "{total}");
+    // Chart points: one chart of 256 series × 4096 points, shown by 20 frames.
+    let series = r#"<chart:series chart:values-cell-range-address="local-table.$B$2:.$B$4097"><chart:domain table:cell-range-address="local-table.$C$2:.$C$4097"/><chart:domain table:cell-range-address="local-table.$D$2:.$D$4097"/></chart:series>"#.repeat(256);
+    let chart = format!(
+        r#"<office:document-content {ns}><office:body><office:chart><chart:chart chart:class="chart:bubble"><chart:plot-area>{series}</chart:plot-area><table:table table:name="local-table"><table:table-rows><table:table-row table:number-rows-repeated="5000"><table:table-cell office:value-type="float" office:value="1" table:number-columns-repeated="13"/></table:table-row></table:table-rows></table:table></chart:chart></office:chart></office:body></office:document-content>"#
+    );
+    let content = format!(
+        r#"<office:document-content {ns}><office:body><office:presentation><draw:page>{}</draw:page></office:presentation></office:body></office:document-content>"#,
+        frame(r#"<draw:object xlink:href="./Object 1"/>"#).repeat(20)
+    );
+    let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, data) in
+        [("mimetype", "application/vnd.oasis.opendocument.presentation"), ("content.xml", content.as_str()), ("Object 1/content.xml", chart.as_str())]
+    {
+        z.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        z.write_all(data.as_bytes()).unwrap();
+    }
+    let p = deckcraft_odp::import(&z.finish().unwrap().into_inner()).unwrap();
+    let mut points = 0usize;
+    deckcraft_model::walk(&p.slides[0].shapes, &mut |s, _| {
+        if let ShapeKind::Chart(c) = &s.kind {
+            points += c.series.iter().map(|s| s.values.len() + s.x_values.len() + s.sizes.len()).sum::<usize>();
+        }
+    });
+    assert!(points <= 1 << 20, "{points}");
+    // Other apps' page layouts: a thousand described ones, a page each.
+    let layouts: String = (0..1000).map(|i| format!(r#"<style:presentation-page-layout style:name="L{i}" style:display-name="Lay {i}"/>"#)).collect();
+    let pages: String =
+        (0..1000).map(|i| format!(r#"<draw:page draw:master-page-name="M" presentation:presentation-page-layout-name="L{i}"/>"#)).collect();
+    let started = std::time::Instant::now();
+    let p = deckcraft_odp::import(doc(&layouts, &pages).as_bytes()).unwrap();
+    assert_eq!(p.slides.len(), 1000);
+    assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
+}

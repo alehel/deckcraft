@@ -15,8 +15,8 @@ use crate::units;
 const MAX_TABLE_SIDE: usize = 1000;
 /// Most cells read into one table.
 const MAX_TABLE_CELLS: usize = 65_536;
-/// Most cells all of a document's tables hold together.
-pub(super) const MAX_DOCUMENT_CELLS: usize = 262_144;
+/// Most cells all of a document's tables hold together (each costs some kilobytes, empty).
+pub(super) const MAX_DOCUMENT_CELLS: usize = 65_536;
 /// Most text (bytes) all of a document's repeated cells and rows may copy (the cells' own text
 /// is in the file).
 pub(super) const MAX_DOCUMENT_COPIED_TEXT: usize = 4 << 20;

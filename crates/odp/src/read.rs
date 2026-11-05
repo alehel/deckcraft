@@ -33,6 +33,12 @@ const MAX_SHAPES: usize = 250_000;
 /// Most pages read.
 const MAX_PAGES: usize = 10_000;
 
+/// Most gradient stops all of a document's fills have (past it, a gradient keeps its ends).
+const MAX_GRADIENT_STOPS: usize = 1 << 20;
+
+/// Most chart points all of a document's charts have (past it, a chart shows its picture).
+const MAX_CHART_POINTS: usize = 1 << 20;
+
 /// Most master pages read (one per master, and per layout with a look of its own).
 const MAX_MASTERS: usize = 1024;
 
@@ -121,6 +127,8 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         formula_work: geometry::DOCUMENT_WORK,
         cells_left: table::MAX_DOCUMENT_CELLS,
         text_copies_left: table::MAX_DOCUMENT_COPIED_TEXT,
+        gradient_stops_left: MAX_GRADIENT_STOPS,
+        chart_points_left: MAX_CHART_POINTS,
         plain_left: MAX_COMMENT_TEXT,
         package_media: parts,
         targets: HashMap::new(),
@@ -244,6 +252,11 @@ struct Reader<'a> {
     /// Text that copies of repeated table cells and rows may still take
     /// ([`table::MAX_DOCUMENT_COPIED_TEXT`] in all), in bytes.
     text_copies_left: usize,
+    /// Gradient stops the document's fills may still have ([`MAX_GRADIENT_STOPS`] in all).
+    gradient_stops_left: usize,
+    /// Chart points (values, X values, sizes) the document's charts may still have
+    /// ([`MAX_CHART_POINTS`] in all; every frame showing a chart has its own copy).
+    chart_points_left: usize,
     /// Comment text the document has left, in bytes ([`MAX_COMMENT_TEXT`] in all).
     plain_left: usize,
     package_media: PartMedia,
@@ -583,7 +596,8 @@ impl Reader<'_> {
             let template = master.layouts.iter().find(|l| l.kind == kind).or_else(|| master.layouts.iter().find(|l| l.kind == LayoutType::Blank));
             let shown = attr(el, "style:display-name").unwrap_or(name);
             let boxes = self.boxes_of(el);
-            let Some(layout) = self.new_layout(template, kind, shown, boxes, &master, true) else { continue };
+            let phs = master_placeholders(&master);
+            let Some(layout) = self.new_layout(template, kind, shown, boxes, &phs, true) else { continue };
             self.our_layouts.insert(name.clone(), (mi, layout.id));
             match built.iter_mut().find(|(m, _)| *m == mi) {
                 Some((_, ls)) => ls.push(layout),
@@ -622,7 +636,7 @@ impl Reader<'_> {
         kind: LayoutType,
         name: &str,
         boxes: Option<Vec<(PhType, Xfrm)>>,
-        master: &deckcraft_model::Master,
+        master_phs: &[Shape],
         complete: bool,
     ) -> Option<deckcraft_model::Layout> {
         let mut l = template.cloned().unwrap_or_default();
@@ -631,7 +645,7 @@ impl Reader<'_> {
             s.id = self.id();
         }
         if let Some(boxes) = boxes {
-            self.set_placeholders(&mut l, boxes, master, complete);
+            self.set_placeholders(&mut l, boxes, master_phs, complete);
         }
         Some(l)
     }
@@ -640,7 +654,7 @@ impl Reader<'_> {
     /// (in order), new ones the master's look. Its own shapes come first, then these. Footers
     /// are the page layout's when it lists all (`complete`: ours list a layout's every
     /// placeholder) or any, else stay.
-    fn set_placeholders(&mut self, l: &mut deckcraft_model::Layout, boxes: Vec<(PhType, Xfrm)>, master: &deckcraft_model::Master, complete: bool) {
+    fn set_placeholders(&mut self, l: &mut deckcraft_model::Layout, boxes: Vec<(PhType, Xfrm)>, master_phs: &[Shape], complete: bool) {
         let lists_footers = complete || boxes.iter().any(|(k, _)| k.is_footer_kind());
         let (mut old, mut footers) = (Vec::new(), Vec::new());
         l.shapes.retain(|s| match s.ph_type() {
@@ -662,7 +676,7 @@ impl Reader<'_> {
             let mut s = match old.iter().position(|s| s.ph_type().is_some_and(|o| same(o, k))) {
                 Some(j) => old.remove(j),
                 None => {
-                    let mut s = master.shapes.iter().find(|s| s.ph_type().is_some_and(|o| same(o, k))).cloned().unwrap_or_default();
+                    let mut s = master_phs.iter().find(|s| s.ph_type().is_some_and(|o| same(o, k))).cloned().unwrap_or_default();
                     s.id = self.id();
                     s.ph = Some(Placeholder { kind: k, idx: u32::try_from(i).unwrap_or(0), ..Default::default() });
                     s
@@ -684,24 +698,35 @@ impl Reader<'_> {
             return Some(*id);
         }
         let kind = page_layout_kind(el);
-        let master = self.p.masters.get(mi).cloned()?;
-        let of_kind = master.layouts.iter().find(|l| l.kind == kind).or(master.layouts.first());
         let described = attr(el, "style:display-name").and_then(|shown| Some((shown, self.boxes_of(el)?)));
+        // What's needed of the master, copied out (holding it would make the change below copy
+        // the whole master each time).
+        let (of_kind, claim, template, phs) = {
+            let layouts = &self.p.masters.get(mi)?.layouts;
+            let of_kind = layouts.iter().find(|l| l.kind == kind).or(layouts.first()).map(|l| l.id);
+            let claim = described
+                .as_ref()
+                .and_then(|(shown, _)| layouts.iter().position(|l| l.kind == kind && l.name == *shown && !self.layouts_claimed.contains(&l.id)));
+            let template = match (&described, claim) {
+                (Some(_), Some(at)) => layouts.get(at).cloned(),
+                (Some(_), None) => layouts.iter().find(|l| l.kind == kind).or_else(|| layouts.iter().find(|l| l.kind == LayoutType::Blank)).cloned(),
+                (None, _) => None,
+            };
+            (of_kind, claim, template, master_placeholders(self.p.masters.get(mi)?))
+        };
         let id = match described {
-            None => of_kind?.id,
+            None => of_kind?,
             Some((shown, boxes)) => {
-                let claim = master.layouts.iter().position(|l| l.kind == kind && l.name == shown && !self.layouts_claimed.contains(&l.id));
                 let id = match claim {
                     Some(at) => {
-                        let mut l = master.layouts.get(at)?.clone();
-                        self.set_placeholders(&mut l, boxes, &master, false);
+                        let mut l = template?;
+                        self.set_placeholders(&mut l, boxes, &phs, false);
                         let id = l.id;
                         *Arc::make_mut(self.p.masters.get_mut(mi)?).layouts.get_mut(at)? = l;
                         id
                     }
                     None => {
-                        let template = of_kind.filter(|l| l.kind == kind).or_else(|| master.layouts.iter().find(|l| l.kind == LayoutType::Blank));
-                        let l = self.new_layout(template, kind, shown, Some(boxes), &master, false)?;
+                        let l = self.new_layout(template.as_ref(), kind, shown, Some(boxes), &phs, false)?;
                         let id = l.id;
                         Arc::make_mut(self.p.masters.get_mut(mi)?).layouts.push(l);
                         id
@@ -1089,17 +1114,21 @@ impl Reader<'_> {
     /// The chart an embedded object holds (`Object 1/content.xml`), if it is a chart.
     fn object_chart(&mut self, o: &El) -> Option<deckcraft_model::chart::Chart> {
         let href = attr(o, "xlink:href")?.trim_start_matches("./").trim_end_matches('/');
-        if href.is_empty() {
+        let chart = if href.is_empty() {
             // An inline chart document (flat files), read in place.
-            return crate::chart::read(kid(o, "office:document")?);
-        }
-        // A package's chart document is read once, however many frames show it.
-        if let Some(c) = self.charts.get(href) {
-            return c.clone();
-        }
-        let chart = self.pkg.xml(&format!("{href}/content.xml")).and_then(|d| crate::chart::read(&d));
-        self.charts.insert(href.to_string(), chart.clone());
-        chart
+            crate::chart::read(kid(o, "office:document")?)
+        } else if let Some(c) = self.charts.get(href) {
+            // A package's chart document is read once, however many frames show it.
+            c.clone()
+        } else {
+            let chart = self.pkg.xml(&format!("{href}/content.xml")).and_then(|d| crate::chart::read(&d));
+            self.charts.insert(href.to_string(), chart.clone());
+            chart
+        }?;
+        // Each frame's copy costs its points: past the budget, the frame shows its picture.
+        let points: usize = chart.series.iter().map(|s| s.values.len() + s.x_values.len() + s.sizes.len()).sum::<usize>() + chart.categories.len();
+        self.chart_points_left = self.chart_points_left.checked_sub(points)?;
+        Some(chart)
     }
 
     /// `fo:clip="rect(top, right, bottom, left)"`, lengths at the picture's own size, as the
@@ -1400,6 +1429,11 @@ fn line_xfrm(e: &El) -> Xfrm {
     x.flip_h = b.x < a.x;
     x.flip_v = b.y < a.y;
     x
+}
+
+/// A master's placeholders (what new layout placeholders look like).
+fn master_placeholders(m: &deckcraft_model::Master) -> Vec<Shape> {
+    m.shapes.iter().filter(|s| s.ph.is_some()).cloned().collect()
 }
 
 /// A page layout's kind: by its name, as we write it (`obj.Office`, `secHead-2.Office`, see

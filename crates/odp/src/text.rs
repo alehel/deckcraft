@@ -63,11 +63,15 @@ fn walk(cx: &TextCtx, el: &El, list: &ListCtx, out: &mut Vec<IdParagraph>, nesti
         return;
     }
     for e in el.elements() {
-        if out.len() >= MAX_PARAGRAPHS {
+        let used = cx.store.paragraphs_used.get();
+        if out.len() >= MAX_PARAGRAPHS || used >= crate::styles::MAX_DOCUMENT_PARAGRAPHS {
             return;
         }
         match e.name.as_str() {
-            "text:p" | "text:h" => out.push((paragraph(cx, e, list), attr(e, "xml:id").or_else(|| attr(e, "text:id")).map(str::to_string))),
+            "text:p" | "text:h" => {
+                cx.store.paragraphs_used.set(used + 1);
+                out.push((paragraph(cx, e, list), attr(e, "xml:id").or_else(|| attr(e, "text:id")).map(str::to_string)));
+            }
             "text:list" => {
                 let own = attr(e, "text:style-name").and_then(|n| cx.store.list_style(cx.scope, n));
                 let style = own.or(list.style);
