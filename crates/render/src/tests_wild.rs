@@ -186,6 +186,7 @@ fn radial(focus: [f64; 4]) -> Shape {
             stops,
             shape: GradientShape::Path { path: "circle".into(), focus },
             rotate_with_shape: true,
+            blend: Default::default(),
             flip: None,
         })),
         line: no_line(),
@@ -316,6 +317,7 @@ fn children_filled_with_the_group_fill_show_one_fill_across_the_group() {
         stops,
         shape: GradientShape::Linear { angle: 0.0, scaled: false },
         rotate_with_shape: true,
+        blend: Default::default(),
         flip: None,
     });
     let child = |id: u32, x: f64| Shape {
@@ -382,6 +384,7 @@ fn a_linear_gradient_spans_its_tile_rect() {
         stops,
         shape: GradientShape::Linear { angle: 0.0, scaled: false },
         rotate_with_shape: true,
+        blend: Default::default(),
         tile: [0.0, 0.0, 0.5, 0.0],
         flip: None,
     };
@@ -705,6 +708,7 @@ fn gradient_lines_and_their_heads_take_the_gradient() {
             stops: vec![GradientStop { pos: 0.0, color: ColorRef::rgb(RED) }, GradientStop { pos: 1.0, color: ColorRef::rgb(blue) }],
             shape: GradientShape::Linear { angle, scaled: false },
             rotate_with_shape: true,
+            blend: Default::default(),
             tile: [0.0; 4],
             flip: None,
         })
@@ -857,6 +861,7 @@ fn a_gradient_not_rotating_with_its_shape_keeps_to_the_slide() {
     let blue = Rgba::rgb(0, 0, 255);
     for rotate_with_shape in [true, false] {
         let g = Gradient {
+            blend: Default::default(),
             stops: vec![GradientStop { pos: 0.0, color: ColorRef::rgb(RED) }, GradientStop { pos: 1.0, color: ColorRef::rgb(blue) }],
             shape: GradientShape::Linear { angle: 0.0, scaled: false },
             rotate_with_shape,

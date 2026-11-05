@@ -2,8 +2,8 @@
 
 use deckcraft_color::{ColorTransform, Rgba};
 use deckcraft_model::style::{
-    ColorRef, Dash, Effects, Fill, Glow, Gradient, GradientShape, GradientStop, Line, LineEnd, PatternFill, PictureAdjust, PictureFill, PictureMode,
-    Shadow,
+    ColorRef, Dash, Effects, Fill, Glow, Gradient, GradientBlend, GradientShape, GradientStop, Line, LineEnd, PatternFill, PictureAdjust,
+    PictureFill, PictureMode, Shadow,
 };
 use deckcraft_model::{Background, MediaId};
 
@@ -39,7 +39,8 @@ impl Reader<'_> {
             None => g.get("draw:opacity").and_then(|v| units::percent(v)).map(|v| v.clamp(0.0, 1.0)),
         };
         let with_alpha = |c: Rgba| crate::styles::color_ref(c, alpha);
-        // Resolved styles carry the built-in defaults; a page style without them is unfilled.
+        // Callers pass resolved properties (over the built-in defaults); white and no fill stand in
+        // only for an unreadable colour and properties without a fill.
         let color = g.get("draw:fill-color").and_then(|c| units::color(c)).unwrap_or(Rgba::WHITE);
         match g.get("draw:fill").map(String::as_str).unwrap_or("none") {
             "none" => Fill::None,
@@ -272,21 +273,20 @@ pub(super) fn gradient(gr: &El, paint: Paint) -> Gradient {
     if stops.len() < 2 {
         stops = vec![(0.0, start), (1.0, end)];
     }
-    for (pos, c) in &mut stops {
-        *c = c.with_alpha(((o0 + (o1 - o0) * *pos) * 255.0).round() as u8);
-    }
-    let stops = srgb_blend(stops);
-    let stop = |pos: f64, c: Rgba| GradientStop {
-        pos: pos.clamp(0.0, 1.0),
-        color: crate::styles::color_ref(c.with_alpha(255), Some(f64::from(c.a) / 255.0)),
-    };
+    // Each stop with the opacity where it is (exactly, not in 255ths), still in ODF's order.
+    let stops: Vec<GradientStop> = stops
+        .into_iter()
+        .map(|(pos, c)| GradientStop { pos, color: crate::styles::color_ref(c.with_alpha(255), Some(o0 + (o1 - o0) * pos)) })
+        .collect();
     // `border` is the part at the start with the start colour.
-    let squeeze = |stops: &[(f64, Rgba)]| -> Vec<GradientStop> {
+    let squeeze = |stops: &[GradientStop]| -> Vec<GradientStop> {
         let mut out = vec![];
-        if border > 0.0 {
-            out.push(stop(0.0, stops.first().map(|s| s.1).unwrap_or(start)));
+        if border > 0.0
+            && let Some(first) = stops.first()
+        {
+            out.push(GradientStop { pos: 0.0, color: first.color.clone() });
         }
-        out.extend(stops.iter().map(|(p, c)| stop(border + p * (1.0 - border), *c)));
+        out.extend(stops.iter().map(|s| GradientStop { pos: (border + s.pos * (1.0 - border)).clamp(0.0, 1.0), color: s.color.clone() }));
         out
     };
     match style {
@@ -302,6 +302,8 @@ pub(super) fn gradient(gr: &El, paint: Paint) -> Gradient {
                 shape: GradientShape::Linear { angle: 90.0 - angle, scaled: false },
                 flip: None,
                 rotate_with_shape: true,
+                // LibreOffice blends straight in sRGB, however many stops.
+                blend: GradientBlend::Srgb,
                 tile: [0.0; 4],
             }
         }
@@ -316,6 +318,7 @@ pub(super) fn gradient(gr: &El, paint: Paint) -> Gradient {
                 shape: GradientShape::Path { path: path.into(), focus: [cx, cy, 1.0 - cx, 1.0 - cy] },
                 flip: None,
                 rotate_with_shape: true,
+                blend: GradientBlend::Srgb,
                 // The circle is centred on (cx, cy): move the tile, keeping its size.
                 tile: if path == "circle" { [cx - 0.5, cy - 0.5, 0.5 - cx, 0.5 - cy] } else { [0.0; 4] },
             }
@@ -325,22 +328,9 @@ pub(super) fn gradient(gr: &El, paint: Paint) -> Gradient {
             shape: GradientShape::Linear { angle: (90.0 - angle).rem_euclid(360.0), scaled: false },
             flip: None,
             rotate_with_shape: true,
+            blend: GradientBlend::Srgb,
             tile: [0.0; 4],
         },
-    }
-}
-
-/// LibreOffice blends gradient colours straight in sRGB, as DeckCraft draws gradients of more
-/// than two stops; one of exactly two it draws on PowerPoint's curve. So a two-stop gradient
-/// gets its sRGB midpoint as a third stop: the same ramp, and stable through saves (three stops
-/// get none).
-fn srgb_blend(stops: Vec<(f64, Rgba)>) -> Vec<(f64, Rgba)> {
-    match stops.as_slice() {
-        [(p, a), (q, b)] if a != b => {
-            let mix = |x: u8, y: u8| (u16::from(x) + u16::from(y)).div_ceil(2) as u8;
-            vec![(*p, *a), ((p + q) / 2.0, Rgba::rgba(mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b), mix(a.a, b.a))), (*q, *b)]
-        }
-        _ => stops,
     }
 }
 

@@ -1028,6 +1028,7 @@ fn a_linear_gradient_ramps_like_powerpoint() {
             stops: vec![stop(0.0, deckcraft_color::Rgba::rgb(0, 0, 0)), stop(1.0, deckcraft_color::Rgba::rgb(255, 255, 255))],
             shape: GradientShape::Linear { angle: 0.0, scaled: false },
             rotate_with_shape: true,
+            blend: Default::default(),
             flip: None,
         })),
         line: Some(deckcraft_model::style::Line { fill: Some(Fill::None), ..Default::default() }),
@@ -1054,6 +1055,7 @@ fn a_gradient_with_a_stop_off_the_end_stays_linear() {
             stops: vec![stop(0.2, deckcraft_color::Rgba::rgb(0, 0, 0)), stop(1.0, deckcraft_color::Rgba::rgb(255, 255, 255))],
             shape: GradientShape::Linear { angle: 0.0, scaled: false },
             rotate_with_shape: true,
+            blend: Default::default(),
             flip: None,
         })),
         line: Some(deckcraft_model::style::Line { fill: Some(Fill::None), ..Default::default() }),
@@ -1096,6 +1098,7 @@ fn a_shape_filled_with_the_background_shows_the_slide_background() {
             stops: vec![stop(0.0, 0), stop(0.5, 0), stop(1.0, 200)],
             shape: GradientShape::Linear { angle: 0.0, scaled: false },
             rotate_with_shape: true,
+            blend: Default::default(),
             flip: None,
         }),
     });
@@ -1198,6 +1201,7 @@ fn a_text_gradient_starts_over_on_every_line() {
             stops: vec![stop(0.0, 0), stop(1.0, 255)],
             shape: GradientShape::Linear { angle: 90.0, scaled: false },
             rotate_with_shape: true,
+            blend: Default::default(),
             flip: None,
         }));
     }
@@ -1360,6 +1364,7 @@ fn rect_path_gradients_draw_x_shaped_contours() {
             stops: vec![stop(0.0, 0), stop(0.5, 128), stop(1.0, 255)],
             shape: GradientShape::Path { path: "rect".into(), focus: [0.5, 0.5, 0.5, 0.5] },
             rotate_with_shape: true,
+            blend: Default::default(),
             flip: None,
         })),
         line: Some(deckcraft_model::style::Line { fill: Some(Fill::None), ..Default::default() }),

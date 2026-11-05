@@ -142,13 +142,15 @@ Detail in [file-format-parity.md](file-format-parity.md).
   video autoplay; clicks that run a program; percentage paragraph spacing (written in points);
   shrink-to-fit line reduction; pattern fills read back as tiled pictures; a chart's secondary
   axis and its number formats; the notes page size; white outlined text (written hollow for
-  LibreOffice) reads back unfilled; gradient-filled text reads back in its first colour; double
+  LibreOffice) reads back unfilled; gradient-filled text reads back in its first colour; a gradient's opacity
+  is written from its end stops only (a middle stop's own opacity is lost); double
   and other compound lines read back as one line; slide sections; a layout with a look of its own (its own background or shapes) reads back as
   a master of its own; a show range's last slide (it
   plays to the end) and kiosk mode; kerning thresholds (kerning is on or off, read back as from
   1 pt); numbering other than Arabic, Latin letters and Roman numbers with `.`, `)` or `()` (for
-  example circled numbers, or other scripts) is written as `1.`; a single-colour pie that
-  recolours half its slices or more reads back as a varied one (files can't tell them apart).
+  example circled numbers, or other scripts) is written as `1.`; a single-colour
+  pie that recolours half its slices or more reads back as a varied one (LibreOffice's varied
+  pies have a series colour too, so the file can't tell them apart).
   LibreOffice itself draws every text shadow grey and re-saves it as `1pt 1pt`, shows filled
   outlined text filled without its outline (white filled text is written hollow so it shows),
   drops link tooltips and WebM audio, shows date and time fields in its locale's order of its own

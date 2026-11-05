@@ -61,14 +61,14 @@ impl Reader<'_> {
         let is_cell = |c: &&El| c.name == "table:table-cell" || c.name == "table:covered-table-cell";
         let row_width = |r: &El| r.elements().filter(is_cell).map(|c| repeat(c, "table:number-columns-repeated")).fold(0usize, usize::saturating_add);
         let width = rows.iter().map(|r| row_width(r)).max().unwrap_or(0).max(table.cols.len()).clamp(1, MAX_TABLE_SIDE);
-        // Every row costs the full width (it's padded to it); copies of a cell or row cost their
-        // text too. Both budgets are the document's, charged as rows and copies are made.
-        let mut cells_room = MAX_TABLE_CELLS.min(self.cells_left);
+        // Every row costs the full width (it's padded to it): the rows the table may have, within
+        // its own budget and the document's. Copies of a cell or row cost their text too.
+        let rows_room = MAX_TABLE_SIDE.min(MAX_TABLE_CELLS.min(self.cells_left) / width);
         for row in rows {
-            if table.rows.len() >= MAX_TABLE_SIDE || cells_room < width {
+            let rows_left = rows_room.saturating_sub(table.rows.len());
+            if rows_left == 0 {
                 break;
             }
-            cells_room -= width;
             let rs = attr(row, "table:style-name").map(|n| self.store.resolve(ctx.scope, "table-row", Some(n)));
             let h = rs
                 .as_ref()
@@ -85,31 +85,29 @@ impl Reader<'_> {
                     break;
                 }
                 // A repeated cell is read once; its copies keep their text while the budget lasts.
-                let cell = self.cell(c, ctx, default_cell);
+                let mut cell = self.cell(c, ctx, default_cell);
                 let size = cell.text.text().len();
-                cells.push(cell.clone());
-                for _ in 1..n {
-                    if size <= self.text_copies_left {
-                        self.text_copies_left -= size;
-                        cells.push(cell.clone());
-                    } else {
-                        cells.push(Cell { text: Cell::new("").text, ..cell.clone() });
-                    }
+                let mut copies = n - 1;
+                let with_text = self.text_copies_left.checked_div(size).map_or(copies, |room| copies.min(room));
+                self.text_copies_left -= with_text * size;
+                copies -= with_text;
+                cells.extend(std::iter::repeat_n(cell.clone(), with_text + 1));
+                // The rest without text: the text taken out once, not copied to be dropped.
+                if copies > 0 {
+                    cell.text = Cell::new("").text;
+                    cells.extend(std::iter::repeat_n(cell, copies));
                 }
             }
             // A repeated row's copies, while both budgets last.
             let row_text: usize = cells.iter().map(|c| c.text.text().len()).sum();
             let copies = (repeat(row, "table:number-rows-repeated") - 1)
-                .min(MAX_TABLE_SIDE - 1 - table.rows.len())
-                .min(cells_room / width)
+                .min(rows_left - 1)
                 .min(self.text_copies_left.checked_div(row_text).unwrap_or(usize::MAX));
-            cells_room -= copies * width;
             self.text_copies_left -= copies * row_text;
             table.rows.extend(std::iter::repeat_n(Row { height: h, cells }, copies + 1));
         }
+        self.cells_left = self.cells_left.saturating_sub(table.rows.len() * width);
         fit_table(&mut table, x);
-        let read: usize = table.rows.iter().map(|r| r.cells.len()).sum();
-        self.cells_left = self.cells_left.saturating_sub(read);
         merge_spans(&mut table);
         table
     }

@@ -45,6 +45,7 @@ fn gradient(angle: f64) -> Fill {
         ],
         shape: GradientShape::Linear { angle, scaled: true },
         rotate_with_shape: true,
+        blend: Default::default(),
         tile: [0.0; 4],
         flip: None,
     })
@@ -116,6 +117,7 @@ fn style_deck() -> Presentation {
         ],
         shape: GradientShape::Path { path: "circle".into(), focus: [0.2, 0.2, 0.2, 0.2] },
         rotate_with_shape: false,
+        blend: Default::default(),
         tile: [0.0; 4],
         flip: None,
     }));

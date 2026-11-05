@@ -138,6 +138,7 @@ pub fn gradient(f: &El) -> Gradient {
         shape,
         flip: f.attr("flip").and_then(GradientFlip::from_xml),
         rotate_with_shape: f.bool("rotWithShape").unwrap_or(true),
+        blend: Default::default(),
     }
 }
 

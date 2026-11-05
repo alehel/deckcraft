@@ -276,16 +276,21 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
             series.secondary_axis = true;
         }
         // A chart that can vary its colours (see [`varies`]: a pie, or a lone series with every
-        // point styled) varies them unless most points are in the series' colour (a varied one
-        // matches it on one point at most; a single-colour one may recolour a few). Files say no
-        // more (LibreOffice writes both kinds as styled points), so a varied chart keeps every
-        // styled point's colour, and a single-colour one those not in its own.
+        // point styled) does when its series has no colour of its own (as we write it). Other
+        // files say no more (LibreOffice writes both kinds as styled points): it varies unless
+        // most points are in the series' colour (a varied one matches it on one point at most; a
+        // single-colour one may recolour a few). A varied chart keeps every styled point's
+        // colour, a single-colour one those not in its own.
         let all_styled = styled.iter().map(|(_, rep, _)| rep).sum::<usize>() == series.values.len();
-        let varied = i == 0 && (is_pie(c.kind) || series_els.len() == 1 && all_styled && c.kind != ChartType::Waterfall) && {
-            let same: usize = styled.iter().filter(|(_, _, f)| series.fill.as_ref() == Some(f)).map(|(_, rep, _)| rep).sum();
-            c.vary_colors = same * 2 <= series.values.len().max(2);
-            c.vary_colors
-        };
+        let can_vary = i == 0 && (is_pie(c.kind) || series_els.len() == 1 && all_styled && c.kind != ChartType::Waterfall);
+        let varied = can_vary
+            && series.fill.as_ref().is_none_or(|own| {
+                let same: usize = styled.iter().filter(|(_, _, f)| f == own).map(|(_, rep, _)| rep).sum();
+                same * 2 <= series.values.len().max(2)
+            });
+        if can_vary {
+            c.vary_colors = varied;
+        }
         for (at, rep, f) in styled {
             if varied || series.fill.as_ref() != Some(&f) {
                 let n = rep.min(fills_left);

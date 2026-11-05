@@ -113,6 +113,7 @@ pub(crate) fn gradient_param(v: &Value) -> Option<Gradient> {
         stops,
         shape,
         rotate_with_shape: v.get("rotateWithShape").and_then(Value::as_bool).unwrap_or(true),
+        blend: Default::default(),
         flip: v.get("flip").and_then(Value::as_str).and_then(deckcraft_model::style::GradientFlip::from_xml),
     })
 }

@@ -270,7 +270,7 @@ fn inline(cx: &TextCtx, el: &El, text_props: &Props, link: Option<&Hyperlink>, r
                 "text:page-number" | "text:page-count" | "text:date" | "text:time" | "presentation:date-time" => {
                     flush_space(runs, &props, st, link);
                     // A date's format from our date styles (named after it); a time is a time.
-                    let ours = attr(e, "style:data-style-name").and_then(|s| date_format_of(cx.store, s));
+                    let ours = attr(e, "style:data-style-name").and_then(|s| date_format_of(cx.store, cx.scope, s));
                     let field = match (e.name.as_str(), ours) {
                         ("text:page-number", _) => "slidenum".to_string(),
                         ("text:page-count", _) => "slidecount".to_string(),
@@ -311,8 +311,8 @@ fn inline(cx: &TextCtx, el: &El, text_props: &Props, link: Option<&Hyperlink>, r
 /// the format built the same way ([`DATE_FORMATS`](crate::vocab::DATE_FORMATS)), else the first
 /// with the same parts in another order, with other separators or another length of year (as
 /// LibreOffice re-saves ours, renamed `D1`…).
-pub fn date_format_of(store: &Store, style: &str) -> Option<u8> {
-    crate::vocab::date_format(style).or_else(|| store.date_formats.get(style).copied())
+pub fn date_format_of(store: &Store, scope: Scope, style: &str) -> Option<u8> {
+    crate::vocab::date_format(style).or_else(|| store.date_format(scope, style))
 }
 
 /// The PowerPoint date format a number style is built like (see [`date_format_of`]).
@@ -715,10 +715,10 @@ mod tests {
     #[test]
     fn date_formats_are_read_by_name_without_a_style() {
         let store = Store::default();
-        assert_eq!(date_format_of(&store, "datetime4"), Some(4));
-        assert_eq!(date_format_of(&store, "datetime13"), Some(13));
+        assert_eq!(date_format_of(&store, Scope::Content, "datetime4"), Some(4));
+        assert_eq!(date_format_of(&store, Scope::Content, "datetime13"), Some(13));
         for bad in ["datetime0", "datetime14", "datetime+5", "datetime07", "datetime", "date4"] {
-            assert_eq!(date_format_of(&store, bad), None, "{bad}");
+            assert_eq!(date_format_of(&store, Scope::Content, bad), None, "{bad}");
         }
     }
 
@@ -734,12 +734,17 @@ mod tests {
             </office:automatic-styles></office:document-content>"#;
         let mut store = Store::default();
         store.add_document(&crate::dom::parse(x).unwrap(), Scope::Content);
-        assert_eq!(date_format_of(&store, "D2"), Some(2));
-        assert_eq!(date_format_of(&store, "T1"), Some(10));
+        assert_eq!(date_format_of(&store, Scope::Content, "D2"), Some(2));
+        assert_eq!(date_format_of(&store, Scope::Content, "T1"), Some(10));
         // The same parts in another order.
-        assert_eq!(date_format_of(&store, "D3"), Some(1));
+        assert_eq!(date_format_of(&store, Scope::Content, "D3"), Some(1));
         // Ours are read by name, however they're built.
-        assert_eq!(date_format_of(&store, "datetime6"), Some(6));
+        assert_eq!(date_format_of(&store, Scope::Content, "datetime6"), Some(6));
+        // Each file's automatic styles are its own: a `D2` in styles.xml is another style.
+        let other = String::from_utf8_lossy(x).replace("D2", "D9").replace(r#""T1""#, r#""D2""#);
+        store.add_document(&crate::dom::parse(other.as_bytes()).unwrap(), Scope::Styles);
+        assert_eq!(date_format_of(&store, Scope::Styles, "D2"), Some(10));
+        assert_eq!(date_format_of(&store, Scope::Content, "D2"), Some(2));
     }
 
     #[test]

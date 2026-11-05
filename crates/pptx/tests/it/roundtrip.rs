@@ -115,6 +115,7 @@ pub fn rich_deck() -> Presentation {
         ],
         shape: GradientShape::Linear { angle: 45.0, scaled: false },
         rotate_with_shape: true,
+        blend: Default::default(),
 
         flip: Some(GradientFlip::Xy),
     }));

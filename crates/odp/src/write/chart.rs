@@ -121,7 +121,10 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
             Some(Fill::Solid { color }) if lined => hex(ctx.color(color, None)),
             _ => hex(fill_color(ctx, s.fill.as_ref(), i)),
         };
-        let mut g = format!(r#" draw:fill-color="{color}" svg:stroke-color="{color}""#);
+        // A series drawn a colour per point has no colour of its own (its points have theirs),
+        // which is how it reads back as varying.
+        let fill = if crate::chart::varies(c, s) { String::new() } else { format!(r#" draw:fill-color="{color}""#) };
+        let mut g = format!(r#"{fill} svg:stroke-color="{color}""#);
         if lined {
             let width = s.line.as_ref().and_then(|l| l.width).unwrap_or(2.25);
             let _ = write!(g, r#" svg:stroke-width="{}""#, cm(width));

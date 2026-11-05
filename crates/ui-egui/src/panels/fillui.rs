@@ -21,6 +21,7 @@ pub fn default_gradient(base: ColorRef, angle: f64) -> Gradient {
         stops: vec![GradientStop { pos: 0.0, color: base }, GradientStop { pos: 1.0, color: dark }],
         shape: GradientShape::Linear { angle, scaled: false },
         rotate_with_shape: true,
+        blend: Default::default(),
         flip: None,
     }
 }
@@ -146,6 +147,7 @@ pub fn gradient_editor(ui: &mut Ui, id: &str, g: &Gradient, sc: &ColorScheme) ->
                 stops: vec![GradientStop { pos: 0.0, color: light }, GradientStop { pos: 1.0, color: dark }],
                 shape: GradientShape::Path { path: "circle".into(), focus: [0.5, 0.5, 0.5, 0.5] },
                 rotate_with_shape: true,
+                blend: Default::default(),
                 flip: None,
             },
             Gradient {
@@ -525,6 +527,7 @@ mod tests {
             shape: GradientShape::Linear { angle: 90.0, scaled: false },
             flip: Some(GradientFlip::Xy),
             rotate_with_shape: true,
+            blend: Default::default(),
             tile: [0.0; 4],
         };
         assert_eq!(gradient_json(&gradient).get("flip"), Some(&json!("xy")));

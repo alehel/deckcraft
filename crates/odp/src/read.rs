@@ -8,8 +8,8 @@ use deckcraft_geom::preset::FillMode;
 use deckcraft_model::style::{ColorRef, Fill, PictureFill, PictureMode};
 use deckcraft_model::text::{Action, Align, Anchor, AutoFit, BodyProps, LevelStyle, ListStyle, Paragraph, TextBody};
 use deckcraft_model::{
-    Background, CustomPath, Geom, LayoutType, MediaId, PhType, Placeholder, Presentation, Shape, ShapeId, ShapeKind, Size, Slide, SlideId, Xfrm,
-    defaults,
+    Background, CustomPath, Geom, LayoutId, LayoutType, MediaId, PhType, Placeholder, Presentation, Shape, ShapeId, ShapeKind, Size, Slide, SlideId,
+    Xfrm, defaults,
 };
 
 use crate::OdpError;
@@ -101,6 +101,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         p,
         shapes: 0,
         master_index: HashMap::new(),
+        layouts_read: HashMap::new(),
         page_names: HashMap::new(),
         para_ids: vec![],
         hatch_tiles: HashMap::new(),
@@ -128,7 +129,9 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
     let decls = Decls::read(body);
     // The date format, from a current-date declaration in one of our date styles (named after
     // the format).
-    if let Some(n) = decls.dates.values().filter(|d| d.current).find_map(|d| d.style.as_deref().and_then(|s| text::date_format_of(&r.store, s))) {
+    if let Some(n) =
+        decls.dates.values().filter(|d| d.current).find_map(|d| d.style.as_deref().and_then(|s| text::date_format_of(&r.store, Scope::Content, s)))
+    {
         r.p.header_footer.date_format = format!("datetime{n}");
     }
     for (i, page) in kids(body, "draw:page").take(MAX_PAGES).enumerate() {
@@ -203,6 +206,8 @@ struct Reader<'a> {
     shapes: usize,
     /// Master page name → index in `p.masters`, with its footer placeholders.
     master_index: HashMap<String, usize>,
+    /// The layout each page layout became, per master (index) and page layout name.
+    layouts_read: HashMap<(usize, String), LayoutId>,
     /// Page names (`draw:name`) → slide ids, for `#name` links.
     page_names: HashMap<String, SlideId>,
     /// The ids of the paragraphs of the text body read last.
@@ -441,14 +446,19 @@ impl Reader<'_> {
             self.background(pp)
         };
         let bg = page_bg.as_ref().and_then(background_rgb).or(master_bg).unwrap_or(Rgba::WHITE);
-        // The page's layout: from its page layout, else guessed from the placeholders it has.
-        let layout = attr(page, "presentation:presentation-page-layout-name")
-            .and_then(|n| self.store.presentation_layouts.get(n))
-            .map(|el| (page_layout_kind(el), attr(el, "style:display-name").map(str::to_string)));
-        let title_slide = match &layout {
-            Some((kind, _)) => *kind == LayoutType::Title,
-            None => page.elements().any(|e| attr(e, "presentation:class") == Some("subtitle")),
-        };
+        // The page's layout: the one its page layout became, else the master's of the kind its
+        // placeholders suggest.
+        let store = std::rc::Rc::clone(&self.store);
+        let read = attr(page, "presentation:presentation-page-layout-name")
+            .and_then(|n| store.presentation_layouts.get(n).map(|el| (n, el)))
+            .and_then(|(n, el)| self.layout_for(mi, n, el));
+        let layout = read.or_else(|| {
+            let kind = guess_layout(page.elements().filter_map(|e| attr(e, "presentation:class")).filter_map(ph_kind));
+            let layouts = &self.p.masters.get(mi)?.layouts;
+            layouts.iter().find(|l| l.kind == kind).or(layouts.first()).map(|l| l.id)
+        });
+        let kind = layout.and_then(|id| self.p.masters.get(mi)?.layout(id)).map(|l| l.kind);
+        let title_slide = kind == Some(LayoutType::Title);
         let ctx = Ctx { scope: Scope::Content, master: master_name, bg, title_slide };
         // `pageN` for the Nth page is the name a writer gives a slide that has none.
         let unnamed = format!("page{}", index + 1);
@@ -522,13 +532,74 @@ impl Reader<'_> {
         }
         // Footer fields the page shows, from its master's placeholders.
         self.page_footers(mi, pp, page, decls, &mut shapes);
-        let (kind, layout_name) = layout.unwrap_or_else(|| (guess_layout(shapes.iter().filter_map(Shape::ph_type)), None));
-        let master = self.p.masters.get(mi)?;
-        // The master's layout of that name and kind, else of that kind.
-        let named = master.layouts.iter().find(|l| l.kind == kind && layout_name.as_deref().is_some_and(|n| l.name == n));
-        slide.layout = named.or_else(|| master.layouts.iter().find(|l| l.kind == kind)).or(master.layouts.first()).map(|l| l.id).unwrap_or_default();
+        slide.layout = layout.unwrap_or_default();
         slide.shapes = shapes;
         Some(slide)
+    }
+
+    /// The layout a page layout (named `name`) becomes on master `mi`: the master's layout of the
+    /// same kind and name (its defaults), else a new one of that kind (a blank one for custom
+    /// layouts); with the page layout's placeholders where it puts them, when it's a described
+    /// layout (one with a name to show, as we write them: LibreOffice's own are generic
+    /// arrangements, boxed for no page in particular).
+    fn layout_for(&mut self, mi: usize, name: &str, el: &El) -> Option<LayoutId> {
+        if let Some(id) = self.layouts_read.get(&(mi, name.to_string())) {
+            return Some(*id);
+        }
+        let kind = page_layout_kind(el);
+        let shown = attr(el, "style:display-name");
+        let boxes: Vec<(PhType, Xfrm)> = kids(el, "presentation:placeholder")
+            .filter(|_| shown.is_some())
+            .take(64)
+            .filter_map(|p| Some((ph_kind(attr(p, "presentation:object")?)?, shape_xfrm(p))))
+            .filter(|(k, _)| !k.is_footer_kind())
+            .collect();
+        let new_id = LayoutId(self.p.alloc_id()?);
+        let fresh: Vec<ShapeId> = boxes.iter().map(|_| self.id()).collect();
+        let master = Arc::make_mut(self.p.masters.get_mut(mi)?);
+        let at = match master.layouts.iter().position(|l| l.kind == kind && shown.is_none_or(|n| l.name == n)) {
+            Some(i) => i,
+            None => {
+                let base = master.layouts.iter().find(|l| l.kind == kind).or_else(|| master.layouts.iter().find(|l| l.kind == LayoutType::Blank));
+                let mut l = base.cloned().unwrap_or_default();
+                (l.id, l.kind) = (new_id, kind);
+                l.name = shown.unwrap_or(name).to_string();
+                master.layouts.push(l);
+                master.layouts.len() - 1
+            }
+        };
+        if !boxes.is_empty() {
+            let master_phs: Vec<Shape> = master.shapes.iter().filter(|s| s.ph.is_some()).cloned().collect();
+            let l = master.layouts.get_mut(at)?;
+            // Its placeholders are the page layout's, the footers aside: each takes the box of
+            // the one of its kind (the nth of the nth), new ones the master's look.
+            let mut old: Vec<Shape> = Vec::new();
+            l.shapes.retain(|s| match s.ph_type() {
+                Some(k) if !k.is_footer_kind() => {
+                    old.push(s.clone());
+                    false
+                }
+                _ => true,
+            });
+            let same = |a: PhType, b: PhType| a == b || a.is_title() && b.is_title();
+            for (i, ((k, x), id)) in boxes.into_iter().zip(fresh).enumerate() {
+                let reuse = old.iter().position(|s| s.ph_type().is_some_and(|o| same(o, k)));
+                let mut s = match reuse {
+                    Some(j) => old.remove(j),
+                    None => {
+                        let mut s = master_phs.iter().find(|s| s.ph_type().is_some_and(|o| same(o, k))).cloned().unwrap_or_default();
+                        s.id = id;
+                        s.ph = Some(Placeholder { kind: k, idx: u32::try_from(i).unwrap_or(0), ..Default::default() });
+                        s
+                    }
+                };
+                s.xfrm = Some(x);
+                l.shapes.push(s);
+            }
+        }
+        let id = master.layouts.get(at)?.id;
+        self.layouts_read.insert((mi, name.to_string()), id);
+        Some(id)
     }
 
     fn page_footers(&mut self, mi: usize, pp: &Props, page: &El, decls: &Decls, shapes: &mut Vec<Shape>) {
@@ -567,7 +638,7 @@ impl Reader<'_> {
             if d.current {
                 add(PhType::Date, None, self);
                 // The master's field (`presentation:date-time`) has no format: the declaration's.
-                let format = d.style.as_deref().and_then(|s| text::date_format_of(&self.store, s));
+                let format = d.style.as_deref().and_then(|s| text::date_format_of(&self.store, Scope::Content, s));
                 if let (Some(n), Some(body)) = (format, shapes.last_mut().filter(|s| s.ph_type() == Some(PhType::Date)).and_then(|s| s.text.as_mut()))
                 {
                     for r in body.paragraphs.iter_mut().flat_map(|p| p.runs.iter_mut()) {

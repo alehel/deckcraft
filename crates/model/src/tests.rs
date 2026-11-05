@@ -78,6 +78,7 @@ fn a_gradient_without_stops_takes_them_from_its_style() {
         stops: vec![],
         shape: style::GradientShape::Linear { angle: 45.0, scaled: true },
         rotate_with_shape: true,
+        blend: Default::default(),
         flip: None,
     };
     let mut st = ShapeStyle::accent(SchemeSlot::Accent2);

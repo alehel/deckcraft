@@ -107,6 +107,9 @@ struct Layer {
     /// By (family, name).
     styles: HashMap<(String, String), Style>,
     lists: HashMap<String, El>,
+    /// The PowerPoint date format (1–13) of each date and time number style that stands for one;
+    /// worked out once, as the style is read.
+    date_formats: HashMap<String, u8>,
 }
 
 #[derive(Debug, Default)]
@@ -128,9 +131,8 @@ pub struct Store {
     /// Picture bullets: `xlink:href` → the media read from the package.
     pub image_bullets: HashMap<String, deckcraft_model::MediaId>,
     pub page_layouts: HashMap<String, Props>,
-    /// The PowerPoint date format (1–13) of each date and time number style that stands for one,
-    /// by name; worked out once, as the style is read.
-    pub date_formats: HashMap<String, u8>,
+    /// Date and time number styles read, in all the layers (against [`MAX_DATA_STYLES`]).
+    data_styles: usize,
     /// Page layouts (`style:presentation-page-layout`): where a page's placeholders go, by name.
     pub presentation_layouts: HashMap<String, El>,
     /// Display names, for writing styles back (`Default-title` etc. are plain already).
@@ -140,7 +142,7 @@ pub struct Store {
     pub spaces_used: std::cell::Cell<usize>,
 }
 
-/// Most date and time styles read (a deck has a few).
+/// Most date and time styles, and most page layouts, read (a deck has a few).
 const MAX_DATA_STYLES: usize = 1024;
 
 /// Most spaces a document's `text:s` elements expand to in all.
@@ -257,9 +259,10 @@ impl Store {
                 "draw:opacity" => {
                     self.opacities.insert(name, el.clone());
                 }
-                "number:date-style" | "number:time-style" if self.date_formats.len() < MAX_DATA_STYLES => {
+                "number:date-style" | "number:time-style" if self.data_styles < MAX_DATA_STYLES => {
+                    self.data_styles += 1;
                     if let Some(n) = crate::text::date_format_by_parts(el) {
-                        self.date_formats.insert(name, n);
+                        self.layer_mut(auto).date_formats.insert(name, n);
                     }
                 }
                 "style:presentation-page-layout" if self.presentation_layouts.len() < MAX_DATA_STYLES => {
@@ -401,6 +404,11 @@ impl Store {
         let standalone = layers.iter().flat_map(|l| l.lists.values());
         let in_styles = layers.iter().flat_map(|l| l.styles.values()).filter_map(|s| s.list.as_deref());
         standalone.chain(in_styles).collect()
+    }
+
+    /// The date format a number style in `scope` (its file's, else a common one) stands for.
+    pub fn date_format(&self, scope: Scope, name: &str) -> Option<u8> {
+        self.layer(Some(scope)).date_formats.get(name).or_else(|| self.common.date_formats.get(name)).copied()
     }
 
     pub fn list_style(&self, scope: Scope, name: &str) -> Option<&El> {

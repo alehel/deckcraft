@@ -97,6 +97,7 @@ fn geometry_fill_line_and_rotation_round_trip() {
         shape: GradientShape::Linear { angle: 45.0, scaled: false },
         flip: None,
         rotate_with_shape: true,
+        blend: Default::default(),
         tile: [0.0; 4],
     };
     grad.rotate_with_shape = true;
@@ -1099,6 +1100,7 @@ fn gradient_opacity_varies_along_the_gradient() {
         shape: GradientShape::Linear { angle: 0.0, scaled: false },
         flip: None,
         rotate_with_shape: true,
+        blend: Default::default(),
         tile: [0.0; 4],
     };
     let shape =
@@ -1599,6 +1601,7 @@ fn gradient_opacity_and_stops_survive_saves() {
         shape: GradientShape::Path { path: "circle".into(), focus: [0.5, 0.5, 0.5, 0.5] },
         flip: None,
         rotate_with_shape: true,
+        blend: Default::default(),
         tile: [0.0; 4],
     };
     let linear = Gradient {
@@ -1606,6 +1609,7 @@ fn gradient_opacity_and_stops_survive_saves() {
         shape: GradientShape::Linear { angle: 0.0, scaled: false },
         flip: None,
         rotate_with_shape: true,
+        blend: Default::default(),
         tile: [0.0; 4],
     };
     let shape = |g: Gradient, y: f64| Shape {
@@ -1625,7 +1629,16 @@ fn gradient_opacity_and_stops_survive_saves() {
         let Some(Fill::Gradient(g)) = &s[1].fill else { panic!("{:?}", s[1].fill) };
         counts.push(g.stops.len());
     }
-    assert!(counts.windows(2).all(|w| w[0] == w[1]) && counts[0] <= 3, "{counts:?}");
+    // The file's own two stops, blending as LibreOffice draws them (no stops made up).
+    assert_eq!(counts, [2, 2, 2]);
+    let Some(Fill::Gradient(g)) = &shapes_of(&p)[1].fill else { panic!() };
+    assert_eq!(g.blend, deckcraft_model::style::GradientBlend::Srgb);
+    // Saved as `.pptx`, the sRGB blend is kept by a third stop (PowerPoint draws two on a curve).
+    let pptx = deckcraft_pptx::export(&p).unwrap();
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(pptx)).unwrap();
+    let mut slide = String::new();
+    std::io::Read::read_to_string(&mut z.by_name("ppt/slides/slide1.xml").unwrap(), &mut slide).unwrap();
+    assert_eq!(slide.matches("<a:gs ").count(), 3 + 3, "{slide}");
 }
 
 /// Review series 2, round 1: slide date placeholders keep their format, a lone varied series
@@ -1792,4 +1805,128 @@ fn line_ends_round_trip() {
     let back = deckcraft_odp::import(&deckcraft_odp::export(&deck_with(shapes)).unwrap()).unwrap();
     let got: Vec<_> = shapes_of(&back).iter().map(|s| s.line.as_ref().and_then(|l| l.tail.clone())).collect();
     assert_eq!(got, want);
+}
+
+/// A page layout reads back as a layout of its own: a custom layout keeps its kind, name and
+/// placeholder boxes (it read as the master's first layout), and two layouts of one kind stay two.
+#[test]
+fn custom_layouts_keep_their_name_kind_and_boxes() {
+    use deckcraft_model::{Layout, LayoutType, Placeholder};
+    let mut p = sample();
+    let m = Arc::make_mut(&mut p.masters[0]);
+    let title = |x: f64| Shape {
+        xfrm: Some(Xfrm::new(x, 40.0, 300.0, 60.0)),
+        ph: Some(Placeholder { kind: PhType::Title, ..Default::default() }),
+        text: Some(TextBody::default()),
+        ..Default::default()
+    };
+    let custom = Layout {
+        id: deckcraft_model::LayoutId(90_001),
+        name: "My Layout".into(),
+        kind: LayoutType::Custom,
+        shapes: vec![title(123.0)],
+        show_master_shapes: true,
+        ..Default::default()
+    };
+    let mut second = m.layouts.iter().find(|l| l.kind == LayoutType::TitleOnly).unwrap().clone();
+    (second.id, second.name) = (deckcraft_model::LayoutId(90_002), "Title Only Wide".into());
+    second.shapes.retain(|s| s.ph_type() != Some(PhType::Title));
+    second.shapes.push(title(7.0));
+    m.layouts.push(custom);
+    m.layouts.push(second);
+    let s0 = Arc::make_mut(&mut p.slides[0]);
+    s0.layout = deckcraft_model::LayoutId(90_001);
+    let s1 = Arc::make_mut(&mut p.slides[1]);
+    s1.layout = deckcraft_model::LayoutId(90_002);
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    let layout = |i: usize| back.masters.iter().flat_map(|m| m.layouts.iter()).find(|l| l.id == back.slides[i].layout).unwrap();
+    let title_x = |l: &Layout| l.shapes.iter().find(|s| s.ph_type().is_some_and(PhType::is_title)).and_then(|s| s.xfrm).map(|x| x.x.round());
+    assert_eq!((layout(0).kind, layout(0).name.as_str(), title_x(layout(0))), (LayoutType::Custom, "My Layout", Some(123.0)));
+    assert_eq!((layout(1).kind, layout(1).name.as_str(), title_x(layout(1))), (LayoutType::TitleOnly, "Title Only Wide", Some(7.0)));
+    // A third save changes nothing.
+    let again = deckcraft_odp::import(&deckcraft_odp::export(&back).unwrap()).unwrap();
+    let names = |p: &Presentation| {
+        p.slides.iter().map(|s| p.masters.iter().flat_map(|m| m.layouts.iter()).find(|l| l.id == s.layout).unwrap().name.clone()).collect::<Vec<_>>()
+    };
+    assert_eq!(names(&again), names(&back));
+    assert_eq!(again.masters.iter().map(|m| m.layouts.len()).sum::<usize>(), back.masters.iter().map(|m| m.layouts.len()).sum::<usize>());
+}
+
+/// A varied chart is written so it reads back varied (its series has no colour of its own), and
+/// the read model says what the renderer draws; a single-colour one recolouring a slice stays
+/// single-colour. (Recolouring most of its slices it reads as varied: LibreOffice's varied pies
+/// give their series a colour too, so a series colour can't mean "single colour".)
+#[test]
+fn varied_and_single_colour_charts_are_told_apart() {
+    use deckcraft_model::chart::{Chart, ChartType, Series};
+    let solid = |r, g, b| Fill::solid(ColorRef::rgb(Rgba::rgb(r, g, b)));
+    let pie = |vary_colors: bool, fill: Option<Fill>, point_fills: Vec<(usize, Fill)>| Chart {
+        kind: ChartType::Pie,
+        vary_colors,
+        series: vec![Series { name: "P".into(), values: vec![Some(1.0), Some(2.0), Some(3.0)], fill, point_fills, ..Default::default() }],
+        categories: vec!["a".into(), "b".into(), "c".into()],
+        ..Default::default()
+    };
+    let charts = [pie(false, Some(solid(0, 150, 0)), vec![(1, solid(200, 0, 0))]), pie(true, None, vec![])];
+    let shapes = charts
+        .iter()
+        .enumerate()
+        .map(|(i, c)| Shape {
+            xfrm: Some(Xfrm::new(20.0, 20.0 + i as f64 * 120.0, 200.0, 100.0)),
+            kind: ShapeKind::Chart(Box::new(c.clone())),
+            ..Default::default()
+        })
+        .collect();
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&deck_with(shapes)).unwrap()).unwrap();
+    let got: Vec<(bool, bool)> = shapes_of(&back)
+        .iter()
+        .filter_map(|s| if let ShapeKind::Chart(c) = &s.kind { Some((c.vary_colors, c.series[0].fill.is_some())) } else { None })
+        .collect();
+    assert_eq!(got, [(false, true), (true, false)]);
+}
+
+/// Review series 2, round 2 (LibreOffice files): a generic page layout picks the layout without
+/// moving its boxes, masters no slide uses are kept, an opaque run under a translucent paragraph
+/// style stays opaque through saves, and a flat opacity on a gradient reads exactly.
+#[test]
+fn libreoffice_layouts_masters_and_opacities_hold() {
+    use deckcraft_model::LayoutType;
+    let ns = format!(
+        r#"{NS} xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0""#
+    );
+    let doc = |styles: &str, page_attrs: &str, body: &str| {
+        format!(
+            r##"<office:document {ns} office:mimetype="application/vnd.oasis.opendocument.presentation"><office:styles>{styles}</office:styles><office:automatic-styles><style:style style:name="P1" style:family="paragraph"><style:text-properties fo:color="#666666" loext:opacity="30%"/></style:style><style:style style:name="T1" style:family="text"><style:text-properties fo:color="#666666" loext:opacity="100%"/></style:style><style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="gradient" draw:fill-gradient-name="G" draw:opacity="50%"/></style:style></office:automatic-styles><office:master-styles><style:master-page style:name="M1"/><style:master-page style:name="M2"/></office:master-styles><office:body><office:presentation><draw:page draw:master-page-name="M1"{page_attrs}>{body}</draw:page></office:presentation></office:body></office:document>"##
+        )
+    };
+    let gradient = r##"<draw:gradient draw:name="G" draw:style="linear" draw:start-color="#ff0000" draw:end-color="#0000ff"/>"##;
+    let generic = r#"<style:presentation-page-layout style:name="AL1T0"><presentation:placeholder presentation:object="title" svg:x="1cm" svg:y="1cm" svg:width="-0.5cm" svg:height="1cm"/></style:presentation-page-layout>"#;
+    let body = r#"<draw:frame presentation:class="title" svg:x="1cm" svg:y="1cm" svg:width="10cm" svg:height="2cm"><draw:text-box><text:p>Title</text:p></draw:text-box></draw:frame><draw:frame svg:x="1cm" svg:y="5cm" svg:width="10cm" svg:height="2cm"><draw:text-box><text:p text:style-name="P1"><text:span text:style-name="T1">opaque</text:span></text:p></draw:text-box></draw:frame><draw:custom-shape draw:style-name="gr1" svg:x="1cm" svg:y="9cm" svg:width="4cm" svg:height="2cm"><draw:enhanced-geometry svg:viewBox="0 0 21600 21600" draw:type="rectangle"/></draw:custom-shape>"#;
+    let with = deckcraft_odp::import(doc(&format!("{gradient}{generic}"), r#" presentation:presentation-page-layout-name="AL1T0""#, body).as_bytes())
+        .unwrap();
+    let without = deckcraft_odp::import(doc(gradient, "", body).as_bytes()).unwrap();
+    let title_only = |p: &Presentation| p.masters[0].layouts.iter().find(|l| l.kind == LayoutType::TitleOnly).unwrap().shapes.clone();
+    assert_eq!(title_only(&with), title_only(&without));
+    assert_eq!(with.masters.len(), 2);
+    let saved = deckcraft_odp::import(&deckcraft_odp::export(&with).unwrap()).unwrap();
+    assert_eq!(saved.masters.len(), 2, "{:?}", saved.masters.iter().map(|m| &m.name).collect::<Vec<_>>());
+    let again = deckcraft_odp::import(&deckcraft_odp::export(&saved).unwrap()).unwrap();
+    for p in [&with, &saved, &again] {
+        let run = p.slides[0]
+            .shapes
+            .iter()
+            .filter_map(|s| s.text.as_ref())
+            .flat_map(|t| &t.paragraphs)
+            .flat_map(|p| &p.runs)
+            .find(|r| r.text == "opaque")
+            .unwrap();
+        let alpha = match &run.props.fill {
+            Some(Fill::Solid { color }) => color.alpha(),
+            f => panic!("{f:?}"),
+        };
+        assert!(alpha > 0.99, "{alpha}");
+    }
+    let shapes = shapes_of(&with);
+    let Some(Fill::Gradient(g)) = &shapes.iter().find(|s| matches!(s.fill, Some(Fill::Gradient(_)))).unwrap().fill else { panic!() };
+    assert_eq!(g.stops[0].color.mods, [deckcraft_color::ColorTransform::Alpha(50_000)]);
 }

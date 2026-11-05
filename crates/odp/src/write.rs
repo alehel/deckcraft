@@ -293,8 +293,8 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
     };
     w.page_names = page_names(p);
     // Master pages are how slides look: one per master the slides use, and one more per layout
-    // that has a look of its own (a background, its own shapes, or the master's hidden); a deck
-    // without slides keeps the first master. Where placeholders go is the slide's page layout.
+    // that has a look of its own (a background, its own shapes, or the master's hidden). Where
+    // placeholders go is the slide's page layout.
     let mut pages: Vec<Page> = vec![];
     let mut page_of: HashMap<(usize, Option<LayoutId>), String> = HashMap::new();
     let mut want = |mi: usize, layout: Option<LayoutId>, pages: &mut Vec<Page>| -> String {
@@ -330,8 +330,9 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         slide_pages.push(want(mi, look, &mut pages));
         slide_layouts.push(layout.and_then(|l| p.masters.get(mi).map(|m| layouts_written.name(p, m, l))));
     }
-    if pages.is_empty() {
-        want(0, None, &mut pages);
+    // Masters no slide uses keep their page (a template's are all there to be used).
+    for mi in 0..p.masters.len() {
+        want(mi, None, &mut pages);
     }
 
     // styles.xml: presentation styles and master pages.

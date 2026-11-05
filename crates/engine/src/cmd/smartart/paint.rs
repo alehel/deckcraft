@@ -98,6 +98,7 @@ pub(super) fn paint(d: &Diagram, sh: &mut Shape, i: usize, light: bool) {
                 ],
                 shape: GradientShape::Linear { angle: 90.0, scaled: false },
                 rotate_with_shape: true,
+                blend: Default::default(),
                 tile: [0.0; 4],
                 flip: None,
             }));

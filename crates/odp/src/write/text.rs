@@ -443,11 +443,9 @@ pub fn text_attrs(w: &mut Writer, ctx: &Ctx, r: &RunProps) -> String {
         Some(Fill::None) => Some((Rgba::BLACK, 0.0)),
         _ => Some((resolve::text_color(ctx, r), 1.0)),
     };
+    // A colour with its opacity, opaque too: a style's otherwise shows through.
     if let Some((c, alpha)) = color {
-        let _ = write!(a, r#" fo:color="{}""#, hex(c));
-        if alpha < 1.0 {
-            let _ = write!(a, r#" loext:opacity="{}""#, pct(alpha.clamp(0.0, 1.0)));
-        }
+        let _ = write!(a, r#" fo:color="{}" loext:opacity="{}""#, hex(c), pct(alpha.clamp(0.0, 1.0)));
     }
     // Values set to "off" are written too, so a style's (or the master's) don't show through.
     match r.baseline {
