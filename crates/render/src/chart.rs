@@ -91,7 +91,7 @@ fn bar_paint(ctx: &Ctx, c: &Chart, si: usize, pi: usize, s: &deckcraft_model::ch
     if let Some(f) = fills.and_then(|m| m.get(&pi)) {
         return paint_of(ctx, Some(*f), series_fill(ctx, c, si, Some(s)));
     }
-    if c.vary_colors && c.series.len() == 1 && s.fill.is_none() && c.kind != ChartType::Waterfall {
+    if c.varies(s) {
         return Paint::Color(series_color(ctx, c, pi));
     }
     paint_of(ctx, s.fill.as_ref(), series_color(ctx, c, si))
@@ -583,7 +583,16 @@ fn build_legend_items(rctx: &Ctx, c: &Chart, pie: bool, waterfall: bool) -> Vec<
         // A map draws its own colour scale.
         vec![]
     } else if pie {
-        c.categories.iter().enumerate().map(|(i, n)| (n.clone(), Paint::Color(series_color(rctx, c, i)), None)).collect()
+        // Each slice's colour, as `draw_pie` gives it.
+        let s = c.series.first();
+        let slice = |i: usize| {
+            let own = s.and_then(|s| s.point_fills.iter().find(|(k, _)| *k == i)).and_then(|(_, f)| match f {
+                Fill::Solid { color: cc } => Some(rctx.color(cc, None)),
+                _ => None,
+            });
+            own.unwrap_or_else(|| if s.is_none_or(|s| c.varies(s)) { series_color(rctx, c, i) } else { series_fill(rctx, c, 0, s) })
+        };
+        c.categories.iter().enumerate().map(|(i, n)| (n.clone(), Paint::Color(slice(i)), None)).collect()
     } else {
         c.series
             .iter()
@@ -594,11 +603,8 @@ fn build_legend_items(rctx: &Ctx, c: &Chart, pie: bool, waterfall: bool) -> Vec<
                 if line {
                     (s.name.clone(), Paint::Color(series_line(rctx, c, i, s)), None)
                 } else if k.is_bar_like() {
-                    let paint = if c.vary_colors && c.series.len() == 1 && s.fill.is_none() {
-                        Paint::Color(series_color(rctx, c, i))
-                    } else {
-                        paint_of(rctx, s.fill.as_ref(), series_color(rctx, c, i))
-                    };
+                    let paint =
+                        if c.varies(s) { Paint::Color(series_color(rctx, c, i)) } else { paint_of(rctx, s.fill.as_ref(), series_color(rctx, c, i)) };
                     (s.name.clone(), paint, bar_outline(rctx, s))
                 } else {
                     (s.name.clone(), Paint::Color(series_fill(rctx, c, i, Some(s))), None)
@@ -1133,7 +1139,7 @@ fn draw_pie(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, m: Affine, area: Rec
             .iter()
             .find(|(k, _)| *k == i)
             .and_then(|(_, f)| if let Fill::Solid { color: cc } = f { Some(rctx.color(cc, None)) } else { None })
-            .unwrap_or_else(|| series_color(rctx, c, i));
+            .unwrap_or_else(|| if c.varies(s) { series_color(rctx, c, i) } else { series_fill(rctx, c, 0, Some(s)) });
         ctx.set_paint(color(col, 1.0));
         ctx.fill_path(&p);
         ctx.set_paint(color(Rgba::WHITE, 1.0));

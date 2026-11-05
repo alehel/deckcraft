@@ -3089,3 +3089,22 @@ fn a_shape_whose_outline_is_not_finite_is_not_drawable() {
     quad.paths[0].path = path;
     assert!(!crate::geometry::drawable(&quad, m, 100.0, 50.0));
 }
+
+/// A pie that doesn't vary its colours draws every slice in its series' colour (PowerPoint's
+/// `varyColors=0`, LibreOffice's single-colour pies), its own slices in theirs; it drew a colour
+/// per slice whatever the chart said.
+#[test]
+fn a_pie_not_varying_its_colours_is_one_colour() {
+    let draw = |vary: bool| {
+        let mut c = Chart::sample(ChartType::Pie);
+        (c.title, c.legend, c.vary_colors) = (None, None, vary);
+        c.series[0].fill = Some(Fill::solid(ColorRef::rgb(deckcraft_color::Rgba::rgb(0, 160, 0))));
+        let sh = Shape { id: ShapeId(633), xfrm: Some(Xfrm::new(0.0, 0.0, 400.0, 400.0)), kind: ShapeKind::Chart(Box::new(c)), ..Default::default() };
+        render_slide(&deck_with(vec![sh]), 0, &RenderOpts { scale: 1.0, ..Default::default() })
+    };
+    let green = |p: [u8; 4]| p[1] > 140 && p[0] < 40 && p[2] < 40;
+    let share = |img: &Image| (0..400u32).flat_map(|x| (0..400u32).map(move |y| (x, y))).filter(|(x, y)| green(img.pixel(*x, *y))).count();
+    let (single, varied) = (share(&draw(false)), share(&draw(true)));
+    assert!(single > 60_000, "every slice green: {single} green pixels");
+    assert!(varied < single / 2, "a varied pie takes a colour per slice: {varied} green pixels");
+}

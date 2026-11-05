@@ -123,7 +123,7 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
         };
         // A series drawn a colour per point has no colour of its own (its points have theirs),
         // which is how it reads back as varying.
-        let fill = if crate::chart::varies(c, s) { String::new() } else { format!(r#" draw:fill-color="{color}""#) };
+        let fill = if c.varies(s) { String::new() } else { format!(r#" draw:fill-color="{color}""#) };
         let mut g = format!(r#"{fill} svg:stroke-color="{color}""#);
         if lined {
             let width = s.line.as_ref().and_then(|l| l.width).unwrap_or(2.25);
@@ -162,8 +162,8 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
         // Points with their own colour, every point of a varied series, and every slice of a pie
         // (unstyled, a pie's slices take a colour each); the rest are unstyled runs
         // (`chart:repeated`) in the series' colour.
-        let varied = crate::chart::varies(c, s);
-        let every_point = crate::chart::is_pie(c.kind) || varied;
+        let varied = c.varies(s);
+        let every_point = c.kind.is_pie() || varied;
         let mut points = String::new();
         let mut plain = 0usize;
         let own_fills: std::collections::HashMap<usize, &Fill> = s.point_fills.iter().map(|(k, f)| (*k, f)).collect();
@@ -212,7 +212,7 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
     };
     let grid = if c.gridlines { format!(r#"<chart:grid chart:style-name="{grid_style}" chart:class="major"/>"#) } else { String::new() };
     let minor = if c.minor_gridlines { format!(r#"<chart:grid chart:style-name="{grid_style}" chart:class="minor"/>"#) } else { String::new() };
-    let axes = if crate::chart::is_pie(c.kind) {
+    let axes = if c.kind.is_pie() {
         String::new()
     } else {
         let xt = c.axis_titles.0.as_ref().map(|t| format!("<chart:title><text:p>{}</text:p></chart:title>", esc(t))).unwrap_or_default();

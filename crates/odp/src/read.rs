@@ -33,6 +33,9 @@ const MAX_SHAPES: usize = 250_000;
 /// Most pages read.
 const MAX_PAGES: usize = 10_000;
 
+/// Most layouts made from page layouts (each with at most 64 placeholders).
+const MAX_LAYOUTS_READ: usize = 1024;
+
 /// Most comment text read from one file, in bytes; and from one comment paragraph, and the
 /// paragraphs of one comment.
 const MAX_COMMENT_TEXT: usize = 16 << 20;
@@ -102,6 +105,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         shapes: 0,
         master_index: HashMap::new(),
         layouts_read: HashMap::new(),
+        layouts_claimed: std::collections::HashSet::new(),
         page_names: HashMap::new(),
         para_ids: vec![],
         hatch_tiles: HashMap::new(),
@@ -125,6 +129,13 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
     }
     if r.p.masters.is_empty() {
         r.p.masters = fallback;
+    }
+    // Every page layout of ours, used or not, on the master its name says, in file order.
+    let store = std::rc::Rc::clone(&r.store);
+    for (name, el) in &store.presentation_layouts {
+        if let Some(mi) = name.split_once('.').and_then(|(_, page)| r.master_index.get(page).copied()) {
+            r.layout_for(mi, name, el);
+        }
     }
     let decls = Decls::read(body);
     // The date format, from a current-date declaration in one of our date styles (named after
@@ -208,6 +219,8 @@ struct Reader<'a> {
     master_index: HashMap<String, usize>,
     /// The layout each page layout became, per master (index) and page layout name.
     layouts_read: HashMap<(usize, String), LayoutId>,
+    /// The layouts described page layouts became (each default is taken once).
+    layouts_claimed: std::collections::HashSet<LayoutId>,
     /// Page names (`draw:name`) → slide ids, for `#name` links.
     page_names: HashMap<String, SlideId>,
     /// The ids of the paragraphs of the text body read last.
@@ -450,7 +463,7 @@ impl Reader<'_> {
         // placeholders suggest.
         let store = std::rc::Rc::clone(&self.store);
         let read = attr(page, "presentation:presentation-page-layout-name")
-            .and_then(|n| store.presentation_layouts.get(n).map(|el| (n, el)))
+            .and_then(|n| store.presentation_layout(n).map(|el| (n, el)))
             .and_then(|(n, el)| self.layout_for(mi, n, el));
         let layout = read.or_else(|| {
             let kind = guess_layout(page.elements().filter_map(|e| attr(e, "presentation:class")).filter_map(ph_kind));
@@ -537,67 +550,78 @@ impl Reader<'_> {
         Some(slide)
     }
 
-    /// The layout a page layout (named `name`) becomes on master `mi`: the master's layout of the
-    /// same kind and name (its defaults), else a new one of that kind (a blank one for custom
-    /// layouts); with the page layout's placeholders where it puts them, when it's a described
-    /// layout (one with a name to show, as we write them: LibreOffice's own are generic
-    /// arrangements, boxed for no page in particular).
+    /// The layout a page layout (named `name`) becomes on master `mi`. A described one (with a
+    /// name to show, as we write them) is a layout of its own: the master's default of that kind
+    /// and name if no other page layout took it, else a new one of that kind (a blank one for
+    /// custom layouts); with the page layout's placeholders, where it puts them. LibreOffice's
+    /// own are generic arrangements, boxed for no page in particular: they only pick the
+    /// master's layout of their kind. At most [`MAX_LAYOUTS_READ`] are made.
     fn layout_for(&mut self, mi: usize, name: &str, el: &El) -> Option<LayoutId> {
         if let Some(id) = self.layouts_read.get(&(mi, name.to_string())) {
             return Some(*id);
         }
         let kind = page_layout_kind(el);
+        let default_of_kind = |p: &Presentation| {
+            let layouts = &p.masters.get(mi)?.layouts;
+            layouts.iter().find(|l| l.kind == kind).or(layouts.first()).map(|l| l.id)
+        };
         let shown = attr(el, "style:display-name");
+        let Some(shown) = shown.filter(|_| self.layouts_claimed.len() < MAX_LAYOUTS_READ) else {
+            let id = default_of_kind(&self.p)?;
+            self.layouts_read.insert((mi, name.to_string()), id);
+            return Some(id);
+        };
         let boxes: Vec<(PhType, Xfrm)> = kids(el, "presentation:placeholder")
-            .filter(|_| shown.is_some())
             .take(64)
             .filter_map(|p| Some((ph_kind(attr(p, "presentation:object")?)?, shape_xfrm(p))))
             .filter(|(k, _)| !k.is_footer_kind())
             .collect();
         let new_id = LayoutId(self.p.alloc_id()?);
         let fresh: Vec<ShapeId> = boxes.iter().map(|_| self.id()).collect();
+        let claimed = &self.layouts_claimed;
         let master = Arc::make_mut(self.p.masters.get_mut(mi)?);
-        let at = match master.layouts.iter().position(|l| l.kind == kind && shown.is_none_or(|n| l.name == n)) {
+        let at = match master.layouts.iter().position(|l| l.kind == kind && l.name == shown && !claimed.contains(&l.id)) {
             Some(i) => i,
             None => {
                 let base = master.layouts.iter().find(|l| l.kind == kind).or_else(|| master.layouts.iter().find(|l| l.kind == LayoutType::Blank));
                 let mut l = base.cloned().unwrap_or_default();
-                (l.id, l.kind) = (new_id, kind);
-                l.name = shown.unwrap_or(name).to_string();
+                (l.id, l.kind, l.name) = (new_id, kind, shown.to_string());
                 master.layouts.push(l);
                 master.layouts.len() - 1
             }
         };
-        if !boxes.is_empty() {
-            let master_phs: Vec<Shape> = master.shapes.iter().filter(|s| s.ph.is_some()).cloned().collect();
-            let l = master.layouts.get_mut(at)?;
-            // Its placeholders are the page layout's, the footers aside: each takes the box of
-            // the one of its kind (the nth of the nth), new ones the master's look.
-            let mut old: Vec<Shape> = Vec::new();
-            l.shapes.retain(|s| match s.ph_type() {
-                Some(k) if !k.is_footer_kind() => {
-                    old.push(s.clone());
-                    false
-                }
-                _ => true,
-            });
-            let same = |a: PhType, b: PhType| a == b || a.is_title() && b.is_title();
-            for (i, ((k, x), id)) in boxes.into_iter().zip(fresh).enumerate() {
-                let reuse = old.iter().position(|s| s.ph_type().is_some_and(|o| same(o, k)));
-                let mut s = match reuse {
-                    Some(j) => old.remove(j),
-                    None => {
-                        let mut s = master_phs.iter().find(|s| s.ph_type().is_some_and(|o| same(o, k))).cloned().unwrap_or_default();
-                        s.id = id;
-                        s.ph = Some(Placeholder { kind: k, idx: u32::try_from(i).unwrap_or(0), ..Default::default() });
-                        s
-                    }
-                };
-                s.xfrm = Some(x);
-                l.shapes.push(s);
+        let master_phs: Vec<Shape> = master.shapes.iter().filter(|s| s.ph.is_some()).cloned().collect();
+        let l = master.layouts.get_mut(at)?;
+        // Its placeholders are the page layout's, the footers aside: each keeps the one of its
+        // kind it had (in order), new ones the master's look.
+        let mut old: Vec<Shape> = Vec::new();
+        l.shapes.retain(|s| match s.ph_type() {
+            Some(k) if !k.is_footer_kind() => {
+                old.push(s.clone());
+                false
             }
+            _ => true,
+        });
+        // Titles are titles, and content placeholders (`outline`) bodies or objects.
+        let same = |a: PhType, b: PhType| {
+            a == b || a.is_title() && b.is_title() || matches!((a, b), (PhType::Body | PhType::Obj, PhType::Body | PhType::Obj))
+        };
+        for (i, ((k, x), id)) in boxes.into_iter().zip(fresh).enumerate() {
+            let reuse = old.iter().position(|s| s.ph_type().is_some_and(|o| same(o, k)));
+            let mut s = match reuse {
+                Some(j) => old.remove(j),
+                None => {
+                    let mut s = master_phs.iter().find(|s| s.ph_type().is_some_and(|o| same(o, k))).cloned().unwrap_or_default();
+                    s.id = id;
+                    s.ph = Some(Placeholder { kind: k, idx: u32::try_from(i).unwrap_or(0), ..Default::default() });
+                    s
+                }
+            };
+            s.xfrm = Some(x);
+            l.shapes.push(s);
         }
-        let id = master.layouts.get(at)?.id;
+        let id = l.id;
+        self.layouts_claimed.insert(id);
         self.layouts_read.insert((mi, name.to_string()), id);
         Some(id)
     }
@@ -1283,10 +1307,10 @@ fn line_xfrm(e: &El) -> Xfrm {
     x
 }
 
-/// A page layout's kind: by its name, as we write it (`obj`, `secHead_2` …), else guessed from
-/// its placeholders.
+/// A page layout's kind: by its name, as we write it (`obj.Office`, `secHead-2.Office`, see
+/// `write::PageLayouts`), else guessed from its placeholders.
 fn page_layout_kind(el: &El) -> LayoutType {
-    let token = attr(el, "style:name").unwrap_or_default().split('_').next().unwrap_or_default();
+    let token = attr(el, "style:name").unwrap_or_default().split(['.', '-', '_']).next().unwrap_or_default();
     let kind = LayoutType::from_xml(token);
     if kind.xml() == token {
         kind

@@ -74,7 +74,8 @@ pub(super) fn change(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// `{stops: [[pos 0–1, color], …], kind?: linear|radial|rectangular|path, angle?: deg (linear),
 /// focus?: [l, t, r, b] fractions (radial/rectangular/path: where the first stop sits),
-/// rotateWithShape?}`.
+/// rotateWithShape?, tile?: [l, t, r, b] insets of the box it's laid out in, blend?:
+/// powerPoint|srgb}`. Unset, `tile` is the shape's box and `blend` PowerPoint's.
 pub(crate) fn gradient_param(v: &Value) -> Option<Gradient> {
     let stops: Vec<GradientStop> = v
         .get("stops")?
@@ -108,12 +109,24 @@ pub(crate) fn gradient_param(v: &Value) -> Option<Gradient> {
             scaled: false,
         },
     };
+    let tile = v
+        .get("tile")
+        .and_then(Value::as_array)
+        .and_then(|a| {
+            let f = |i: usize| a.get(i).and_then(Value::as_f64).filter(|x| x.is_finite()).map(|x| x.clamp(-10.0, 10.0));
+            Some([f(0)?, f(1)?, f(2)?, f(3)?])
+        })
+        .unwrap_or([0.0; 4]);
+    let blend = match v.get("blend").and_then(Value::as_str) {
+        Some("srgb") => deckcraft_model::style::GradientBlend::Srgb,
+        _ => deckcraft_model::style::GradientBlend::PowerPoint,
+    };
     Some(Gradient {
-        tile: [0.0; 4],
+        tile,
         stops,
         shape,
         rotate_with_shape: v.get("rotateWithShape").and_then(Value::as_bool).unwrap_or(true),
-        blend: Default::default(),
+        blend,
         flip: v.get("flip").and_then(Value::as_str).and_then(deckcraft_model::style::GradientFlip::from_xml),
     })
 }

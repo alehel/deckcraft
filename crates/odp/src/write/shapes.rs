@@ -433,6 +433,13 @@ pub fn fill_attrs(w: &mut Writer, ctx: &Ctx, f: &Fill, ph: Option<Rgba>) -> Stri
             if stops.is_empty() {
                 return r#" draw:fill="none""#.into();
             }
+            // LibreOffice blends straight in sRGB: a gradient on PowerPoint's curve is written as
+            // the stops of its ramp (they read back blending in sRGB, drawn the same).
+            if g.blend == deckcraft_model::style::GradientBlend::PowerPoint {
+                let (a0, a1) = (stops.first().map_or(1.0, |s| s.2), stops.last().map_or(1.0, |s| s.2));
+                let colours: Vec<(f64, Rgba)> = stops.iter().map(|(p, c, _)| (*p, *c)).collect();
+                stops = deckcraft_render::gradient_ramp(&colours, g.blend).into_iter().map(|(p, c)| (p, c, a0 + (a1 - a0) * p)).collect();
+            }
             let (style, angle, cx, cy, reverse) = match &g.shape {
                 GradientShape::Linear { angle, .. } => ("linear", (90.0 - angle).rem_euclid(360.0), 0.5, 0.5, false),
                 GradientShape::Path { path, focus } => {

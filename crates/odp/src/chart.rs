@@ -275,14 +275,14 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
         if attr(s, "chart:attached-axis") == Some("secondary-y") {
             series.secondary_axis = true;
         }
-        // A chart that can vary its colours (see [`varies`]: a pie, or a lone series with every
+        // A chart that can vary its colours (see [`Chart::varies`]: a pie, or a lone series with every
         // point styled) does when its series has no colour of its own (as we write it). Other
         // files say no more (LibreOffice writes both kinds as styled points): it varies unless
         // most points are in the series' colour (a varied one matches it on one point at most; a
         // single-colour one may recolour a few). A varied chart keeps every styled point's
         // colour, a single-colour one those not in its own.
         let all_styled = styled.iter().map(|(_, rep, _)| rep).sum::<usize>() == series.values.len();
-        let can_vary = i == 0 && (is_pie(c.kind) || series_els.len() == 1 && all_styled && c.kind != ChartType::Waterfall);
+        let can_vary = i == 0 && (c.kind.is_pie() || series_els.len() == 1 && all_styled && c.kind != ChartType::Waterfall);
         let varied = can_vary
             && series.fill.as_ref().is_none_or(|own| {
                 let same: usize = styled.iter().filter(|(_, _, f)| f == own).map(|(_, rep, _)| rep).sum();
@@ -328,17 +328,6 @@ const KINDS: &[(ChartType, &str, bool, bool, bool)] = &[
 
 /// The model chart type of an ODF chart class and its plot-area flags: the exact row, else one
 /// stacked the same way (a stacked percent chart is a percent chart), else the class's first.
-/// A chart of slices (a pie or doughnut): one series, a colour per point.
-pub(crate) fn is_pie(kind: ChartType) -> bool {
-    matches!(kind, ChartType::Pie | ChartType::Doughnut)
-}
-
-/// Whether a series is drawn with a colour per point, as the renderer draws it: a pie's, or a
-/// chart's lone unfilled series (not a waterfall's), when the chart varies its colours.
-pub(crate) fn varies(c: &Chart, s: &deckcraft_model::chart::Series) -> bool {
-    c.vary_colors && (is_pie(c.kind) || c.series.len() == 1 && s.fill.is_none() && c.kind != ChartType::Waterfall)
-}
-
 pub(crate) fn kind_of(class: &str, vertical: bool, stacked: bool, percent: bool) -> ChartType {
     let of_class = || KINDS.iter().filter(|r| r.1 == class);
     of_class()

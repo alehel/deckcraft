@@ -1629,16 +1629,37 @@ fn gradient_opacity_and_stops_survive_saves() {
         let Some(Fill::Gradient(g)) = &s[1].fill else { panic!("{:?}", s[1].fill) };
         counts.push(g.stops.len());
     }
-    // The file's own two stops, blending as LibreOffice draws them (no stops made up).
-    assert_eq!(counts, [2, 2, 2]);
+    // A two-colour gradient on PowerPoint's curve is written as its ramp's stops (LibreOffice
+    // blends in sRGB), read back blending in sRGB: drawn the same, and stable from then on.
+    assert!(counts.windows(2).all(|w| w[0] == w[1]) && counts[0] > 2, "{counts:?}");
     let Some(Fill::Gradient(g)) = &shapes_of(&p)[1].fill else { panic!() };
     assert_eq!(g.blend, deckcraft_model::style::GradientBlend::Srgb);
-    // Saved as `.pptx`, the sRGB blend is kept by a third stop (PowerPoint draws two on a curve).
+    let ramp = deckcraft_render::gradient_ramp(&[(0.0, red), (1.0, blue)], deckcraft_model::style::GradientBlend::PowerPoint);
+    let back: Vec<(f64, Rgba)> = g
+        .stops
+        .iter()
+        .map(|s| (s.pos, s.color.resolve(&deckcraft_color::ColorScheme { name: String::new(), colors: [Rgba::BLACK; 12] }, None)))
+        .collect();
+    assert_eq!(back.len(), ramp.len());
+    for ((p, a), (q, b)) in back.iter().zip(&ramp) {
+        assert!((p - q).abs() < 1e-3 && a.r.abs_diff(b.r) <= 1 && a.b.abs_diff(b.b) <= 1, "{back:?}");
+    }
+    // An sRGB two-stop gradient saved as `.pptx` repeats its first stop (PowerPoint draws two on a
+    // curve, more straight).
+    let srgb = Gradient {
+        stops: vec![GradientStop { pos: 0.0, color: c(red, None) }, GradientStop { pos: 1.0, color: c(blue, None) }],
+        shape: GradientShape::Linear { angle: 0.0, scaled: false },
+        flip: None,
+        rotate_with_shape: true,
+        tile: [0.0; 4],
+        blend: deckcraft_model::style::GradientBlend::Srgb,
+    };
+    let p = deck_with(vec![shape(srgb, 20.0)]);
     let pptx = deckcraft_pptx::export(&p).unwrap();
     let mut z = zip::ZipArchive::new(std::io::Cursor::new(pptx)).unwrap();
     let mut slide = String::new();
     std::io::Read::read_to_string(&mut z.by_name("ppt/slides/slide1.xml").unwrap(), &mut slide).unwrap();
-    assert_eq!(slide.matches("<a:gs ").count(), 3 + 3, "{slide}");
+    assert_eq!(slide.matches("<a:gs ").count(), 3, "{slide}");
 }
 
 /// Review series 2, round 1: slide date placeholders keep their format, a lone varied series
@@ -1929,4 +1950,60 @@ fn libreoffice_layouts_masters_and_opacities_hold() {
     let shapes = shapes_of(&with);
     let Some(Fill::Gradient(g)) = &shapes.iter().find(|s| matches!(s.fill, Some(Fill::Gradient(_)))).unwrap().fill else { panic!() };
     assert_eq!(g.stops[0].color.mods, [deckcraft_color::ColorTransform::Alpha(50_000)]);
+}
+
+/// Review series 2, round 3: every layout is written (used or not) and read back as itself: two of
+/// one kind and name stay two, one emptied of placeholders stays empty, an unused one survives;
+/// and a file of thousands of page layouts makes a bounded number of layouts.
+#[test]
+fn every_layout_reads_back_as_itself_within_bounds() {
+    use deckcraft_model::{LayoutId, LayoutType};
+    let mut p = sample();
+    let m = Arc::make_mut(&mut p.masters[0]);
+    let only = m.layouts.iter().find(|l| l.kind == LayoutType::TitleOnly).unwrap().clone();
+    let moved = |id: u32, x: f64| {
+        let mut l = only.clone();
+        (l.id, l.name) = (LayoutId(id), "Twin".into());
+        for s in l.shapes.iter_mut().filter(|s| s.ph_type().is_some_and(PhType::is_title)) {
+            s.xfrm = Some(Xfrm::new(x, 30.0, 200.0, 50.0));
+        }
+        l
+    };
+    let mut empty = only.clone();
+    (empty.id, empty.name) = (LayoutId(90_103), "Empty".into());
+    empty.shapes.retain(|s| s.ph_type().is_some_and(PhType::is_footer_kind));
+    let mut unused = only.clone();
+    (unused.id, unused.name) = (LayoutId(90_104), "Quote".into());
+    m.layouts.extend([moved(90_101, 10.0), moved(90_102, 310.0), empty, unused]);
+    for (i, id) in [(1, 90_101), (2, 90_102), (3, 90_103)] {
+        Arc::make_mut(&mut p.slides[i]).layout = LayoutId(id);
+    }
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    let layout = |i: usize| back.masters[0].layouts.iter().find(|l| l.id == back.slides[i].layout).unwrap();
+    let title_x = |i: usize| layout(i).shapes.iter().find(|s| s.ph_type().is_some_and(PhType::is_title)).and_then(|s| s.xfrm).map(|x| x.x.round());
+    assert_ne!(back.slides[1].layout, back.slides[2].layout);
+    assert_eq!((title_x(1), title_x(2)), (Some(10.0), Some(310.0)));
+    assert!(layout(3).shapes.iter().all(|s| s.ph_type().is_some_and(PhType::is_footer_kind)), "{:?}", layout(3).shapes);
+    assert!(back.masters[0].layouts.iter().any(|l| l.name == "Quote"));
+    assert_eq!(back.masters[0].layouts.len(), p.masters[0].layouts.len());
+
+    // Hostile: 1024 described page layouts of 64 placeholders, 10 masters, 10 000 pages each
+    // naming another pair.
+    let boxes = r#"<presentation:placeholder presentation:object="outline" svg:x="1cm" svg:y="1cm" svg:width="1cm" svg:height="1cm"/>"#.repeat(64);
+    let layouts: String = (0..1024)
+        .map(|i| format!(r#"<style:presentation-page-layout style:name="L{i}" style:display-name="L{i}">{boxes}</style:presentation-page-layout>"#))
+        .collect();
+    let masters: String = (0..10).map(|i| format!(r#"<style:master-page style:name="M{i}"/>"#)).collect();
+    let pages: String = (0..10_000)
+        .map(|i| format!(r#"<draw:page draw:master-page-name="M{}" presentation:presentation-page-layout-name="L{}"/>"#, i % 10, i % 1024))
+        .collect();
+    let doc = format!(
+        r#"<office:document {NS} xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0" office:mimetype="application/vnd.oasis.opendocument.presentation"><office:styles>{layouts}</office:styles><office:master-styles>{masters}</office:master-styles><office:body><office:presentation>{pages}</office:presentation></office:body></office:document>"#
+    );
+    let started = std::time::Instant::now();
+    let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+    let shapes: usize = p.masters.iter().flat_map(|m| &m.layouts).map(|l| l.shapes.len()).sum();
+    // Each made layout: its 64 placeholders and the footers it keeps; and the masters' defaults.
+    assert!(shapes <= 1024 * (64 + 3) + 10 * 11 * 16, "{shapes}");
+    assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
 }

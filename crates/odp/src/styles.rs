@@ -134,7 +134,7 @@ pub struct Store {
     /// Date and time number styles read, in all the layers (against [`MAX_DATA_STYLES`]).
     data_styles: usize,
     /// Page layouts (`style:presentation-page-layout`): where a page's placeholders go, by name.
-    pub presentation_layouts: HashMap<String, El>,
+    pub presentation_layouts: Vec<(String, El)>,
     /// Display names, for writing styles back (`Default-title` etc. are plain already).
     pub common_names: Vec<(String, String)>,
     /// Spaces the document's `text:s` elements have expanded to so far (each one asks for up to
@@ -266,7 +266,7 @@ impl Store {
                     }
                 }
                 "style:presentation-page-layout" if self.presentation_layouts.len() < MAX_DATA_STYLES => {
-                    self.presentation_layouts.insert(name, el.clone());
+                    self.presentation_layouts.push((name, el.clone()));
                 }
                 "style:page-layout" => {
                     let props = kid(el, "style:page-layout-properties").map(read_props).unwrap_or_default();
@@ -404,6 +404,11 @@ impl Store {
         let standalone = layers.iter().flat_map(|l| l.lists.values());
         let in_styles = layers.iter().flat_map(|l| l.styles.values()).filter_map(|s| s.list.as_deref());
         standalone.chain(in_styles).collect()
+    }
+
+    /// The page layout of that name (the first, should a file name two alike).
+    pub fn presentation_layout(&self, name: &str) -> Option<&El> {
+        self.presentation_layouts.iter().find(|(n, _)| n == name).map(|(_, el)| el)
     }
 
     /// The date format a number style in `scope` (its file's, else a common one) stands for.

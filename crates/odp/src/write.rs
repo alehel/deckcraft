@@ -212,15 +212,16 @@ impl PageCtx {
     }
 }
 
-/// A master page to write: a master and one of its layouts.
 /// Whether a layout looks different from its master (and so needs a master page of its own).
 fn has_own_look(l: &deckcraft_model::Layout) -> bool {
     l.background.is_some() || !l.show_master_shapes || l.shapes.iter().any(|s| s.ph.is_none())
 }
 
-/// The page layouts written (`style:presentation-page-layout`): each layout the slides use, named
-/// after its kind (`obj`, `secHead` …, as [`deckcraft_model::LayoutType::xml`] spells it, with
-/// `_2` … for more of a kind), shown by its own name, with its placeholders' boxes.
+/// The page layouts written (`style:presentation-page-layout`): every layout of every master,
+/// shown by its own name, with its placeholders' boxes. Page layouts belong to no master in ODF,
+/// so the name says the layout's kind (as [`deckcraft_model::LayoutType::xml`] spells it), a
+/// number for more of a kind, and its master's page: `obj.Office`, `obj-2.Office`
+/// ([`crate::read`] parses it back).
 #[derive(Default)]
 struct PageLayouts {
     names: HashMap<LayoutId, String>,
@@ -228,17 +229,17 @@ struct PageLayouts {
 }
 
 impl PageLayouts {
-    /// The page layout of `l` (on master `m`), written on first use.
-    fn name(&mut self, p: &Presentation, m: &deckcraft_model::Master, l: &deckcraft_model::Layout) -> String {
-        if let Some(n) = self.names.get(&l.id) {
-            return n.clone();
+    /// Write the page layout of `l`, on master `m` (whose master page is `page`).
+    fn write(&mut self, p: &Presentation, m: &deckcraft_model::Master, page: &str, l: &deckcraft_model::Layout) {
+        if self.names.contains_key(&l.id) {
+            return;
         }
         let base = l.kind.xml();
-        let mut name = base.to_string();
+        let mut name = format!("{base}.{page}");
         let mut k = 1;
         while self.names.values().any(|n| *n == name) {
             k += 1;
-            name = format!("{base}_{k}");
+            name = format!("{base}-{k}.{page}");
         }
         let ctx = Ctx::for_layout(p, m, l);
         let _ = write!(self.xml, r#"<style:presentation-page-layout style:name="{name}" style:display-name="{}">"#, esc(&l.name));
@@ -255,8 +256,7 @@ impl PageLayouts {
             );
         }
         self.xml.push_str("</style:presentation-page-layout>");
-        self.names.insert(l.id, name.clone());
-        name
+        self.names.insert(l.id, name);
     }
 }
 
@@ -318,7 +318,6 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         name
     };
     let mut slide_pages = vec![];
-    let mut layouts_written = PageLayouts::default();
     let mut slide_layouts = vec![];
     for s in &p.slides {
         // The master and layout the slide is drawn with, as the model resolves them.
@@ -328,12 +327,18 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         };
         let look = layout.filter(|l| has_own_look(l)).map(|l| l.id);
         slide_pages.push(want(mi, look, &mut pages));
-        slide_layouts.push(layout.and_then(|l| p.masters.get(mi).map(|m| layouts_written.name(p, m, l))));
+        slide_layouts.push(layout.map(|l| l.id));
     }
-    // Masters no slide uses keep their page (a template's are all there to be used).
-    for mi in 0..p.masters.len() {
-        want(mi, None, &mut pages);
+    // Every master keeps its page and its layouts, used or not (a template's are all there to be
+    // used).
+    let mut layouts_written = PageLayouts::default();
+    for (mi, m) in p.masters.iter().enumerate() {
+        let page = want(mi, None, &mut pages);
+        for l in &m.layouts {
+            layouts_written.write(p, m, &page, l);
+        }
     }
+    let slide_layouts: Vec<Option<String>> = slide_layouts.iter().map(|l| l.and_then(|id| layouts_written.names.get(&id).cloned())).collect();
 
     // styles.xml: presentation styles and master pages.
     let mut sauto = Auto::new("M");
