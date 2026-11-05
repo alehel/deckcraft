@@ -122,10 +122,10 @@ pub fn gradient(f: &El) -> Gradient {
         })
         .unwrap_or_default();
     stops.sort_by(|a, b| a.pos.total_cmp(&b.pos));
-    // Two stops with the first repeated at 0 blend straight in sRGB (PowerPoint draws more than
-    // two so): a two-colour gradient that blends so, as the writer writes one.
+    // A two-colour gradient with its first stop repeated is drawn straight in sRGB (PowerPoint
+    // draws more than two stops so): a two-colour gradient that blends so, as the writer writes one.
     let blend = match stops.as_slice() {
-        [a, b, _] if a.pos == 0.0 && b.pos == 0.0 && a.color == b.color => {
+        [a, b, c] if a.pos == 0.0 && a.color == b.color && deckcraft_model::style::is_two_colour(&[b.pos, c.pos]) => {
             stops.remove(0);
             GradientBlend::Srgb
         }

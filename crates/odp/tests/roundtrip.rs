@@ -2068,3 +2068,42 @@ fn many_masters_keep_their_layouts_and_placeholder_order() {
     assert_eq!(l.name, "Zed");
     assert_eq!(order(&back), order(&p));
 }
+
+/// Review series 2, round 5: a two-colour gradient is one rule (two stops, at 0 and 1): an sRGB
+/// one with a stop off the end is saved to `.pptx` as it is (PowerPoint draws it straight
+/// anyway) and comes back as itself; and a page layout past the budget becomes its kind's
+/// default (not the master's first layout).
+#[test]
+fn two_colour_gradients_and_layouts_past_the_budget() {
+    use deckcraft_model::style::{Gradient, GradientBlend, GradientStop};
+    let stop = |pos: f64, c: Rgba| GradientStop { pos, color: ColorRef::rgb(c) };
+    let g = Gradient {
+        stops: vec![stop(0.2, Rgba::rgb(255, 0, 0)), stop(1.0, Rgba::rgb(0, 0, 255))],
+        shape: GradientShape::Linear { angle: 0.0, scaled: false },
+        flip: None,
+        rotate_with_shape: true,
+        tile: [0.0; 4],
+        blend: GradientBlend::Srgb,
+    };
+    let shape =
+        Shape { xfrm: Some(Xfrm::new(50.0, 50.0, 200.0, 100.0)), geom: Geom::preset("rect"), fill: Some(Fill::Gradient(g)), ..Default::default() };
+    let back = deckcraft_pptx::import(&deckcraft_pptx::export(&deck_with(vec![shape])).unwrap()).unwrap();
+    let Some(Fill::Gradient(g)) = &shapes_of(&back)[0].fill else { panic!() };
+    assert_eq!(g.stops.iter().map(|s| s.pos).collect::<Vec<_>>(), [0.2, 1.0]);
+
+    // 1024 page layouts of ours with 64 placeholders each, on one master: the next, a title
+    // slide's, is past the budget of placeholders.
+    let boxes = r#"<presentation:placeholder presentation:object="outline" svg:x="1cm" svg:y="1cm" svg:width="1cm" svg:height="1cm"/>"#.repeat(64);
+    let layouts: String = (0..1024)
+        .map(|i| {
+            format!(r#"<style:presentation-page-layout style:name="obj-{i}.M1" style:display-name="L{i}">{boxes}</style:presentation-page-layout>"#)
+        })
+        .chain(std::iter::once(r#"<style:presentation-page-layout style:name="title.M1" style:display-name="Cover"/>"#.to_string()))
+        .collect();
+    let doc = format!(
+        r#"<office:document {NS} xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0" office:mimetype="application/vnd.oasis.opendocument.presentation"><office:styles>{layouts}</office:styles><office:master-styles><style:master-page style:name="M1"/></office:master-styles><office:body><office:presentation><draw:page draw:master-page-name="M1" presentation:presentation-page-layout-name="title.M1"/></office:presentation></office:body></office:document>"#
+    );
+    let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+    let l = p.masters[0].layouts.iter().find(|l| l.id == p.slides[0].layout);
+    assert_eq!(l.map(|l| l.kind), Some(deckcraft_model::LayoutType::Title));
+}

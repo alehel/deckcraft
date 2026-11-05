@@ -3108,3 +3108,24 @@ fn a_pie_not_varying_its_colours_is_one_colour() {
     assert!(single > 60_000, "every slice green: {single} green pixels");
     assert!(varied < single / 2, "a varied pie takes a colour per slice: {varied} green pixels");
 }
+
+/// A slice's own fill draws as a bar's does: one with no fill leaves the slice empty (it took a
+/// palette colour), as PowerPoint draws a `c:dPt` without fill.
+#[test]
+fn a_pie_slice_without_fill_is_empty() {
+    let draw = |empty: bool| {
+        let mut c = Chart::sample(ChartType::Pie);
+        (c.title, c.legend) = (None, None);
+        c.series[0].values = vec![Some(1.0), Some(1.0)];
+        c.categories.truncate(2);
+        if empty {
+            c.series[0].point_fills = vec![(0, Fill::None)];
+        }
+        let sh = Shape { id: ShapeId(634), xfrm: Some(Xfrm::new(0.0, 0.0, 400.0, 400.0)), kind: ShapeKind::Chart(Box::new(c)), ..Default::default() };
+        render_slide(&deck_with(vec![sh]), 0, &RenderOpts { scale: 1.0, ..Default::default() })
+    };
+    let white = |p: [u8; 4]| p[0] > 245 && p[1] > 245 && p[2] > 245;
+    let count = |img: &Image| (0..400u32).flat_map(|x| (0..400u32).map(move |y| (x, y))).filter(|(x, y)| white(img.pixel(*x, *y))).count();
+    let (filled, empty) = (count(&draw(false)), count(&draw(true)));
+    assert!(empty > filled + 40_000, "the first half is left white: {filled} → {empty} white pixels");
+}

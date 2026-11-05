@@ -135,6 +135,19 @@ impl GradientBlend {
     }
 }
 
+/// Whether stops at these positions make a two-colour gradient (exactly two, at 0 and 1), the one
+/// kind [`GradientBlend`] tells apart: PowerPoint draws more stops, or two elsewhere, straight.
+pub fn is_two_colour(positions: &[f64]) -> bool {
+    matches!(positions, [p, q] if *p <= 1e-6 && *q >= 1.0 - 1e-6)
+}
+
+impl Gradient {
+    /// See [`is_two_colour`].
+    pub fn is_two_colour(&self) -> bool {
+        matches!(self.stops.as_slice(), [a, b] if is_two_colour(&[a.pos, b.pos]))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Gradient {

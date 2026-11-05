@@ -55,7 +55,7 @@ pub fn mix(a: Rgba, b: Rgba, t: f64) -> Rgba {
 /// them: a two-colour gradient (two stops, at 0 and 1) expanded to follow PowerPoint's ramp,
 /// anything else unchanged.
 pub fn expand(stops: &[(f64, Rgba)], blend: GradientBlend) -> Vec<(f64, Rgba)> {
-    let two_colour = blend == GradientBlend::PowerPoint && matches!(stops, [(p, _), (q, _)] if *p <= 1e-6 && *q >= 1.0 - 1e-6);
+    let two_colour = blend == GradientBlend::PowerPoint && matches!(stops, [(p, _), (q, _)] if deckcraft_model::style::is_two_colour(&[*p, *q]));
     if !two_colour {
         return stops.to_vec();
     }
