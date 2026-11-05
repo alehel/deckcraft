@@ -482,7 +482,12 @@ pub fn fill_attrs(w: &mut Writer, ctx: &Ctx, f: &Fill, ph: Option<Rgba>) -> Stri
                 GradientShape::Path { path, focus } => {
                     let cx = ((focus[0] + 1.0 - focus[2]) / 2.0).clamp(0.0, 1.0);
                     let cy = ((focus[1] + 1.0 - focus[3]) / 2.0).clamp(0.0, 1.0);
-                    (if path == "circle" { "radial" } else { "rectangular" }, 0.0, cx, cy, true)
+                    let style = match path.as_str() {
+                        "rect" | "shape" => "rectangular",
+                        "ellipse" => "ellipsoid",
+                        _ => "radial",
+                    };
+                    (style, 0.0, cx, cy, true)
                 }
             };
             // Radial ODF gradients run from the outside in: reverse DrawingML's centre-first order.

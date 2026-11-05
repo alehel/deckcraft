@@ -2437,3 +2437,22 @@ fn an_empty_placeholder_keeps_its_prompt() {
     let t = back.slides[0].shapes.iter().find(|s| s.ph_type().is_some_and(PhType::is_title)).unwrap();
     assert!(t.text.as_ref().is_none_or(|t| t.paragraphs.iter().all(|p| p.is_empty())));
 }
+
+/// Moving files between apps: an ellipsoid gradient (and an ellipsoid transparency) stays an
+/// ellipsoid, stretched to its box; it was saved as a radial one, which LibreOffice draws as a
+/// circle.
+#[test]
+fn an_ellipsoid_gradient_stays_an_ellipsoid() {
+    let doc = format!(
+        r##"<office:document {NS} xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0" office:mimetype="application/vnd.oasis.opendocument.presentation"><office:styles><draw:gradient draw:name="g" draw:style="ellipsoid" draw:cx="50%" draw:cy="80%" draw:start-color="#000000" draw:end-color="#ffffff" draw:border="0%"/><draw:opacity draw:name="o" draw:style="ellipsoid" draw:cx="50%" draw:cy="80%" draw:start="20%" draw:end="90%" draw:border="0%"/></office:styles><office:automatic-styles><style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="gradient" draw:fill-gradient-name="g" draw:opacity-name="o"/></style:style></office:automatic-styles><office:body><office:presentation><draw:page><draw:custom-shape draw:style-name="gr1" svg:x="1cm" svg:y="1cm" svg:width="8cm" svg:height="2cm"><draw:enhanced-geometry svg:viewBox="0 0 21600 21600" draw:type="rectangle"/></draw:custom-shape></draw:page></office:presentation></office:body></office:document>"##
+    );
+    let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+    let Some(Fill::Gradient(g)) = &shapes_of(&p)[0].fill else { panic!("{:?}", shapes_of(&p)[0].fill) };
+    assert!(matches!(&g.shape, deckcraft_model::style::GradientShape::Path { path, .. } if path == "ellipse"), "{:?}", g.shape);
+    let xml = part(&deckcraft_odp::export(&p).unwrap(), "styles.xml") + &part(&deckcraft_odp::export(&p).unwrap(), "content.xml");
+    let styles: Vec<&str> = ["<draw:gradient ", "<draw:opacity "]
+        .iter()
+        .map(|el| xml.split(el).nth(1).and_then(|s| s.split("draw:style=\"").nth(1)).and_then(|s| s.split('"').next()).unwrap_or("none"))
+        .collect();
+    assert_eq!(styles, ["ellipsoid", "ellipsoid"]);
+}

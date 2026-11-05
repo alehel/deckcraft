@@ -114,6 +114,8 @@ pub enum GradientShape {
         scaled: bool,
     },
     /// `circle`, `rect` or `shape` path gradient; `focus` is the fill-to rect as fractions (l, t, r, b).
+    /// `ellipse` is OpenDocument's ellipsoid: the circle stretched to the box (PowerPoint has none,
+    /// so `.pptx` writes it as a circle).
     Path { path: String, focus: [f64; 4] },
 }
 

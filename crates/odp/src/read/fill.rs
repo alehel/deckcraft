@@ -335,15 +335,19 @@ pub(super) fn gradient(gr: &El, paint: Paint) -> Gradient {
             // order (position 0 at the centre).
             let st = squeeze(&stops);
             let rev: Vec<GradientStop> = st.iter().rev().map(|s| GradientStop { pos: 1.0 - s.pos, color: s.color.clone() }).collect();
-            let path = if style == "radial" || style == "ellipsoid" { "circle" } else { "rect" };
+            let path = match style {
+                "radial" => "circle",
+                "ellipsoid" => "ellipse",
+                _ => "rect",
+            };
             Gradient {
                 stops: rev,
                 shape: GradientShape::Path { path: path.into(), focus: [cx, cy, 1.0 - cx, 1.0 - cy] },
                 flip: None,
                 rotate_with_shape: true,
                 blend,
-                // The circle is centred on (cx, cy): move the tile, keeping its size.
-                tile: if path == "circle" { [cx - 0.5, cy - 0.5, 0.5 - cx, 0.5 - cy] } else { [0.0; 4] },
+                // The circle (or ellipse) is centred on (cx, cy): move the tile, keeping its size.
+                tile: if path == "rect" { [0.0; 4] } else { [cx - 0.5, cy - 0.5, 0.5 - cx, 0.5 - cy] },
             }
         }
         _ => Gradient {

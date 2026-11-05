@@ -176,6 +176,10 @@ fn trimming_a_path_leaves_its_ends_off_by_arc_length() {
 }
 
 fn radial(focus: [f64; 4]) -> Shape {
+    path_gradient("circle", focus)
+}
+
+fn path_gradient(path: &str, focus: [f64; 4]) -> Shape {
     use deckcraft_model::style::{Gradient, GradientShape, GradientStop};
     let stops = vec![GradientStop { pos: 0.0, color: ColorRef::rgb(WHITE) }, GradientStop { pos: 1.0, color: ColorRef::rgb(Rgba::BLACK) }];
     Shape {
@@ -184,7 +188,7 @@ fn radial(focus: [f64; 4]) -> Shape {
         fill: Some(Fill::Gradient(Gradient {
             tile: [0.0; 4],
             stops,
-            shape: GradientShape::Path { path: "circle".into(), focus },
+            shape: GradientShape::Path { path: path.into(), focus },
             rotate_with_shape: true,
             blend: Default::default(),
             flip: None,
@@ -208,6 +212,18 @@ fn a_radial_gradient_off_centre_ends_on_the_circle_around_the_box() {
     let img = render(vec![radial([0.5, 0.5, 0.5, 0.5])]);
     assert!(img.pixel(300, 200)[0] > 240 && img.pixel(101, 101)[0] < 60);
     assert!((img.pixel(110, 200)[0] as i32 - img.pixel(490, 200)[0] as i32).abs() <= 2);
+}
+
+#[test]
+fn an_ellipse_gradient_is_the_circle_stretched_to_the_box() {
+    // In the 400 x 200 box an ellipse reaches the same colour halfway along every edge, ending on
+    // the ellipse through the corners; a circle (half the diagonal) is darker at the sides than at
+    // the top.
+    let at = |img: &Image| (img.pixel(300, 102)[0] as i32, img.pixel(496, 200)[0] as i32, img.pixel(101, 101)[0]);
+    let (top, side, corner) = at(&render(vec![path_gradient("ellipse", [0.5, 0.5, 0.5, 0.5])]));
+    assert!((top - side).abs() <= 3 && corner < 60, "ellipse: top {top}, side {side}, corner {corner}");
+    let (top, side, _) = at(&render(vec![radial([0.5, 0.5, 0.5, 0.5])]));
+    assert!(top - side > 60, "circle: top {top}, side {side}");
 }
 
 fn shadow(sx: f64, sy: f64, kx: f64, align: &str) -> deckcraft_model::style::Shadow {
