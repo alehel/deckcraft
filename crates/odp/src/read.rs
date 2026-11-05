@@ -866,10 +866,18 @@ impl Reader<'_> {
     // Shapes
 
     /// The resolved style of a shape, and whether it is a presentation style.
+    /// A shape's style, and whether it's a presentation object's. A shape with a presentation
+    /// style but no class isn't one: its style's own properties lie over the `standard` graphic
+    /// style (not the presentation styles it derives from), as LibreOffice reads and re-saves it.
     fn shape_style(&self, e: &El, ctx: &Ctx) -> (Style, bool) {
-        match attr(e, "presentation:style-name") {
-            Some(n) => (self.store.resolve(ctx.scope, "presentation", Some(n)), true),
-            None => (self.store.resolve(ctx.scope, "graphic", attr(e, "draw:style-name")), false),
+        match (attr(e, "presentation:style-name"), attr(e, "presentation:class")) {
+            (Some(n), Some(_)) => (self.store.resolve(ctx.scope, "presentation", Some(n)), true),
+            (Some(n), None) => {
+                let mut s = self.store.resolve(ctx.scope, "graphic", Some("standard"));
+                s.merge(&self.store.chain_until(ctx.scope, "presentation", n, &|p| p != n));
+                (s, false)
+            }
+            (None, _) => (self.store.resolve(ctx.scope, "graphic", attr(e, "draw:style-name")), false),
         }
     }
 

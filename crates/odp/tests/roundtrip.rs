@@ -2337,3 +2337,22 @@ fn per_copy_costs_have_document_budgets() {
     assert_eq!(p.slides.len(), 1000);
     assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
 }
+
+/// Moving files between apps: a frame with a presentation style but no placeholder class isn't a
+/// presentation object; its style's own properties lie over the `standard` graphic style, not the
+/// presentation styles it derives from, as LibreOffice draws it. (A text box styled after a
+/// master's unfilled subtitle, with its own white fill, lost its fill and outline.)
+#[test]
+fn a_presentation_style_without_a_class_lies_over_the_standard_style() {
+    let ns = format!(r#"{NS} xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0""#);
+    let doc = format!(
+        r##"<office:document {ns} office:mimetype="application/vnd.oasis.opendocument.presentation"><office:styles><style:style style:name="standard" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-color="#3465a4" draw:fill="solid" draw:fill-color="#729fcf"/></style:style><style:style style:name="M-subtitle" style:family="presentation"><style:graphic-properties draw:stroke="none" draw:fill="none"/></style:style></office:styles><office:automatic-styles><style:style style:name="pr1" style:family="presentation" style:parent-style-name="M-subtitle"><style:graphic-properties draw:fill-color="#ffffff"/></style:style></office:automatic-styles><office:master-styles><style:master-page style:name="M"/></office:master-styles><office:body><office:presentation><draw:page draw:master-page-name="M"><draw:frame presentation:style-name="pr1" svg:x="1cm" svg:y="1cm" svg:width="10cm" svg:height="2cm"><draw:text-box><text:p>A boxed note</text:p></draw:text-box></draw:frame><draw:frame presentation:style-name="pr1" presentation:class="subtitle" svg:x="1cm" svg:y="5cm" svg:width="10cm" svg:height="2cm"><draw:text-box><text:p>A subtitle</text:p></draw:text-box></draw:frame></draw:page></office:presentation></office:body></office:document>"##
+    );
+    let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+    let boxed = &p.slides[0].shapes[0];
+    assert_eq!(boxed.fill, Some(Fill::solid(ColorRef::rgb(Rgba::WHITE))), "{:?}", boxed.fill);
+    assert!(boxed.line.as_ref().is_some_and(|l| l.fill.is_some()), "{:?}", boxed.line);
+    // A placeholder of that style is a presentation object: unfilled, as its master's subtitle.
+    let sub = p.slides[0].shapes.iter().find(|s| s.ph.is_some()).unwrap();
+    assert!(matches!(sub.fill, Some(Fill::None) | None), "{:?}", sub.fill);
+}
