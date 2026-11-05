@@ -33,6 +33,9 @@ const MAX_SHAPES: usize = 250_000;
 /// Most pages read.
 const MAX_PAGES: usize = 10_000;
 
+/// Most master pages read (one per master, and per layout with a look of its own).
+const MAX_MASTERS: usize = 1024;
+
 /// Most layouts made from page layouts, and most placeholders they get in all.
 const MAX_LAYOUTS_READ: usize = 4096;
 const MAX_LAYOUT_BOXES: usize = 65_536;
@@ -128,7 +131,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
     if let Some(m) = meta.as_ref().and_then(|m| kid(m, "office:meta")) {
         r.meta(m);
     }
-    for m in masters.iter().take(256) {
+    for m in masters.iter().take(MAX_MASTERS) {
         r.master(m, master_scope);
     }
     if r.p.masters.is_empty() {
@@ -580,7 +583,7 @@ impl Reader<'_> {
             let template = master.layouts.iter().find(|l| l.kind == kind).or_else(|| master.layouts.iter().find(|l| l.kind == LayoutType::Blank));
             let shown = attr(el, "style:display-name").unwrap_or(name);
             let boxes = self.boxes_of(el);
-            let Some(layout) = self.new_layout(template, kind, shown, boxes, &master) else { continue };
+            let Some(layout) = self.new_layout(template, kind, shown, boxes, &master, true) else { continue };
             self.our_layouts.insert(name.clone(), (mi, layout.id));
             match built.iter_mut().find(|(m, _)| *m == mi) {
                 Some((_, ls)) => ls.push(layout),
@@ -597,7 +600,7 @@ impl Reader<'_> {
         }
     }
 
-    /// A page layout's placeholders (the footers aside), within the budget: none past it.
+    /// A page layout's placeholders, within the budget: none past it.
     fn boxes_of(&mut self, el: &El) -> Option<Vec<(PhType, Xfrm)>> {
         if self.layouts_made >= MAX_LAYOUTS_READ || self.layout_boxes >= MAX_LAYOUT_BOXES {
             return None;
@@ -605,7 +608,6 @@ impl Reader<'_> {
         let boxes: Vec<(PhType, Xfrm)> = kids(el, "presentation:placeholder")
             .take(64.min(MAX_LAYOUT_BOXES - self.layout_boxes))
             .filter_map(|p| Some((ph_kind(attr(p, "presentation:object")?)?, shape_xfrm(p))))
-            .filter(|(k, _)| !k.is_footer_kind())
             .collect();
         self.layouts_made += 1;
         self.layout_boxes += boxes.len();
@@ -621,6 +623,7 @@ impl Reader<'_> {
         name: &str,
         boxes: Option<Vec<(PhType, Xfrm)>>,
         master: &deckcraft_model::Master,
+        complete: bool,
     ) -> Option<deckcraft_model::Layout> {
         let mut l = template.cloned().unwrap_or_default();
         (l.id, l.kind, l.name) = (LayoutId(self.p.alloc_id()?), kind, name.to_string());
@@ -628,18 +631,20 @@ impl Reader<'_> {
             s.id = self.id();
         }
         if let Some(boxes) = boxes {
-            self.set_placeholders(&mut l, boxes, master);
+            self.set_placeholders(&mut l, boxes, master, complete);
         }
         Some(l)
     }
 
-    /// Give layout `l` the placeholders `boxes` puts where, the footers aside: each keeps the one
-    /// of its kind it had (in order), new ones the master's look. Its own shapes come first, then
-    /// these, then the footers.
-    fn set_placeholders(&mut self, l: &mut deckcraft_model::Layout, boxes: Vec<(PhType, Xfrm)>, master: &deckcraft_model::Master) {
+    /// Give layout `l` the placeholders `boxes` puts where: each keeps the one of its kind it had
+    /// (in order), new ones the master's look. Its own shapes come first, then these. Footers
+    /// are the page layout's when it lists all (`complete`: ours list a layout's every
+    /// placeholder) or any, else stay.
+    fn set_placeholders(&mut self, l: &mut deckcraft_model::Layout, boxes: Vec<(PhType, Xfrm)>, master: &deckcraft_model::Master, complete: bool) {
+        let lists_footers = complete || boxes.iter().any(|(k, _)| k.is_footer_kind());
         let (mut old, mut footers) = (Vec::new(), Vec::new());
         l.shapes.retain(|s| match s.ph_type() {
-            Some(k) if k.is_footer_kind() => {
+            Some(k) if k.is_footer_kind() && !lists_footers => {
                 footers.push(s.clone());
                 false
             }
@@ -689,14 +694,14 @@ impl Reader<'_> {
                 let id = match claim {
                     Some(at) => {
                         let mut l = master.layouts.get(at)?.clone();
-                        self.set_placeholders(&mut l, boxes, &master);
+                        self.set_placeholders(&mut l, boxes, &master, false);
                         let id = l.id;
                         *Arc::make_mut(self.p.masters.get_mut(mi)?).layouts.get_mut(at)? = l;
                         id
                     }
                     None => {
                         let template = of_kind.filter(|l| l.kind == kind).or_else(|| master.layouts.iter().find(|l| l.kind == LayoutType::Blank));
-                        let l = self.new_layout(template, kind, shown, Some(boxes), &master)?;
+                        let l = self.new_layout(template, kind, shown, Some(boxes), &master, false)?;
                         let id = l.id;
                         Arc::make_mut(self.p.masters.get_mut(mi)?).layouts.push(l);
                         id
@@ -851,7 +856,13 @@ impl Reader<'_> {
         // Ids of a body read for a shape that was then dropped don't belong to this one.
         self.para_ids.clear();
         let (style, presentation) = self.shape_style(e, ctx);
-        let g = &style.graphic;
+        // A frame's text direction is in its paragraph properties (as LibreOffice writes it), a
+        // custom shape's in its graphic ones.
+        let mut graphic = style.graphic.clone();
+        if let Some(m) = style.paragraph.get("style:writing-mode").filter(|_| !graphic.contains_key("style:writing-mode")) {
+            graphic.insert("style:writing-mode".into(), m.clone());
+        }
+        let g = &graphic;
         let mut s = Shape {
             id: self.id(),
             name: attr(e, "draw:name").unwrap_or("").to_string(),

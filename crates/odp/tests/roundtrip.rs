@@ -2175,3 +2175,95 @@ fn layouts_masters_and_ramps_as_written() {
     let Some(Fill::Gradient(g)) = &shapes_of(&p)[0].fill else { panic!() };
     assert!(g.stops.len() > ramp.len() && g.blend == GradientBlend::Srgb, "{} stops, {:?}", g.stops.len(), g.blend);
 }
+
+/// Final review (layouts): masters keep their order and names, a layout's colour map gives it a
+/// look of its own, a layout's footers are its own (removed ones stay removed, moved ones moved),
+/// and content and media placeholders on a layout stay placeholders of their kind.
+#[test]
+fn layouts_keep_order_footers_colour_maps_and_placeholder_kinds() {
+    use deckcraft_model::{LayoutType, Placeholder};
+    let mut p = sample();
+    let mut evening = (*p.masters[0]).clone();
+    evening.id = deckcraft_model::MasterId(60_001);
+    for (j, l) in evening.layouts.iter_mut().enumerate() {
+        l.id = deckcraft_model::LayoutId(60_100 + j as u32);
+    }
+    p.masters.push(Arc::new(evening));
+    // The first slide on the second master (of the same name).
+    Arc::make_mut(&mut p.slides[0]).layout = deckcraft_model::LayoutId(60_100);
+    let m = Arc::make_mut(&mut p.masters[0]);
+    // A dark section layout, by its colour map.
+    let sec = m.layouts.iter_mut().find(|l| l.kind == LayoutType::SectionHeader).unwrap();
+    sec.color_map = Some(vec![("bg1".into(), "dk1".into()), ("tx1".into(), "lt1".into())]);
+    let sec_id = sec.id;
+    // Title Only without footers; Blank with a moved footer, a content and a media placeholder.
+    let only = m.layouts.iter_mut().find(|l| l.kind == LayoutType::TitleOnly).unwrap();
+    only.shapes.retain(|s| !s.ph_type().is_some_and(PhType::is_footer_kind));
+    let blank = m.layouts.iter_mut().find(|l| l.kind == LayoutType::Blank).unwrap();
+    for s in blank.shapes.iter_mut().filter(|s| s.ph_type() == Some(PhType::Footer)) {
+        s.xfrm = Some(Xfrm::new(10.0, 10.0, 100.0, 20.0));
+    }
+    let ph = |kind: PhType, x: f64| Shape {
+        xfrm: Some(Xfrm::new(x, 100.0, 200.0, 100.0)),
+        ph: Some(Placeholder { kind, idx: 5, ..Default::default() }),
+        ..Default::default()
+    };
+    blank.shapes.extend([ph(PhType::Obj, 50.0), ph(PhType::Media, 300.0)]);
+    Arc::make_mut(&mut p.slides[2]).layout = sec_id;
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    let names: Vec<&str> = back.masters.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(&names[..2], ["DeckCraft", "DeckCraft"], "{names:?}");
+    let kinds = |p: &Presentation, kind: LayoutType| {
+        p.masters[0].layouts.iter().find(|l| l.kind == kind).map(|l| l.shapes.iter().filter_map(|s| s.ph_type()).collect::<Vec<_>>())
+    };
+    assert_eq!(kinds(&back, LayoutType::TitleOnly), kinds(&p, LayoutType::TitleOnly));
+    let blank_back = back.masters[0].layouts.iter().find(|l| l.kind == LayoutType::Blank).unwrap();
+    let footer = blank_back.shapes.iter().find(|s| s.ph_type() == Some(PhType::Footer)).and_then(|s| s.xfrm).unwrap();
+    assert_eq!((footer.x.round(), footer.y.round()), (10.0, 10.0));
+    let phs: Vec<PhType> = blank_back.shapes.iter().filter_map(|s| s.ph_type()).filter(|k| !k.is_footer_kind()).collect();
+    assert_eq!(phs.len(), 2, "{phs:?}");
+    assert!(phs.contains(&PhType::Obj), "{phs:?}");
+    // The section slide keeps its dark look: it's drawn on a page of its own, whose background
+    // is the colour map's (ODF has no colour maps, so the look is what's kept).
+    let slide_master = back.masters.iter().find(|m| m.layouts.iter().any(|l| l.id == back.slides[2].layout)).unwrap();
+    let bg = slide_master.background.as_ref().and_then(|b| match b {
+        deckcraft_model::Background::Fill { fill: Fill::Solid { color } } => Some(color.resolve(&slide_master.theme.colors, None)),
+        _ => None,
+    });
+    assert!(bg.is_some_and(|c| u32::from(c.r) + u32::from(c.g) + u32::from(c.b) < 200), "{bg:?} on {}", slide_master.name);
+}
+
+/// Final review (LibreOffice): a frame's vertical text direction is in its paragraph properties
+/// (LibreOffice reads it only there); bar spacing is on the value axis too; a pie has a reversed
+/// value axis (LibreOffice draws it clockwise then); slices are parted in white, bars without an
+/// outline get none; the legend has no border.
+#[test]
+fn charts_and_vertical_text_as_libreoffice_reads_them() {
+    use deckcraft_model::chart::{Chart, ChartType};
+    use deckcraft_model::text::TextDir;
+    let mut tb =
+        Shape { xfrm: Some(Xfrm::new(20.0, 20.0, 100.0, 300.0)), text_box: true, text: Some(TextBody::from_text("down")), ..Default::default() };
+    tb.text.as_mut().unwrap().body.vert = Some(TextDir::EaVertical);
+    let chart = |kind: ChartType, y: f64| {
+        let mut c = Chart::sample(kind);
+        c.legend = Some("r".into());
+        Shape { xfrm: Some(Xfrm::new(200.0, y, 300.0, 150.0)), kind: ShapeKind::Chart(Box::new(c)), ..Default::default() }
+    };
+    let p = deck_with(vec![tb, chart(ChartType::Column, 20.0), chart(ChartType::Pie, 200.0)]);
+    let bytes = deckcraft_odp::export(&p).unwrap();
+    let content = part(&bytes, "content.xml");
+    assert!(content.contains(r#"<style:paragraph-properties style:writing-mode="tb-rl"/>"#), "{content}");
+    let column = part(&bytes, "Object 1/content.xml");
+    let y_axis = column.split("chart:name=\"primary-y\" chart:style-name=\"").nth(1).and_then(|s| s.split('"').next()).unwrap();
+    let y_style = column.split(&format!("style:name=\"{y_axis}\"")).nth(1).unwrap();
+    assert!(y_style.split("</style:style>").next().unwrap().contains("chart:gap-width"), "{column}");
+    assert!(column.contains(r#"<chart:legend chart:legend-position="end" style:legend-expansion="balanced" chart:style-name="#));
+    let pie = part(&bytes, "Object 2/content.xml");
+    assert!(pie.contains(r#"chart:reverse-direction="true""#) && pie.contains(r##"svg:stroke-color="#ffffff""##), "{pie}");
+    let back = deckcraft_odp::import(&bytes).unwrap();
+    let s = shapes_of(&back);
+    assert_eq!(s[0].text.as_ref().unwrap().body.vert, Some(TextDir::EaVertical));
+    let ShapeKind::Chart(c) = &s[1].kind else { panic!() };
+    let ShapeKind::Chart(orig) = &shapes_of(&p)[1].kind else { panic!() };
+    assert!((c.gap_width - orig.gap_width).abs() < 0.01 && (c.overlap - orig.overlap).abs() < 0.01);
+}

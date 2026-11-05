@@ -196,6 +196,9 @@ pub fn read(content: &El) -> Option<Chart> {
         c.categories.truncate(n);
     }
 
+    // Bar spacing: the plot area's, else the value axis's (LibreOffice's place for it).
+    let y_axis = kids(plot, "chart:axis").find(|a| attr(a, "chart:dimension") == Some("y")).map(style);
+    let cp = |k: &str| cp(k).or_else(|| y_axis.as_ref().and_then(|s| s.chart_prop(k)));
     if let Some(g) = cp("chart:gap-width").and_then(|v| v.parse::<f64>().ok()) {
         c.gap_width = (g / 100.0).clamp(0.0, 5.0);
     }

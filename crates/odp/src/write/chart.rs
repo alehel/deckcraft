@@ -79,14 +79,17 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
         r#"<style:graphic-properties draw:stroke="none"{chart_fill}/><style:text-properties fo:font-size="{text_size}" fo:color="{text_color}"/>"#
     ));
     let mut plot_props = format!(r#" chart:vertical="{vertical}" chart:stacked="{stacked}" chart:percentage="{percent}""#);
-    if class == "bar" {
-        let _ = write!(
-            plot_props,
+    // Bar spacing: on the plot area (ODF's place) and on the value axis (LibreOffice's).
+    let spacing = if class == "bar" {
+        format!(
             r#" chart:gap-width="{}" chart:overlap="{}""#,
             trim(c.gap_width * 100.0, 0),
             trim(if stacked || percent { 100.0 } else { c.overlap * 100.0 }, 0)
-        );
-    }
+        )
+    } else {
+        String::new()
+    };
+    plot_props.push_str(&spacing);
     if matches!(c.kind, ChartType::LineMarkers | ChartType::Scatter) {
         plot_props.push_str(r#" chart:symbol-type="automatic""#);
     } else if class == "line" {
@@ -96,9 +99,12 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
     let axis_text = format!(r#"<style:text-properties fo:font-size="{text_size}" fo:color="{text_color}"/>"#);
     let yprops = y_props(c);
     let y_style = style(format!(
-        r##"<style:chart-properties chart:display-label="{}"{yprops}/><style:graphic-properties svg:stroke-color="#b3b3b3"/>{axis_text}"##,
+        r##"<style:chart-properties chart:display-label="{}"{yprops}{spacing}/><style:graphic-properties svg:stroke-color="#b3b3b3"/>{axis_text}"##,
         !c.y_hidden
     ));
+    // A pie runs clockwise from the top, as LibreOffice draws one whose value axis is reversed.
+    let pie_axis_style = style(r#"<style:chart-properties chart:display-label="false" chart:reverse-direction="true"/>"#.to_string());
+    let legend_style = style(format!(r#"<style:graphic-properties draw:stroke="none" draw:fill="none"/>{axis_text}"#));
     let x_style = style(format!(
         r##"<style:chart-properties chart:display-label="true" chart:reverse-direction="{}"/><style:graphic-properties svg:stroke-color="#b3b3b3"/>{axis_text}"##,
         c.cat_reversed
@@ -124,10 +130,22 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
         // A series drawn a colour per point has no colour of its own (its points have theirs),
         // which is how it reads back as varying.
         let fill = if c.varies(s) { String::new() } else { format!(r#" draw:fill-color="{color}""#) };
-        let mut g = format!(r#"{fill} svg:stroke-color="{color}""#);
+        // The outline: a line series' line; a bar's or slice's own outline, else white between
+        // slices and none round bars (as DeckCraft draws them).
+        let outline = s.line.as_ref().filter(|_| !lined).and_then(|l| match &l.fill {
+            Some(Fill::Solid { color }) => Some((hex(ctx.color(color, None)), l.width.unwrap_or(0.75))),
+            _ => None,
+        });
+        let mut g = fill;
         if lined {
             let width = s.line.as_ref().and_then(|l| l.width).unwrap_or(2.25);
-            let _ = write!(g, r#" svg:stroke-width="{}""#, cm(width));
+            let _ = write!(g, r#" svg:stroke-color="{color}" svg:stroke-width="{}""#, cm(width));
+        } else if let Some((oc, ow)) = outline {
+            let _ = write!(g, r#" draw:stroke="solid" svg:stroke-color="{oc}" svg:stroke-width="{}""#, cm(ow));
+        } else if c.kind.is_pie() {
+            g.push_str(r##" draw:stroke="solid" svg:stroke-color="#ffffff" svg:stroke-width="0.0265cm""##);
+        } else {
+            g.push_str(r#" draw:stroke="none""#);
         }
         // Scatter series are markers, as DeckCraft draws them.
         if c.kind == ChartType::Scatter {
@@ -203,7 +221,7 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
     });
     let legend = c.legend.as_deref().map(|l| {
         let pos = crate::chart::legend_position(l);
-        format!(r#"<chart:legend chart:legend-position="{pos}" style:legend-expansion="balanced"/>"#)
+        format!(r#"<chart:legend chart:legend-position="{pos}" style:legend-expansion="balanced" chart:style-name="{legend_style}"/>"#)
     });
     let cats = if c.categories.is_empty() || xy {
         String::new()
@@ -213,7 +231,7 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
     let grid = if c.gridlines { format!(r#"<chart:grid chart:style-name="{grid_style}" chart:class="major"/>"#) } else { String::new() };
     let minor = if c.minor_gridlines { format!(r#"<chart:grid chart:style-name="{grid_style}" chart:class="minor"/>"#) } else { String::new() };
     let axes = if c.kind.is_pie() {
-        String::new()
+        format!(r#"<chart:axis chart:dimension="y" chart:name="primary-y" chart:style-name="{pie_axis_style}"/>"#)
     } else {
         let xt = c.axis_titles.0.as_ref().map(|t| format!("<chart:title><text:p>{}</text:p></chart:title>", esc(t))).unwrap_or_default();
         let yt = c.axis_titles.1.as_ref().map(|t| format!("<chart:title><text:p>{}</text:p></chart:title>", esc(t))).unwrap_or_default();

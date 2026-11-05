@@ -214,7 +214,17 @@ impl PageCtx {
 
 /// Whether a layout looks different from its master (and so needs a master page of its own).
 fn has_own_look(l: &deckcraft_model::Layout) -> bool {
-    l.background.is_some() || !l.show_master_shapes || l.shapes.iter().any(|s| s.ph.is_none())
+    l.background.is_some() || l.color_map.is_some() || !l.show_master_shapes || l.shapes.iter().any(|s| s.ph.is_none())
+}
+
+/// A placeholder's `presentation:object` in a page layout: its class, but a content placeholder
+/// as `object` (it would read back as a text one) and media as one too (ODF has no media class).
+fn page_layout_object(k: PhType) -> Option<&'static str> {
+    match k {
+        PhType::Obj | PhType::Media => Some("object"),
+        PhType::ClipArt => Some("graphic"),
+        k => crate::vocab::write(crate::vocab::PRESENTATION_CLASSES, &k),
+    }
 }
 
 /// The page layouts written (`style:presentation-page-layout`): every layout of every master,
@@ -243,8 +253,9 @@ impl PageLayouts {
         let name = if *k == 1 { format!("{base}.{page}") } else { format!("{base}-{k}.{page}") };
         let ctx = Ctx::for_layout(p, m, l);
         let _ = write!(self.xml, r#"<style:presentation-page-layout style:name="{name}" style:display-name="{}">"#, esc(&l.name));
-        for s in l.shapes.iter().filter(|s| s.ph_type().is_some_and(|k| !k.is_footer_kind())) {
-            let Some(class) = s.ph_type().and_then(|k| crate::vocab::write(crate::vocab::PRESENTATION_CLASSES, &k)) else { continue };
+        // Every placeholder, footers too (a layout's are its own).
+        for s in &l.shapes {
+            let Some(class) = s.ph_type().and_then(page_layout_object) else { continue };
             let x = resolve::xfrm(&ctx, s);
             let _ = write!(
                 self.xml,
@@ -306,17 +317,21 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         let base = if lname.is_empty() { m.name.clone() } else { format!("{} {}", m.name, lname) };
         let shown = if base.trim().is_empty() { "Default".to_string() } else { base };
         let base = style_name(&shown);
-        let (mut name, mut display) = (base.clone(), shown.clone());
+        // A style name of its own; the name it shows is the master's, even shared.
+        let mut name = base.clone();
         let mut k = 1;
         while pages.iter().any(|pg| pg.name == name) {
             k += 1;
             name = format!("{base}_{k}");
-            display = format!("{shown} {k}");
         }
-        pages.push(Page { name: name.clone(), display, master: mi, layout });
+        pages.push(Page { name: name.clone(), display: shown, master: mi, layout });
         page_of.insert((mi, layout), name.clone());
         name
     };
+    // The masters' own pages first, in their order (a master is read back for each, in order).
+    for mi in 0..p.masters.len() {
+        want(mi, None, &mut pages);
+    }
     let mut slide_pages = vec![];
     let mut slide_layouts = vec![];
     for s in &p.slides {

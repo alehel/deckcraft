@@ -128,37 +128,40 @@ Detail in [file-format-parity.md](file-format-parity.md).
 - **Evidence:** `.odp`, `.otp` and `.fodp` open and `.odp`/`.otp` save (`crates/odp`), at ~96% pixel
   similarity to LibreOffice 24.2 on its 23 bundled templates and synthetic decks, reading and
   writing. What's left is rare: SVG pictures and StarView (`.svm`) previews of non-chart objects
-  don't draw (the renderer reads no SVG, so a frame's PNG fallback is shown); ellipsoid and
-  square gradients use circle and rectangle extents that differ a little from LibreOffice's; 3-D
-  scenes (`dr3d:scene`) and form controls are left out; bent connectors keep their drawn path but
-  aren't re-routed when a shape moves; custom shapes are written as fixed outlines (LibreOffice
-  shows them but loses their handles); LibreOffice animation presets without a DeckCraft effect
-  play as the closest one; comment replies are written as separate comments; font weights other
-  than regular and bold (`style:font-adornments="Black"`) read as one of the two; PowerPoint
-  transitions without an ODF filter (Vortex, Ripple, Honeycomb, Cube and the other 3-D ones) are
-  written as a fade; a text block pushed to the right of its frame reads as right-aligned lines;
-  triple hatches keep their spacing to within 0.5%. Not kept through `.odp`: diagonal cell borders,
-  vertical cell text and the table style's name; the first slide number; "advance on click" off;
-  video autoplay; clicks that run a program; percentage paragraph spacing (written in points);
-  shrink-to-fit line reduction; pattern fills read back as tiled pictures; a chart's secondary
-  axis and its number formats; the notes page size; white outlined text (written hollow for
-  LibreOffice) reads back unfilled; gradient-filled text reads back in its first colour; a gradient's opacity
-  is written from its end stops only (a middle stop's own opacity is lost); double
-  and other compound lines read back as one line; slide sections; a layout with a look of its own (its own background or shapes) reads back as
-  a master of its own; a show range's last slide (it
-  plays to the end) and kiosk mode; kerning thresholds (kerning is on or off, read back as from
-  1 pt); numbering other than Arabic, Latin letters and Roman numbers with `.`, `)` or `()` (for
-  example circled numbers, or other scripts) is written as `1.`; a single-colour
-  pie that recolours half its slices or more reads back as a varied one (LibreOffice's varied
-  pies have a series colour too, so the file can't tell them apart).
+  don't draw (the renderer reads no SVG, so a frame's PNG fallback is shown); ellipsoid and square
+  gradients use circle and rectangle extents that differ a little from LibreOffice's; 3-D scenes
+  (`dr3d:scene`) and form controls are left out; bent connectors keep their drawn path but aren't
+  re-routed when a shape moves; custom shapes are written as fixed outlines (LibreOffice shows them
+  but loses their handles); LibreOffice animation presets without a DeckCraft effect play as the
+  closest one; comment replies are written as separate comments; font weights other than regular and
+  bold (`style:font-adornments="Black"`) read as one of the two; PowerPoint transitions without an
+  ODF filter (Vortex, Ripple, Honeycomb, Cube and the other 3-D ones) are written as a fade; a text
+  block pushed to the right of its frame reads as right-aligned lines; triple hatches keep their
+  spacing to within 0.5%. Not kept through `.odp`: diagonal cell borders, vertical cell text and the
+  table style's name; the first slide number; "advance on click" off; video autoplay; clicks that
+  run a program; percentage paragraph spacing (written in points); shrink-to-fit line reduction;
+  pattern fills read back as tiled pictures; a chart's secondary axis and its number formats; the
+  notes page size; white outlined text (written hollow for LibreOffice) reads back unfilled;
+  gradient-filled text reads back in its first colour; a gradient's opacity is written from its end
+  stops only (a middle stop's own opacity is lost); double and other compound lines read back as one
+  line; slide sections; a layout with a look of its own (its own background, colour map or shapes)
+  reads back as a master of its own; media and clip-art placeholders on a layout read back as
+  content and picture ones; a deck whose only master has no layouts reads back with the default
+  ones; a show range's last slide (it plays to the end) and kiosk mode; kerning thresholds (kerning
+  is on or off, read back as from 1 pt); numbering other than Arabic, Latin letters and Roman
+  numbers with `.`, `)` or `()` (for example circled numbers, or other scripts) is written as `1.`;
+  a single-colour pie that recolours half its slices or more reads back as a varied one
+  (LibreOffice's varied pies have a series colour too, so the file can't tell them apart).
   LibreOffice itself draws every text shadow grey and re-saves it as `1pt 1pt`, shows filled
-  outlined text filled without its outline (white filled text is written hollow so it shows),
-  drops link tooltips and WebM audio, shows date and time fields in its locale's order of its own
-  formats (so `datetime3`, `4` and `6` look alike, `8` and `9` show the date only, and its
-  re-save keeps the nearest of `datetime1`, `2`, `3`, `5` and `10`–`13`), shows a one-line
-  distributed paragraph left-aligned, and when it re-saves a list whose numbering restarts several
-  times it writes later restarts' starts twice (on the list level and the item), so it shows one
-  of `7` as `13` (DeckCraft reads it right).
+  outlined text filled without its outline (white filled text is written hollow so it shows), drops
+  link tooltips and WebM audio, shows date and time fields in its locale's order of its own formats
+  (so `datetime3`, `4` and `6` look alike, `8` and `9` show the date only, and its re-save keeps the
+  nearest of `datetime1`, `2`, `3`, `5` and `10`–`13`), shows stacked and 270°-turned text frames
+  horizontal, puts new slides' placeholders where its own layouts would (not our layouts' boxes),
+  and on re-saving maps our layouts to its own generic ones (section headers read back as
+  title-and-content), shows a one-line distributed paragraph left-aligned, and when it re-saves a
+  list whose numbering restarts several times it writes later restarts' starts twice (on the list
+  level and the item), so it shows one of `7` as `13` (DeckCraft reads it right).
 - **Impact:** a few unusual LibreOffice decks lose an object or a detail.
 - **Estimate:** 4–8 h (SVG rendering is its own renderer item).
 

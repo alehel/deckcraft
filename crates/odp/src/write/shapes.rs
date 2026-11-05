@@ -201,6 +201,14 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
     g.push_str(&effect_attrs(ctx, effects.as_ref(), ph_fx));
     g.push_str(&body_attrs(&body, is_frame));
     // Text columns.
+    // LibreOffice takes a frame's text direction from its paragraph properties.
+    let direction = body
+        .vert
+        .as_ref()
+        .filter(|_| is_frame)
+        .and_then(|v| vocab::write(vocab::WRITING_MODES, v))
+        .map(|m| format!(r#"<style:paragraph-properties style:writing-mode="{m}"/>"#))
+        .unwrap_or_default();
     let columns = match body.columns.filter(|n| *n > 1) {
         Some(n) => format!(r#"<style:columns fo:column-count="{n}" fo:column-gap="{}"/>"#, cm(body.col_spacing.unwrap_or(0.0))),
         None => String::new(),
@@ -228,11 +236,21 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
     let (style_attr, class_attr) = match class {
         Some(c) => {
             let parent = format!("{}-{}", pg.master, parent_style_of(c));
-            let st = auto.style("presentation", "pr", Some(&parent), &format!("<style:graphic-properties{g}>{columns}</style:graphic-properties>"));
+            let st = auto.style(
+                "presentation",
+                "pr",
+                Some(&parent),
+                &format!("<style:graphic-properties{g}>{columns}</style:graphic-properties>{direction}"),
+            );
             (format!(r#" presentation:style-name="{st}""#), format!(r#" presentation:class="{c}""#))
         }
         None => {
-            let st = auto.style("graphic", "gr", Some("standard"), &format!("<style:graphic-properties{g}>{columns}</style:graphic-properties>"));
+            let st = auto.style(
+                "graphic",
+                "gr",
+                Some("standard"),
+                &format!("<style:graphic-properties{g}>{columns}</style:graphic-properties>{direction}"),
+            );
             (format!(r#" draw:style-name="{st}""#), String::new())
         }
     };
