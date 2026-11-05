@@ -2337,3 +2337,19 @@ fn per_copy_costs_have_document_budgets() {
     assert_eq!(p.slides.len(), 1000);
     assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
 }
+
+/// Moving files between apps: a gradient fill naming no gradient (LibreOffice writes one set
+/// through its API so) is LibreOffice's default, black to white; it was read as the default
+/// solid colour, so a master's gradient background came back flat blue.
+#[test]
+fn a_gradient_without_a_definition_is_black_to_white() {
+    let doc = format!(
+        r#"<office:document {NS} xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0" office:mimetype="application/vnd.oasis.opendocument.presentation"><office:automatic-styles><style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="gradient"/></style:style></office:automatic-styles><office:body><office:presentation><draw:page><draw:custom-shape draw:style-name="gr1" svg:x="1cm" svg:y="1cm" svg:width="4cm" svg:height="2cm"><draw:enhanced-geometry svg:viewBox="0 0 21600 21600" draw:type="rectangle"/></draw:custom-shape></draw:page></office:presentation></office:body></office:document>"#
+    );
+    let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+    let Some(Fill::Gradient(g)) = &shapes_of(&p)[0].fill else { panic!("{:?}", shapes_of(&p)[0].fill) };
+    let rgb = |s: &deckcraft_model::style::GradientStop| {
+        s.color.resolve(&deckcraft_color::ColorScheme { name: String::new(), colors: [Rgba::BLACK; 12] }, None)
+    };
+    assert_eq!((rgb(g.stops.first().unwrap()), rgb(g.stops.last().unwrap())), (Rgba::BLACK, Rgba::WHITE));
+}

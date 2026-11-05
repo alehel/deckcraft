@@ -61,14 +61,16 @@ impl Reader<'_> {
                 Some(og) => Fill::Gradient(self.budget_stops(gradient(og, Paint::Faded(color)))),
                 None => Fill::solid(with_alpha(color)),
             },
-            "gradient" => match g.get("draw:fill-gradient-name").and_then(|n| self.store.gradients.get(n)) {
+            "gradient" => {
+                // A gradient it doesn't define (no name, or one with no definition, as LibreOffice
+                // writes a gradient set through its API) is LibreOffice's default: black to
+                // white, linear, which is what an empty definition reads as.
+                let undefined = El { name: "draw:gradient".into(), attrs: vec![], children: vec![] };
+                let gr = g.get("draw:fill-gradient-name").and_then(|n| store.gradients.get(n)).unwrap_or(&undefined);
                 // Under an opacity gradient each stop takes the opacity where it is.
-                Some(gr) => {
-                    let a = alpha.unwrap_or(1.0);
-                    Fill::Gradient(self.budget_stops(gradient(gr, Paint::Colors(og_ends.unwrap_or((a, a))))))
-                }
-                None => Fill::solid(with_alpha(color)),
-            },
+                let a = alpha.unwrap_or(1.0);
+                Fill::Gradient(self.budget_stops(gradient(gr, Paint::Colors(og_ends.unwrap_or((a, a))))))
+            }
             "hatch" => {
                 let h = g.get("draw:fill-hatch-name").and_then(|n| self.store.hatches.get(n));
                 let ha = |k: &str| h.and_then(|h| attr(h, k));
