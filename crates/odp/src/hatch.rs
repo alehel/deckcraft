@@ -52,7 +52,8 @@ impl HatchStyle {
     }
 }
 
-/// A hatch's parameters, normalised (see [`Hatch::new`]).
+/// A hatch's parameters, normalised: made only by [`Hatch::new`] (which normalises) and
+/// [`Hatch::from_media_name`] (which takes only normalised names), so nothing else re-checks them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hatch {
     pub style: HatchStyle,
@@ -161,8 +162,8 @@ impl Hatch {
             "{PREFIX}{}_{}_{}_{}_{bg}{SUFFIX}",
             self.style.as_str(),
             hex6(self.color),
-            crate::units::trim(norm_distance(self.distance), 3),
-            crate::units::trim(norm_rotation(self.rotation), 2)
+            crate::units::trim(self.distance, 3),
+            crate::units::trim(self.rotation, 2)
         )
     }
 
@@ -191,9 +192,9 @@ impl Hatch {
     /// irrational, so its tile holds 7 axis-aligned periods and 5 diagonal ones (7/5 ≈ √2), sized
     /// at their geometric mean so both spacings stay within 0.5% of `d`.
     fn raster(&self) -> Raster {
-        let d = norm_distance(self.distance);
+        let d = self.distance;
         // Multiples of 45° (mod 180°: lines are undirected).
-        let base = (norm_rotation(self.rotation) / 45.0).round() as i64;
+        let base = (self.rotation / 45.0).round() as i64;
         let mut steps = vec![base];
         if self.style != HatchStyle::Single {
             steps.push(base + 2);

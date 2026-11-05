@@ -238,11 +238,21 @@ fn secs(ms: u32) -> String {
     trim(f64::from(ms) / 1000.0, 3)
 }
 
+/// A transition's length when the file gives none, and the longest kept.
+const TRANSITION_MS: u32 = 700;
+const MAX_TRANSITION_MS: u32 = 60_000;
+
+/// A transition's kind and option from its SMIL attributes (a page style's, or a
+/// `anim:transitionFilter`'s): `smil:type`, `smil:subtype`, `smil:direction`.
+fn smil_transition<'a>(ty: &str, get: impl Fn(&str) -> Option<&'a str>) -> (&'static str, &'static str) {
+    transition_of(ty, get("smil:subtype").unwrap_or(""), get("smil:direction") == Some("reverse"))
+}
+
 /// The transition a page style describes: SMIL attributes, or the ODF 1.0 `transition-style`.
 pub fn page_transition(pp: &crate::styles::Props) -> Option<deckcraft_model::Transition> {
     let get = |k: &str| pp.get(k).map(String::as_str);
     let (kind, option) = match (get("smil:type"), get("presentation:transition-style")) {
-        (Some(ty), _) => transition_of(ty, get("smil:subtype").unwrap_or(""), get("smil:direction") == Some("reverse")),
+        (Some(ty), _) => smil_transition(ty, get),
         (None, Some(s)) if s.contains("fade") => ("fade", ""),
         (None, Some(s)) if s.starts_with("move") => ("cover", ""),
         (None, Some(s)) if s != "none" => ("fade", ""),
@@ -256,7 +266,7 @@ pub fn page_transition(pp: &crate::styles::Props) -> Option<deckcraft_model::Tra
             "fast" => Some(300),
             _ => Some(500),
         })
-        .unwrap_or(700);
+        .unwrap_or(TRANSITION_MS);
     let auto = get("presentation:transition-type") == Some("automatic");
     let after = if auto { get("presentation:duration").and_then(duration_iso) } else { None };
     if kind == "none" && after.is_none() {
@@ -265,7 +275,7 @@ pub fn page_transition(pp: &crate::styles::Props) -> Option<deckcraft_model::Tra
     Some(deckcraft_model::Transition {
         kind: kind.into(),
         option: option.into(),
-        duration_ms: duration.min(60_000),
+        duration_ms: duration.min(MAX_TRANSITION_MS),
         advance_after_ms: after,
         ..Default::default()
     })
@@ -374,15 +384,11 @@ pub fn read(root: &El, page_id: Option<&str>, targets: &Targets) -> Timing {
                 // The slide transition: a par that begins with the page.
                 let begins_with_page = attr(e, "smil:begin").is_some_and(|b| b.ends_with(".begin") && page_id.is_none_or(|p| b.starts_with(p)));
                 if let Some(f) = kids(e, "anim:transitionFilter").next().filter(|_| begins_with_page) {
-                    let (kind, option) = transition_of(
-                        attr(f, "smil:type").unwrap_or("fade"),
-                        attr(f, "smil:subtype").unwrap_or(""),
-                        attr(f, "smil:direction") == Some("reverse"),
-                    );
+                    let (kind, option) = smil_transition(attr(f, "smil:type").unwrap_or("fade"), |k| attr(f, k));
                     t.transition = Some(Transition {
                         kind: kind.into(),
                         option: option.into(),
-                        duration_ms: attr(f, "smil:dur").and_then(clock).unwrap_or(700).min(60_000),
+                        duration_ms: attr(f, "smil:dur").and_then(clock).unwrap_or(TRANSITION_MS).min(MAX_TRANSITION_MS),
                         ..Default::default()
                     });
                 }

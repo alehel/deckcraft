@@ -47,25 +47,15 @@ impl Reader<'_> {
             "none" => Fill::None,
             "solid" => match &og {
                 // A solid colour under an opacity gradient: the colour, faded by the gradient.
-                Some(og) => Fill::Gradient(gradient(og, &|c| ColorRef::rgb(c), Some(color))),
+                Some(og) => Fill::Gradient(gradient(og, Paint::Faded(color))),
                 None => Fill::solid(with_alpha(color)),
             },
             "gradient" => match g.get("draw:fill-gradient-name").and_then(|n| self.store.gradients.get(n)) {
                 // Under an opacity gradient each stop takes the opacity where it is.
-                Some(gr) => Fill::Gradient(match og_ends {
-                    Some((a, b)) => {
-                        let mut out = gradient(gr, &|c| ColorRef::rgb(c), None);
-                        for s in &mut out.stops {
-                            s.color.mods.retain(|m| !matches!(m, ColorTransform::Alpha(_)));
-                            let o = a + (b - a) * s.pos;
-                            if o < 1.0 {
-                                s.color.mods.push(ColorTransform::Alpha((o * 100_000.0).round() as i32));
-                            }
-                        }
-                        out
-                    }
-                    None => gradient(gr, &with_alpha, None),
-                }),
+                Some(gr) => {
+                    let a = alpha.unwrap_or(1.0);
+                    Fill::Gradient(gradient(gr, Paint::Colors(og_ends.unwrap_or((a, a)))))
+                }
                 None => Fill::solid(with_alpha(color)),
             },
             "hatch" => {
@@ -246,21 +236,31 @@ pub(super) fn background_rgb(b: &Background) -> Option<Rgba> {
     }
 }
 
-/// A gradient fill from a `draw:gradient`, or (with `opacity_of`) a single colour faded by a
-/// `draw:opacity` gradient.
-pub(super) fn gradient(gr: &El, with_alpha: &dyn Fn(Rgba) -> ColorRef, opacity_of: Option<Rgba>) -> Gradient {
+/// What a gradient element paints.
+pub(super) enum Paint {
+    /// Its colours (a `draw:gradient`), with an opacity going from the first to the second
+    /// along it (an opacity gradient's ends, or a flat opacity twice).
+    Colors((f64, f64)),
+    /// One colour, faded by its opacities (a `draw:opacity` gradient).
+    Faded(Rgba),
+}
+
+/// A gradient fill from a gradient element. The opacity is put on the stops in ODF's order,
+/// before the stops are laid out in DrawingML's (axial and radial ones are reshaped).
+pub(super) fn gradient(gr: &El, paint: Paint) -> Gradient {
+    let pct = |k: &str| attr(gr, k).and_then(units::percent).unwrap_or(1.0).clamp(0.0, 1.0);
     let intensity = |c: Rgba, k: &str| {
-        let f = attr(gr, k).and_then(units::percent).unwrap_or(1.0).clamp(0.0, 1.0);
+        let f = pct(k);
         Rgba::rgb((f64::from(c.r) * f).round() as u8, (f64::from(c.g) * f).round() as u8, (f64::from(c.b) * f).round() as u8)
     };
-    let (start, end) = match opacity_of {
-        Some(c) => {
-            let a = |k: &str| (attr(gr, k).and_then(units::percent).unwrap_or(1.0).clamp(0.0, 1.0) * 255.0).round() as u8;
-            (c.with_alpha(a("draw:start")), c.with_alpha(a("draw:end")))
-        }
-        None => (
-            intensity(attr(gr, "draw:start-color").and_then(units::color).unwrap_or(Rgba::BLACK), "draw:start-intensity"),
-            intensity(attr(gr, "draw:end-color").and_then(units::color).unwrap_or(Rgba::WHITE), "draw:end-intensity"),
+    let ((start, end), (o0, o1)) = match paint {
+        Paint::Faded(c) => ((c, c), (pct("draw:start"), pct("draw:end"))),
+        Paint::Colors(ramp) => (
+            (
+                intensity(attr(gr, "draw:start-color").and_then(units::color).unwrap_or(Rgba::BLACK), "draw:start-intensity"),
+                intensity(attr(gr, "draw:end-color").and_then(units::color).unwrap_or(Rgba::WHITE), "draw:end-intensity"),
+            ),
+            ramp,
         ),
     };
     let border = attr(gr, "draw:border").and_then(units::percent).unwrap_or(0.0).clamp(0.0, 1.0);
@@ -280,12 +280,13 @@ pub(super) fn gradient(gr: &El, with_alpha: &dyn Fn(Rgba) -> ColorRef, opacity_o
     if stops.len() < 2 {
         stops = vec![(0.0, start), (1.0, end)];
     }
-    let stops = srgb_steps(&stops);
-    let stop = |pos: f64, c: Rgba| {
-        // The stop's own opacity (from an opacity gradient) times the fill's.
-        let fill_alpha = with_alpha(Rgba::BLACK).alpha();
-        let color = crate::styles::color_ref(c.with_alpha(255), Some(f64::from(c.a) / 255.0 * fill_alpha));
-        GradientStop { pos: pos.clamp(0.0, 1.0), color }
+    for (pos, c) in &mut stops {
+        *c = c.with_alpha(((o0 + (o1 - o0) * *pos) * 255.0).round() as u8);
+    }
+    let stops = srgb_blend(stops);
+    let stop = |pos: f64, c: Rgba| GradientStop {
+        pos: pos.clamp(0.0, 1.0),
+        color: crate::styles::color_ref(c.with_alpha(255), Some(f64::from(c.a) / 255.0)),
     };
     // `border` is the part at the start with the start colour.
     let squeeze = |stops: &[(f64, Rgba)]| -> Vec<GradientStop> {
@@ -337,27 +338,18 @@ pub(super) fn gradient(gr: &El, with_alpha: &dyn Fn(Rgba) -> ColorRef, opacity_o
     }
 }
 
-/// LibreOffice blends gradient colours in sRGB: pin that blend with intermediate stops, so a
-/// renderer that interpolates otherwise draws the same ramp.
-pub(super) fn srgb_steps(stops: &[(f64, Rgba)]) -> Vec<(f64, Rgba)> {
-    const STEPS: usize = 8;
-    let mut out = vec![];
-    for w in stops.windows(2) {
-        let ((p0, a), (p1, b)) = (w[0], w[1]);
-        let differ = [a.r.abs_diff(b.r), a.g.abs_diff(b.g), a.b.abs_diff(b.b), a.a.abs_diff(b.a)].iter().any(|d| *d > 24);
-        out.push((p0, a));
-        if differ && p1 > p0 {
-            for i in 1..STEPS {
-                let t = i as f64 / STEPS as f64;
-                let mix = |x: u8, y: u8| (f64::from(x) + (f64::from(y) - f64::from(x)) * t).round() as u8;
-                out.push((p0 + (p1 - p0) * t, Rgba::rgba(mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b), mix(a.a, b.a))));
-            }
+/// LibreOffice blends gradient colours straight in sRGB, as DeckCraft draws gradients of more
+/// than two stops; one of exactly two it draws on PowerPoint's curve. So a two-stop gradient
+/// gets its sRGB midpoint as a third stop: the same ramp, and stable through saves (three stops
+/// get none).
+fn srgb_blend(stops: Vec<(f64, Rgba)>) -> Vec<(f64, Rgba)> {
+    match stops.as_slice() {
+        [(p, a), (q, b)] if a != b => {
+            let mix = |x: u8, y: u8| (u16::from(x) + u16::from(y)).div_ceil(2) as u8;
+            vec![(*p, *a), ((p + q) / 2.0, Rgba::rgba(mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b), mix(a.a, b.a))), (*q, *b)]
         }
+        _ => stops,
     }
-    if let Some(last) = stops.last() {
-        out.push(*last);
-    }
-    out
 }
 
 pub(super) fn dash(d: &El, width: f64) -> Dash {

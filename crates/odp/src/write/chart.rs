@@ -69,10 +69,12 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
     // The renderer's default sizes, so the chart reads the same in other apps.
     let base = c.text_size.unwrap_or_else(|| (x.h.min(x.w) / 22.0).clamp(7.0, 18.0));
     let text_size = pt(base);
-    let chart_fill = match &c.chart_fill {
+    // A solid background or none (others aren't written).
+    let solid_or_none = |f: &Option<Fill>| match f {
         Some(f @ Fill::Solid { .. }) => format!(r#" draw:fill="solid" draw:fill-color="{}""#, hex(fill_color(ctx, Some(f), 0))),
         _ => r#" draw:fill="none""#.to_string(),
     };
+    let chart_fill = solid_or_none(&c.chart_fill);
     let ch_style = style(format!(
         r#"<style:graphic-properties draw:stroke="none"{chart_fill}/><style:text-properties fo:font-size="{text_size}" fo:color="{text_color}"/>"#
     ));
@@ -102,10 +104,7 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
         c.cat_reversed
     ));
     let grid_style = style(r##"<style:graphic-properties svg:stroke-color="#d9d9d9"/>"##.to_string());
-    let wall = match &c.plot_fill {
-        Some(f @ Fill::Solid { .. }) => format!(r#" draw:fill="solid" draw:fill-color="{}""#, hex(fill_color(ctx, Some(f), 0))),
-        _ => r#" draw:fill="none""#.to_string(),
-    };
+    let wall = solid_or_none(&c.plot_fill);
     let wall_style = style(format!(r#"<style:graphic-properties draw:stroke="none"{wall}/>"#));
 
     // The data table: categories in column A, a column per series (scatter: X, then Y).
@@ -116,17 +115,16 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
     let mut cols: Vec<(String, Vec<Option<f64>>)> = vec![];
     let mut series_xml = String::new();
     for (i, s) in series.iter().enumerate() {
-        let color = hex(fill_color(ctx, s.fill.as_ref(), i));
+        let lined = class == "line" || class == "scatter" || class == "radar";
+        // A drawn line takes its own colour, else the series'.
+        let color = match s.line.as_ref().and_then(|l| l.fill.as_ref()) {
+            Some(Fill::Solid { color }) if lined => hex(ctx.color(color, None)),
+            _ => hex(fill_color(ctx, s.fill.as_ref(), i)),
+        };
         let mut g = format!(r#" draw:fill-color="{color}" svg:stroke-color="{color}""#);
-        if class == "line" || class == "scatter" || class == "radar" {
+        if lined {
             let width = s.line.as_ref().and_then(|l| l.width).unwrap_or(2.25);
             let _ = write!(g, r#" svg:stroke-width="{}""#, cm(width));
-            if let Some(l) = &s.line
-                && let Some(Fill::Solid { color }) = &l.fill
-            {
-                let lc = hex(ctx.color(color, None));
-                g = format!(r#" draw:fill-color="{lc}" svg:stroke-color="{lc}" svg:stroke-width="{}""#, cm(width));
-            }
         }
         // Scatter series are markers, as DeckCraft draws them.
         if c.kind == ChartType::Scatter {
@@ -158,16 +156,17 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
             cols.push((s.name.clone(), s.values.clone()));
         }
         let vcol = cols.len();
-        // Points with their own colour, and every slice of a pie (unstyled, a pie's slices take a
-        // colour each); the rest are unstyled runs (`chart:repeated`) in the series' colour.
-        let pie = matches!(c.kind, ChartType::Pie | ChartType::Doughnut);
-        let varied = c.vary_colors && pie;
+        // Points with their own colour, every point of a varied series, and every slice of a pie
+        // (unstyled, a pie's slices take a colour each); the rest are unstyled runs
+        // (`chart:repeated`) in the series' colour.
+        let varied = crate::chart::varies(c, s);
+        let every_point = crate::chart::is_pie(c.kind) || varied;
         let mut points = String::new();
         let mut plain = 0usize;
         let own_fills: std::collections::HashMap<usize, &Fill> = s.point_fills.iter().map(|(k, f)| (*k, f)).collect();
         for p in 0..s.values.len().min(MAX) {
             let own = own_fills.get(&p).copied();
-            if own.is_none() && !pie {
+            if own.is_none() && !every_point {
                 plain += 1;
                 continue;
             }
@@ -210,7 +209,7 @@ fn chart_document(ctx: &Ctx, c: &Chart, x: &Xfrm) -> String {
     };
     let grid = if c.gridlines { format!(r#"<chart:grid chart:style-name="{grid_style}" chart:class="major"/>"#) } else { String::new() };
     let minor = if c.minor_gridlines { format!(r#"<chart:grid chart:style-name="{grid_style}" chart:class="minor"/>"#) } else { String::new() };
-    let axes = if matches!(c.kind, ChartType::Pie | ChartType::Doughnut) {
+    let axes = if crate::chart::is_pie(c.kind) {
         String::new()
     } else {
         let xt = c.axis_titles.0.as_ref().map(|t| format!("<chart:title><text:p>{}</text:p></chart:title>", esc(t))).unwrap_or_default();

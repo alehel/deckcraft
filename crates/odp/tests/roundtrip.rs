@@ -1579,3 +1579,157 @@ fn round_six_fixes_hold() {
     let t = s.iter().find_map(|x| if let ShapeKind::Table(t) = &x.kind { Some(t) } else { None }).unwrap();
     assert_eq!((t.first_row, t.band_row, t.first_col), (false, false, true));
 }
+
+/// Review series 2, round 1: an opacity gradient fades a radial gradient from the centre out
+/// (the opacity is laid on the stops before they're reshaped), and gradient stops don't multiply
+/// through saves.
+#[test]
+fn gradient_opacity_and_stops_survive_saves() {
+    use deckcraft_color::ColorTransform;
+    use deckcraft_model::style::{Gradient, GradientStop};
+    let c = |rgb: Rgba, alpha: Option<i32>| {
+        let mut c = ColorRef::rgb(rgb);
+        c.mods.extend(alpha.map(ColorTransform::Alpha));
+        c
+    };
+    let (red, blue) = (Rgba::rgb(255, 0, 0), Rgba::rgb(0, 0, 255));
+    // DrawingML order: position 0 at the centre, opaque; the edge transparent.
+    let radial = Gradient {
+        stops: vec![GradientStop { pos: 0.0, color: c(red, None) }, GradientStop { pos: 1.0, color: c(red, Some(0)) }],
+        shape: GradientShape::Path { path: "circle".into(), focus: [0.5, 0.5, 0.5, 0.5] },
+        flip: None,
+        rotate_with_shape: true,
+        tile: [0.0; 4],
+    };
+    let linear = Gradient {
+        stops: vec![GradientStop { pos: 0.0, color: c(red, None) }, GradientStop { pos: 1.0, color: c(blue, None) }],
+        shape: GradientShape::Linear { angle: 0.0, scaled: false },
+        flip: None,
+        rotate_with_shape: true,
+        tile: [0.0; 4],
+    };
+    let shape = |g: Gradient, y: f64| Shape {
+        xfrm: Some(Xfrm::new(50.0, y, 200.0, 100.0)),
+        geom: Geom::preset("rect"),
+        fill: Some(Fill::Gradient(g)),
+        ..Default::default()
+    };
+    let mut p = deck_with(vec![shape(radial, 20.0), shape(linear, 200.0)]);
+    let mut counts = vec![];
+    for _ in 0..3 {
+        p = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+        let s = shapes_of(&p);
+        let Some(Fill::Gradient(g)) = &s[0].fill else { panic!("{:?}", s[0].fill) };
+        let (centre, edge) = (g.stops.first().unwrap(), g.stops.last().unwrap());
+        assert!(centre.color.alpha() > 0.9 && edge.color.alpha() < 0.1, "{:?}", g.stops);
+        let Some(Fill::Gradient(g)) = &s[1].fill else { panic!("{:?}", s[1].fill) };
+        counts.push(g.stops.len());
+    }
+    assert!(counts.windows(2).all(|w| w[0] == w[1]) && counts[0] <= 3, "{counts:?}");
+}
+
+/// Review series 2, round 1: slide date placeholders keep their format, a lone varied series
+/// keeps its colours, audio of any type stays audio, a hatch keeps its opacity, and a text box
+/// that doesn't wrap stays unwrapped.
+#[test]
+fn series_two_round_one_fixes_hold() {
+    use deckcraft_model::chart::{Chart, ChartType, Series};
+    use deckcraft_model::style::PatternFill;
+    use deckcraft_model::text::RunKind;
+    let mut p = sample();
+    let mut date = Shape {
+        xfrm: Some(Xfrm::new(20.0, 400.0, 100.0, 20.0)),
+        ph: Some(deckcraft_model::Placeholder { kind: PhType::Date, ..Default::default() }),
+        text: Some(TextBody::default()),
+        ..Default::default()
+    };
+    date.text.as_mut().unwrap().paragraphs =
+        vec![Paragraph { runs: vec![Run { kind: RunKind::Field { field: "datetime12".into() }, ..Run::new("9:30 AM") }], ..Default::default() }];
+    let column = Chart {
+        kind: ChartType::Column,
+        vary_colors: true,
+        series: vec![Series { name: "S".into(), values: vec![Some(1.0), Some(2.0), Some(3.0)], ..Default::default() }],
+        categories: vec!["a".into(), "b".into(), "c".into()],
+        ..Default::default()
+    };
+    let chart = Shape { xfrm: Some(Xfrm::new(20.0, 20.0, 200.0, 100.0)), kind: ShapeKind::Chart(Box::new(column)), ..Default::default() };
+    let aiff = p.add_media("sound", "audio/x-aiff", vec![b'F', b'O', b'R', b'M']).unwrap();
+    let clip = Shape {
+        xfrm: Some(Xfrm::new(300.0, 20.0, 50.0, 50.0)),
+        kind: ShapeKind::Media(deckcraft_model::MediaClip { media: aiff, ..Default::default() }),
+        ..Default::default()
+    };
+    let half = |c: Rgba| ColorRef::rgb(c).with(deckcraft_color::ColorTransform::Alpha(50_000));
+    let hatched = Shape {
+        xfrm: Some(Xfrm::new(20.0, 150.0, 100.0, 100.0)),
+        geom: Geom::preset("rect"),
+        fill: Some(Fill::Pattern(PatternFill { preset: "ltUpDiag".into(), fg: half(Rgba::rgb(0, 0, 200)), bg: half(Rgba::WHITE) })),
+        ..Default::default()
+    };
+    let mut unwrapped = Shape {
+        xfrm: Some(Xfrm::new(150.0, 150.0, 100.0, 30.0)),
+        text_box: true,
+        text: Some(TextBody::from_text("a long line")),
+        ..Default::default()
+    };
+    unwrapped.text.as_mut().unwrap().body.wrap = Some(false);
+    let s = Arc::make_mut(&mut p.slides[0]);
+    s.shapes = vec![date, chart, clip, hatched, unwrapped];
+    (p.header_footer.date, p.header_footer.date_format) = (true, "datetime12".into());
+    let bytes = deckcraft_odp::export(&p).unwrap();
+    let back = deckcraft_odp::import(&bytes).unwrap();
+    let s = shapes_of(&back);
+    let date = back.slides[0].shapes.iter().find(|x| x.ph_type() == Some(PhType::Date)).unwrap();
+    let field = date.text.as_ref().unwrap().paragraphs.iter().flat_map(|p| &p.runs).find_map(|r| match &r.kind {
+        RunKind::Field { field } => Some(field.clone()),
+        _ => None,
+    });
+    assert_eq!(field.as_deref(), Some("datetime12"));
+    let c = s.iter().find_map(|x| if let ShapeKind::Chart(c) = &x.kind { Some(c) } else { None }).unwrap();
+    assert!(c.vary_colors);
+    assert_eq!(c.series[0].point_fills.len(), 3, "{:?}", c.series[0].point_fills);
+    let clip = s.iter().find_map(|x| if let ShapeKind::Media(m) = &x.kind { Some(m) } else { None }).unwrap();
+    assert!(!clip.video);
+    assert!(part(&bytes, "content.xml").contains(r#"draw:fill="hatch""#));
+    let hatch = s.iter().find(|x| matches!(x.fill, Some(Fill::Picture(_) | Fill::Pattern(_)))).unwrap();
+    let alpha = match &hatch.fill {
+        Some(Fill::Picture(pf)) => pf.alpha,
+        Some(Fill::Pattern(pat)) => Some(pat.fg.alpha()),
+        f => panic!("{f:?}"),
+    };
+    assert!(alpha.is_some_and(|a| (a - 0.5).abs() < 0.02), "{alpha:?}");
+    let box_ = s.iter().find(|x| x.text_box).unwrap();
+    assert_eq!(box_.text.as_ref().unwrap().body.wrap, Some(false));
+}
+
+/// Fuzzing, review series 2: a date style with a huge separator used by thousands of fields reads
+/// at once, and copies of repeated table cells share one document budget of text.
+#[test]
+fn date_styles_and_copied_cell_text_are_bounded() {
+    let doc = |styles: &str, body: String| {
+        format!(
+            r#"<office:document {NS} xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0" office:mimetype="application/vnd.oasis.opendocument.presentation"><office:automatic-styles>{styles}</office:automatic-styles><office:body><office:presentation><draw:page>{body}</draw:page></office:presentation></office:body></office:document>"#
+        )
+    };
+    let style = format!(r#"<number:date-style style:name="D1"><number:text>{}</number:text></number:date-style>"#, "x".repeat(1 << 20));
+    let fields = format!(
+        r#"<draw:frame svg:width="10cm" svg:height="5cm"><draw:text-box><text:p>{}</text:p></draw:text-box></draw:frame>"#,
+        r#"<text:date style:data-style-name="D1"/>"#.repeat(4000)
+    );
+    let started = std::time::Instant::now();
+    deckcraft_odp::import(doc(&style, fields).as_bytes()).unwrap();
+    assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+    let table = format!(
+        r#"<draw:frame svg:width="10cm" svg:height="5cm"><table:table><table:table-row><table:table-cell table:number-columns-repeated="1000"><text:p>{}</text:p></table:table-cell></table:table-row></table:table></draw:frame>"#,
+        "y".repeat(4000)
+    );
+    let p = deckcraft_odp::import(doc("", table.repeat(260)).as_bytes()).unwrap();
+    let mut chars = 0usize;
+    deckcraft_model::walk(&p.slides[0].shapes, &mut |sh, _| {
+        if let ShapeKind::Table(t) = &sh.kind {
+            chars += t.rows.iter().flat_map(|r| &r.cells).map(|c| c.text.text().len()).sum::<usize>();
+        }
+    });
+    // The copies' budget, and each table's own first cell.
+    assert!(chars <= (4 << 20) + 260 * 4000, "{chars}");
+}

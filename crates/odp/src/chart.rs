@@ -111,12 +111,20 @@ fn cell_ref(s: &str) -> Option<(usize, usize)> {
     Some((col, row))
 }
 
+/// Rows of the data table above its values (the series names).
+const HEADER_ROWS: usize = 1;
+
+/// An element's chart style (`chart:style-name`), resolved.
+fn chart_style(store: &Store, el: &El) -> crate::styles::Style {
+    attr(el, "chart:style-name").map(|n| store.resolve(Scope::Content, "chart", Some(n))).unwrap_or_default()
+}
+
 /// Read the chart document of `draw:object` at `dir` (`Object 1`).
 pub fn read(content: &El) -> Option<Chart> {
     let mut store = Store::default();
     store.add_document(content, Scope::Content);
     let chart = kid(content, "office:body").and_then(|b| kid(b, "office:chart")).and_then(|c| kid(c, "chart:chart"))?;
-    let style = |el: &El| attr(el, "chart:style-name").map(|n| store.resolve(Scope::Content, "chart", Some(n))).unwrap_or_default();
+    let style = |el: &El| chart_style(&store, el);
     let plot = kid(chart, "chart:plot-area");
     let plot_style = plot.map(style).unwrap_or_default();
     let cp = |k: &str| plot_style.chart_prop(k);
@@ -181,10 +189,9 @@ pub fn read(content: &El) -> Option<Chart> {
         }
         c.axis_titles.0 = kid(x, "chart:title").map(|t| t.text());
     }
-    let header_rows = 1usize;
     read_series(&mut c, plot, &grid, &store, class, &plot_style);
     if c.categories.is_empty() && !matches!(c.kind, ChartType::Scatter | ChartType::Bubble) {
-        c.categories = grid.rows.iter().skip(header_rows).map(|r| r.first().map(|(t, _)| t.clone()).unwrap_or_default()).collect();
+        c.categories = grid.rows.iter().skip(HEADER_ROWS).map(|r| r.first().map(|(t, _)| t.clone()).unwrap_or_default()).collect();
         let n = c.series.iter().map(|s| s.values.len()).max().unwrap_or(0);
         c.categories.truncate(n);
     }
@@ -201,16 +208,14 @@ pub fn read(content: &El) -> Option<Chart> {
 /// The plot area's series: values, names, X values and sizes from the data table, and colours.
 fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str, plot_style: &crate::styles::Style) {
     let cp = |k: &str| plot_style.chart_prop(k);
-    let header_rows = 1usize;
-    let style = |el: &El| attr(el, "chart:style-name").map(|n| store.resolve(Scope::Content, "chart", Some(n))).unwrap_or_default();
     let series_els: Vec<&El> = kids(plot, "chart:series").take(256).collect();
     // Points with their own fill, across the chart's series.
     let mut fills_left = MAX_GRID_CELLS;
     for (i, s) in series_els.iter().enumerate() {
-        let ss = style(s);
+        let ss = chart_style(store, s);
         let values = attr(s, "chart:values-cell-range-address").map(|a| grid.range(a)).unwrap_or_else(|| {
             // No address: the (i+1)th column below the header row.
-            grid.rows.iter().skip(header_rows).take(MAX_CELLS).map(|r| r.get(i + 1).cloned().unwrap_or_default()).collect()
+            grid.rows.iter().skip(HEADER_ROWS).take(MAX_CELLS).map(|r| r.get(i + 1).cloned().unwrap_or_default()).collect()
         });
         let name = attr(s, "chart:label-cell-address")
             .and_then(|a| grid.range(a).into_iter().next())
@@ -257,9 +262,7 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
                 break;
             }
             let rep = repeat(p, "chart:repeated").min(series.values.len() - idx);
-            if let Some(f) =
-                attr(p, "chart:style-name").map(|n| store.resolve(Scope::Content, "chart", Some(n))).and_then(|st| simple_fill(&st.graphic))
-            {
+            if let Some(f) = simple_fill(&chart_style(store, p).graphic) {
                 styled.push((idx, rep, f));
             }
             idx += rep;
@@ -272,13 +275,15 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
         if attr(s, "chart:attached-axis") == Some("secondary-y") {
             series.secondary_axis = true;
         }
-        // A pie's slices take a colour each, unless most are styled in the series' colour (a
-        // varied pie matches it on one slice at most; a single-colour one may recolour a few).
-        // Files say no more (LibreOffice writes both kinds as styled points), so a varied pie
-        // keeps every styled slice's colour, and a single-colour one those not in its own.
-        let varied = i == 0 && matches!(c.kind, ChartType::Pie | ChartType::Doughnut) && {
+        // A chart that can vary its colours (see [`varies`]: a pie, or a lone series with every
+        // point styled) varies them unless most points are in the series' colour (a varied one
+        // matches it on one point at most; a single-colour one may recolour a few). Files say no
+        // more (LibreOffice writes both kinds as styled points), so a varied chart keeps every
+        // styled point's colour, and a single-colour one those not in its own.
+        let all_styled = styled.iter().map(|(_, rep, _)| rep).sum::<usize>() == series.values.len();
+        let varied = i == 0 && (is_pie(c.kind) || series_els.len() == 1 && all_styled && c.kind != ChartType::Waterfall) && {
             let same: usize = styled.iter().filter(|(_, _, f)| series.fill.as_ref() == Some(f)).map(|(_, rep, _)| rep).sum();
-            c.vary_colors = same * 2 <= series.values.len();
+            c.vary_colors = same * 2 <= series.values.len().max(2);
             c.vary_colors
         };
         for (at, rep, f) in styled {
@@ -318,6 +323,17 @@ const KINDS: &[(ChartType, &str, bool, bool, bool)] = &[
 
 /// The model chart type of an ODF chart class and its plot-area flags: the exact row, else one
 /// stacked the same way (a stacked percent chart is a percent chart), else the class's first.
+/// A chart of slices (a pie or doughnut): one series, a colour per point.
+pub(crate) fn is_pie(kind: ChartType) -> bool {
+    matches!(kind, ChartType::Pie | ChartType::Doughnut)
+}
+
+/// Whether a series is drawn with a colour per point, as the renderer draws it: a pie's, or a
+/// chart's lone unfilled series (not a waterfall's), when the chart varies its colours.
+pub(crate) fn varies(c: &Chart, s: &deckcraft_model::chart::Series) -> bool {
+    c.vary_colors && (is_pie(c.kind) || c.series.len() == 1 && s.fill.is_none() && c.kind != ChartType::Waterfall)
+}
+
 pub(crate) fn kind_of(class: &str, vertical: bool, stacked: bool, percent: bool) -> ChartType {
     let of_class = || KINDS.iter().filter(|r| r.1 == class);
     of_class()
@@ -333,10 +349,12 @@ pub(crate) fn class_of(kind: ChartType) -> (&'static str, bool, bool, bool) {
     r.map_or(("bar", false, false, false), |r| (r.1, r.2, r.3, r.4))
 }
 
+/// Our legend position (`r`, `tr` …) for `chart:legend-position`; unknown ones on the right.
 pub(crate) fn legend_of(position: &str) -> &'static str {
     crate::vocab::read(crate::vocab::LEGEND, position).unwrap_or("r")
 }
 
+/// The `chart:legend-position` of ours; unknown ones at the end.
 pub(crate) fn legend_position(ours: &str) -> &'static str {
     crate::vocab::write(crate::vocab::LEGEND, &ours).unwrap_or("end")
 }

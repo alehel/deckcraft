@@ -312,11 +312,13 @@ fn inline(cx: &TextCtx, el: &El, text_props: &Props, link: Option<&Hyperlink>, r
 /// with the same parts in another order, with other separators or another length of year (as
 /// LibreOffice re-saves ours, renamed `D1`…).
 pub fn date_format_of(store: &Store, style: &str) -> Option<u8> {
+    crate::vocab::date_format(style).or_else(|| store.date_formats.get(style).copied())
+}
+
+/// The PowerPoint date format a number style is built like (see [`date_format_of`]).
+pub fn date_format_by_parts(el: &El) -> Option<u8> {
     use crate::vocab::{DATE_FORMATS, DATE_PARTS};
-    if let Some(n) = crate::vocab::date_format(style) {
-        return Some(n);
-    }
-    let shape = date_shape(store.data_styles.get(style)?);
+    let shape = date_shape(el);
     let parts = |s: &str| {
         let mut p: Vec<char> = s.chars().filter(|c| DATE_PARTS.contains(*c)).map(|c| if c == 'y' { 'Y' } else { c }).collect();
         p.sort_unstable();
@@ -341,7 +343,8 @@ fn date_shape(el: &El) -> String {
             "number:minutes" => out.push('m'),
             "number:seconds" => out.push('s'),
             "number:am-pm" => out.push('a'),
-            "number:text" => out.push_str(&e.text()),
+            // A separator: longer ones match no format anyway.
+            "number:text" => out.extend(e.text().chars().take(8)),
             _ => {}
         }
     }

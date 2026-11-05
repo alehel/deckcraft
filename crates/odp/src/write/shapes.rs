@@ -191,18 +191,20 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
     let (line, ph_line) = resolve::line(ctx, s);
     let (effects, ph_fx) = resolve::effects(ctx, s);
     let body = resolve::body(ctx, s);
+    let ph = s.ph.as_ref().map(|p| p.kind);
+    let class = ph.and_then(class_of);
+    // Text boxes and text placeholders are frames; other shapes custom shapes.
+    let is_frame = (s.text_box || class.is_some()) && matches!(&s.geom, Geom::Preset { name, .. } if name == "rect");
     let fill = fill.unwrap_or(Fill::None);
     let mut g = fill_attrs(w, ctx, &fill, ph_fill);
     g.push_str(&line_attrs(w, ctx, &line, ph_line));
     g.push_str(&effect_attrs(ctx, effects.as_ref(), ph_fx));
-    g.push_str(&body_attrs(&body));
+    g.push_str(&body_attrs(&body, is_frame));
     // Text columns.
     let columns = match body.columns.filter(|n| *n > 1) {
         Some(n) => format!(r#"<style:columns fo:column-count="{n}" fo:column-gap="{}"/>"#, cm(body.col_spacing.unwrap_or(0.0))),
         None => String::new(),
     };
-    let ph = s.ph.as_ref().map(|p| p.kind);
-    let class = ph.and_then(class_of);
     let outline = matches!(ph, Some(PhType::Body | PhType::Obj));
     let text = text::body(w, auto, ctx, pg, s, outline && class.is_some());
     // Straight lines and connectors are written by their end points; bent and curved connectors
@@ -285,7 +287,6 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
             );
         }
     }
-    let is_frame = (s.text_box || class.is_some()) && matches!(&s.geom, Geom::Preset { name, .. } if name == "rect");
     let pos = position(x);
     if is_frame {
         return format!(r#"<draw:frame{style_attr}{class_attr}{common}{pos}><draw:text-box>{text}</draw:text-box>{desc}{events}</draw:frame>"#);
@@ -294,17 +295,12 @@ fn geometric(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, pg: &PageCtx, s: &Shape
     format!(r#"<draw:custom-shape{style_attr}{class_attr}{common}{pos}>{text}{geo}{desc}{events}</draw:custom-shape>"#)
 }
 
+/// The class a placeholder is written with: text placeholders only (the others are written as
+/// their content).
 fn class_of(k: PhType) -> Option<&'static str> {
-    Some(match k {
-        PhType::Title | PhType::CtrTitle => "title",
-        PhType::SubTitle => "subtitle",
-        PhType::Body | PhType::Obj => "outline",
-        PhType::Date => "date-time",
-        PhType::Footer => "footer",
-        PhType::SlideNum => "page-number",
-        PhType::Header => "header",
-        _ => return None,
-    })
+    use PhType::*;
+    let text = matches!(k, Title | CtrTitle | SubTitle | Body | Obj | Date | Footer | SlideNum | Header);
+    text.then(|| crate::vocab::write(crate::vocab::PRESENTATION_CLASSES, &k)).flatten()
 }
 
 fn parent_style_of(class: &str) -> &'static str {
@@ -489,7 +485,7 @@ pub fn fill_attrs(w: &mut Writer, ctx: &Ctx, f: &Fill, ph: Option<Rgba>) -> Stri
         Fill::Picture(pf) => {
             // A hatch read from a file: the hatch again.
             if let Some(h) = w.p.media(pf.media).and_then(|m| crate::hatch::Hatch::from_media_name(&m.name)) {
-                return hatch_fill(w, &h);
+                return hatch_fill(w, &h, pf.alpha);
             }
             let Some(href) = w.media_path(pf.media) else { return r#" draw:fill="none""#.into() };
             let name = w.named.def("draw:fill-image", "Bitmap", &embed(&href), "");
@@ -513,22 +509,25 @@ pub fn fill_attrs(w: &mut Writer, ctx: &Ctx, f: &Fill, ph: Option<Rgba>) -> Stri
                     );
                 }
             }
-            if let Some(a) = pf.alpha.filter(|a| *a < 1.0) {
-                let _ = write!(s, r#" draw:opacity="{}""#, pct(a.clamp(0.0, 1.0)));
-            }
+            s.push_str(&opacity(pf.alpha));
             s
         }
         Fill::Pattern(pat) => {
             // The closest hatch: ODF has no other patterns.
             let (bg, bga) = color_alpha(ctx, &pat.bg, ph);
-            hatch_fill(w, &crate::hatch::Hatch::from_preset(&pat.preset, ctx.color(&pat.fg, ph), (bga > 0.0).then_some(bg)))
+            let (fg, fga) = color_alpha(ctx, &pat.fg, ph);
+            hatch_fill(w, &crate::hatch::Hatch::from_preset(&pat.preset, fg, (bga > 0.0).then_some(bg)), Some(fga))
         }
     }
 }
 
-/// A hatch close to a DrawingML pattern: style, rotation (degrees) and line distance (points).
+/// A fill's flat `draw:opacity`, when it isn't opaque.
+fn opacity(alpha: Option<f64>) -> String {
+    alpha.filter(|a| *a < 1.0).map(|a| format!(r#" draw:opacity="{}""#, pct(a.clamp(0.0, 1.0)))).unwrap_or_default()
+}
+
 /// A hatch fill: its `draw:hatch` definition, and the fill attributes naming it.
-fn hatch_fill(w: &mut Writer, h: &crate::hatch::Hatch) -> String {
+fn hatch_fill(w: &mut Writer, h: &crate::hatch::Hatch, alpha: Option<f64>) -> String {
     let attrs = format!(
         r#"draw:style="{}" draw:color="{}" draw:distance="{}" draw:rotation="{}""#,
         h.style.as_str(),
@@ -541,6 +540,7 @@ fn hatch_fill(w: &mut Writer, h: &crate::hatch::Hatch) -> String {
     if let Some(bg) = h.background {
         let _ = write!(s, r#" draw:fill-color="{}""#, hex(bg));
     }
+    s.push_str(&opacity(alpha));
     s
 }
 
@@ -690,7 +690,9 @@ fn anchor_attr(b: &BodyProps) -> String {
     format!(r#" draw:textarea-vertical-align="{}""#, vocab::write(vocab::ANCHORS, &b.anchor.unwrap_or(Anchor::Top)).unwrap_or("top"))
 }
 
-fn body_attrs(b: &BodyProps) -> String {
+/// Text body attributes. A frame (`frame`) doesn't wrap when it grows to its text's width, as
+/// LibreOffice reads it (its `fo:wrap-option` is ignored); a custom shape's wrapping is its own.
+fn body_attrs(b: &BodyProps, frame: bool) -> String {
     let mut s = padding_attrs(b);
     s.push_str(&anchor_attr(b));
     if b.anchor_ctr == Some(true) {
@@ -704,7 +706,7 @@ fn body_attrs(b: &BodyProps) -> String {
         Some(AutoFit::Shrink { .. }) => s.push_str(r#" draw:auto-grow-height="false" draw:fit-to-size="false" style:shrink-to-fit="true""#),
         _ => s.push_str(r#" draw:auto-grow-height="false""#),
     }
-    if b.wrap == Some(false) && matches!(b.autofit, Some(AutoFit::Shape)) {
+    if b.wrap == Some(false) && (frame || matches!(b.autofit, Some(AutoFit::Shape))) {
         s.push_str(r#" draw:auto-grow-width="true""#);
     }
     if let Some(m) = b.vert.as_ref().and_then(|v| vocab::write(vocab::WRITING_MODES, v)) {
@@ -884,7 +886,7 @@ pub fn presentation_styles(w: &mut Writer, ctx: &Ctx, name: &str) -> String {
         let (props, _) = text::level_style(w, ctx, 1, lv, false);
         style(w, sname, None, g, lv, &props, "")
     };
-    let body_of = |s: Option<&Shape>| s.map(|s| body_attrs(&resolve::body(ctx, s))).unwrap_or_default();
+    let body_of = |s: Option<&Shape>| s.map(|s| body_attrs(&resolve::body(ctx, s), true)).unwrap_or_default();
     let tg = format!(r#" draw:stroke="none" draw:fill="none"{}"#, body_of(title_ph));
     out.push_str(&plain(w, &format!("{name}-title"), &tg, &level(&m.title_style, 0)));
     // The outline levels, each a style deriving from the one above; the first holds the list
@@ -975,7 +977,7 @@ pub fn master_page(w: &mut Writer, auto: &mut Auto, ctx: &Ctx, name: &str, displ
             let align = crate::text::odf_align(pp.align.unwrap_or(deckcraft_model::text::Align::Left));
             let ps =
                 auto.style("paragraph", "P", None, &format!(r#"<style:paragraph-properties fo:text-align="{align}"/><style:text-properties{tp}/>"#));
-            let body = body_attrs(&resolve::body(ctx, s));
+            let body = body_attrs(&resolve::body(ctx, s), true);
             let gs = auto.style(
                 "presentation",
                 "pr",

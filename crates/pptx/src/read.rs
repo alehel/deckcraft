@@ -1354,9 +1354,9 @@ fn read_show(sp: &El, shows: &HashMap<String, String>) -> ShowSettings {
         ..Default::default()
     };
     if sp.child("browse").is_some() {
-        s.show_type = "browsed".into();
+        s.show_type = ShowSettings::BROWSED.into();
     } else if sp.child("kiosk").is_some() {
-        s.show_type = "kiosk".into();
+        s.show_type = ShowSettings::KIOSK.into();
     }
     if let Some(r) = sp.child("sldRg") {
         s.range = Some((r.u32("st").unwrap_or(1).max(1), r.u32("end").unwrap_or(1).max(1)));

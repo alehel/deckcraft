@@ -578,7 +578,7 @@ fn show_settings(p: &Presentation, names: &HashMap<u32, String>) -> String {
     if p.show.loop_until_esc {
         attrs.push_str(r#" presentation:endless="true""#);
     }
-    if p.show.show_type == "browsed" {
+    if p.show.show_type == deckcraft_model::ShowSettings::BROWSED {
         attrs.push_str(r#" presentation:full-screen="false""#);
     }
     // A range starts at its first slide (ODF has no end).

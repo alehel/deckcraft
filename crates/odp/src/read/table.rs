@@ -17,8 +17,9 @@ const MAX_TABLE_SIDE: usize = 1000;
 const MAX_TABLE_CELLS: usize = 65_536;
 /// Most cells all of a document's tables hold together.
 pub(super) const MAX_DOCUMENT_CELLS: usize = 262_144;
-/// Most text (bytes) a table's repeated cells and rows may copy.
-const MAX_TABLE_TEXT: usize = 4 << 20;
+/// Most text (bytes) all of a document's repeated cells and rows may copy (the cells' own text
+/// is in the file).
+pub(super) const MAX_DOCUMENT_COPIED_TEXT: usize = 4 << 20;
 
 impl Reader<'_> {
     pub(super) fn table(&mut self, t: &El, ctx: &Ctx, x: Xfrm) -> Table {
@@ -60,11 +61,14 @@ impl Reader<'_> {
         let is_cell = |c: &&El| c.name == "table:table-cell" || c.name == "table:covered-table-cell";
         let row_width = |r: &El| r.elements().filter(is_cell).map(|c| repeat(c, "table:number-columns-repeated")).fold(0usize, usize::saturating_add);
         let width = rows.iter().map(|r| row_width(r)).max().unwrap_or(0).max(table.cols.len()).clamp(1, MAX_TABLE_SIDE);
-        let mut text_budget = MAX_TABLE_TEXT;
+        // Every row costs the full width (it's padded to it); copies of a cell or row cost their
+        // text too. Both budgets are the document's, charged as rows and copies are made.
+        let mut cells_room = MAX_TABLE_CELLS.min(self.cells_left);
         for row in rows {
-            if table.rows.len() >= MAX_TABLE_SIDE {
+            if table.rows.len() >= MAX_TABLE_SIDE || cells_room < width {
                 break;
             }
+            cells_room -= width;
             let rs = attr(row, "table:style-name").map(|n| self.store.resolve(ctx.scope, "table-row", Some(n)));
             let h = rs
                 .as_ref()
@@ -83,27 +87,25 @@ impl Reader<'_> {
                 // A repeated cell is read once; its copies keep their text while the budget lasts.
                 let cell = self.cell(c, ctx, default_cell);
                 let size = cell.text.text().len();
-                for k in 0..n {
-                    if k == 0 || size <= text_budget {
-                        text_budget = text_budget.saturating_sub(if k == 0 { 0 } else { size });
+                cells.push(cell.clone());
+                for _ in 1..n {
+                    if size <= self.text_copies_left {
+                        self.text_copies_left -= size;
                         cells.push(cell.clone());
                     } else {
                         cells.push(Cell { text: Cell::new("").text, ..cell.clone() });
                     }
                 }
             }
-            // Repeated rows cost the full width, and their text the budget.
-            // A table's own budget, and what the document has left.
-            let budget = MAX_TABLE_CELLS.min(self.cells_left.saturating_add(table.rows.len() * width));
-            let room = budget.saturating_sub(table.rows.len() * width).checked_div(width).unwrap_or(0);
+            // A repeated row's copies, while both budgets last.
             let row_text: usize = cells.iter().map(|c| c.text.text().len()).sum();
-            let text_room = text_budget.checked_div(row_text).map_or(usize::MAX, |r| r + 1);
-            let n = repeat(row, "table:number-rows-repeated").min(MAX_TABLE_SIDE - table.rows.len()).min(room).min(text_room);
-            text_budget = text_budget.saturating_sub(row_text.saturating_mul(n.saturating_sub(1)));
-            if n == 0 {
-                break;
-            }
-            table.rows.extend(std::iter::repeat_n(Row { height: h, cells }, n));
+            let copies = (repeat(row, "table:number-rows-repeated") - 1)
+                .min(MAX_TABLE_SIDE - 1 - table.rows.len())
+                .min(cells_room / width)
+                .min(self.text_copies_left.checked_div(row_text).unwrap_or(usize::MAX));
+            cells_room -= copies * width;
+            self.text_copies_left -= copies * row_text;
+            table.rows.extend(std::iter::repeat_n(Row { height: h, cells }, copies + 1));
         }
         fit_table(&mut table, x);
         let read: usize = table.rows.iter().map(|r| r.cells.len()).sum();

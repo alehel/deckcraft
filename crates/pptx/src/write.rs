@@ -1193,8 +1193,8 @@ fn pres_props_xml(p: &Presentation) -> Vec<u8> {
             .o("useTimings", (!s.use_timings).then_some("0")),
     );
     match s.show_type.as_str() {
-        "browsed" => w.empty("p:browse", A::new()),
-        "kiosk" => w.empty("p:kiosk", A::new()),
+        deckcraft_model::ShowSettings::BROWSED => w.empty("p:browse", A::new()),
+        deckcraft_model::ShowSettings::KIOSK => w.empty("p:kiosk", A::new()),
         _ => w.empty0("p:present"),
     }
     let custom = s.custom_show.as_ref().and_then(|n| p.custom_shows.iter().position(|c| c.name == *n));

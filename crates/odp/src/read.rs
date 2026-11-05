@@ -108,6 +108,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
         charts: HashMap::new(),
         formula_work: geometry::DOCUMENT_WORK,
         cells_left: table::MAX_DOCUMENT_CELLS,
+        text_copies_left: table::MAX_DOCUMENT_COPIED_TEXT,
         plain_left: MAX_COMMENT_TEXT,
         package_media: parts,
         targets: HashMap::new(),
@@ -127,7 +128,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
     let decls = Decls::read(body);
     // The date format, from a current-date declaration in one of our date styles (named after
     // the format).
-    if let Some(n) = decls.dates.values().filter(|d| d.0).find_map(|d| d.2.as_deref().and_then(|s| text::date_format_of(&r.store, s))) {
+    if let Some(n) = decls.dates.values().filter(|d| d.current).find_map(|d| d.style.as_deref().and_then(|s| text::date_format_of(&r.store, s))) {
         r.p.header_footer.date_format = format!("datetime{n}");
     }
     for (i, page) in kids(body, "draw:page").take(MAX_PAGES).enumerate() {
@@ -148,8 +149,16 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, OdpError> {
 struct Decls {
     footers: HashMap<String, String>,
     headers: HashMap<String, String>,
-    /// Whether it shows the current date, its fixed text, and its number style.
-    dates: HashMap<String, (bool, String, Option<String>)>,
+    dates: HashMap<String, DateDecl>,
+}
+
+/// A `presentation:date-time-decl`.
+struct DateDecl {
+    /// Shows the current date (else its fixed text).
+    current: bool,
+    text: String,
+    /// Its number style's name.
+    style: Option<String>,
 }
 
 /// Longest footer, header or date text kept (each page that shows it gets a copy).
@@ -178,7 +187,7 @@ impl Decls {
                 }
                 "presentation:date-time-decl" => {
                     let style = attr(e, "style:data-style-name").map(str::to_string);
-                    d.dates.insert(name, (attr(e, "presentation:source") == Some("current-date"), text(), style));
+                    d.dates.insert(name, DateDecl { current: attr(e, "presentation:source") == Some("current-date"), text: text(), style });
                 }
                 _ => {}
             }
@@ -207,6 +216,9 @@ struct Reader<'a> {
     formula_work: usize,
     /// Table cells the document has left ([`table::MAX_DOCUMENT_CELLS`] in all).
     cells_left: usize,
+    /// Text that copies of repeated table cells and rows may still take
+    /// ([`table::MAX_DOCUMENT_COPIED_TEXT`] in all), in bytes.
+    text_copies_left: usize,
     /// Comment text the document has left, in bytes ([`MAX_COMMENT_TEXT`] in all).
     plain_left: usize,
     package_media: PartMedia,
@@ -257,7 +269,7 @@ impl Reader<'_> {
             self.p.show.loop_until_esc = true;
         }
         if attr(s, "presentation:show-type") == Some("window") || attr(s, "presentation:full-screen") == Some("false") {
-            self.p.show.show_type = "browsed".into();
+            self.p.show.show_type = deckcraft_model::ShowSettings::BROWSED.into();
         }
         if attr(s, "presentation:force-manual") == Some("true") {
             self.p.show.use_timings = false;
@@ -498,12 +510,10 @@ impl Reader<'_> {
             let page_id = attr(page, "xml:id").or_else(|| attr(page, "draw:id"));
             let tm = crate::anim::read(t, page_id, &self.targets);
             slide.animations = tm.animations;
-            if let Some(mut tr) = tm.transition {
-                // The page style keeps how the slide advances.
-                if let Some(old) = &slide.transition {
-                    tr.advance_after_ms = old.advance_after_ms;
-                }
-                slide.transition = Some(tr);
+            // The effect is the timing's; how the slide advances, the page style's.
+            if let Some(tr) = tm.transition {
+                let advance_after_ms = slide.transition.as_ref().and_then(|t| t.advance_after_ms);
+                slide.transition = Some(deckcraft_model::Transition { advance_after_ms, ..tr });
             }
         }
         // Footer fields the page shows, from its master's placeholders.
@@ -561,14 +571,26 @@ impl Reader<'_> {
             self.p.header_footer.footer_text.clone_from(t);
         }
         if on("presentation:display-date-time")
-            && let Some((current, t, _)) = attr(page, "presentation:use-date-time-name").and_then(|n| decls.dates.get(n))
+            && let Some(d) = attr(page, "presentation:use-date-time-name").and_then(|n| decls.dates.get(n))
         {
             self.p.header_footer.date = true;
-            if *current {
+            if d.current {
                 add(PhType::Date, None, self);
-            } else if !t.is_empty() {
-                add(PhType::Date, Some(t.clone()), self);
-                self.p.header_footer.date_text.clone_from(t);
+                // The master's field (`presentation:date-time`) has no format: the declaration's.
+                let format = d.style.as_deref().and_then(|s| text::date_format_of(&self.store, s));
+                if let (Some(n), Some(body)) = (format, shapes.last_mut().filter(|s| s.ph_type() == Some(PhType::Date)).and_then(|s| s.text.as_mut()))
+                {
+                    for r in body.paragraphs.iter_mut().flat_map(|p| p.runs.iter_mut()) {
+                        if let deckcraft_model::text::RunKind::Field { field } = &mut r.kind
+                            && field.starts_with("datetime")
+                        {
+                            *field = format!("datetime{n}");
+                        }
+                    }
+                }
+            } else if !d.text.is_empty() {
+                add(PhType::Date, Some(d.text.clone()), self);
+                self.p.header_footer.date_text.clone_from(&d.text);
             }
         }
     }
@@ -1201,22 +1223,7 @@ fn line_xfrm(e: &El) -> Xfrm {
 }
 
 fn ph_kind(class: &str) -> Option<PhType> {
-    Some(match class {
-        "title" => PhType::Title,
-        "subtitle" => PhType::SubTitle,
-        "outline" | "text" | "notes" => PhType::Body,
-        "graphic" => PhType::Picture,
-        "object" => PhType::Obj,
-        "chart" => PhType::Chart,
-        "table" => PhType::Table,
-        "orgchart" => PhType::Diagram,
-        "page" => PhType::SlideImage,
-        "header" => PhType::Header,
-        "footer" => PhType::Footer,
-        "date-time" => PhType::Date,
-        "page-number" => PhType::SlideNum,
-        _ => return None,
-    })
+    vocab::read(vocab::PRESENTATION_CLASSES, class)
 }
 
 fn anchor(v: &str) -> Option<Anchor> {

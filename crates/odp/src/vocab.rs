@@ -2,6 +2,7 @@
 //! in both directions. Reading takes the first row with the file's value; writing the first row
 //! with ours.
 
+use deckcraft_model::PhType;
 use deckcraft_model::style::{LineCap, LineJoin};
 use deckcraft_model::text::{Align, Anchor, TextDir};
 
@@ -75,6 +76,28 @@ pub fn is_time(n: u8) -> bool {
 
 /// The letters of [`DATE_FORMATS`] that stand for a part.
 pub const DATE_PARTS: &str = "MDYyNbWhmsa";
+
+/// `presentation:class` of a placeholder. Kinds without a class of their own (centred titles,
+/// content placeholders) take their nearest one's.
+pub const PRESENTATION_CLASSES: &[(PhType, &str)] = &[
+    (PhType::Title, "title"),
+    (PhType::CtrTitle, "title"),
+    (PhType::SubTitle, "subtitle"),
+    (PhType::Body, "outline"),
+    (PhType::Obj, "outline"),
+    (PhType::Body, "text"),
+    (PhType::Body, "notes"),
+    (PhType::Obj, "object"),
+    (PhType::Picture, "graphic"),
+    (PhType::Chart, "chart"),
+    (PhType::Table, "table"),
+    (PhType::Diagram, "orgchart"),
+    (PhType::SlideImage, "page"),
+    (PhType::Header, "header"),
+    (PhType::Footer, "footer"),
+    (PhType::Date, "date-time"),
+    (PhType::SlideNum, "page-number"),
+];
 
 pub const LINE_JOINS: &[(LineJoin, &str)] = &[(LineJoin::Miter, "miter"), (LineJoin::Bevel, "bevel"), (LineJoin::Round, "round")];
 
@@ -193,6 +216,13 @@ const MEDIA_TYPES: &[(&str, &str)] = &[
     ("flac", "audio/flac"),
     ("aif", "audio/aiff"),
     ("aiff", "audio/aiff"),
+    // Other names of the same types, so a part of each is named with its extension (a clip
+    // written under LibreOffice's generic media type reads back by it).
+    ("aif", "audio/x-aiff"),
+    ("m4a", "audio/x-m4a"),
+    ("wav", "audio/x-wav"),
+    ("wav", "audio/wave"),
+    ("wav", "audio/vnd.wave"),
     ("wma", "audio/x-ms-wma"),
 ];
 
@@ -237,13 +267,18 @@ mod tests {
         round_trips(TAB_TYPES, &[]);
         round_trips(ALIGNS, &[Align::JustLow, Align::Distributed, Align::ThaiDistributed]);
         round_trips(LEGEND, &[]);
+        round_trips(PRESENTATION_CLASSES, &[PhType::CtrTitle, PhType::Obj]);
         for (ours, ..) in UNDERLINES {
             let (s, t, w) = odf_underline(ours);
             assert_eq!(underline_of(s, t, w), *ours);
         }
+        // Each extension reads as its first type; every type is written with an extension that
+        // reads back as the same kind of media (aliases: the type's usual name).
+        let kind = |m: &str| m.split('/').next().unwrap_or_default().to_string();
         for (ext, mime) in MEDIA_TYPES {
-            assert_eq!(mime_for(&format!("a.{ext}")), *mime);
-            assert_eq!(mime_for(&format!("a.{}", ext_for(mime))), *mime);
+            let first = MEDIA_TYPES.iter().find(|r| r.0 == *ext).map(|r| r.1);
+            assert_eq!(Some(mime_for(&format!("a.{ext}"))), first);
+            assert_eq!(kind(mime_for(&format!("a.{}", ext_for(mime)))), kind(mime), "{mime}");
         }
     }
 }
