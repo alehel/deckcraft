@@ -128,8 +128,9 @@ Detail in [file-format-parity.md](file-format-parity.md).
 - **Evidence:** `.odp`, `.otp` and `.fodp` open and `.odp`/`.otp` save (`crates/odp`), at ~96% pixel
   similarity to LibreOffice 24.2 on its 23 bundled templates and synthetic decks, reading and
   writing. What's left is rare: SVG pictures and StarView (`.svm`) previews of non-chart objects
-  don't draw (the renderer reads no SVG, so a frame's PNG fallback is shown); ellipsoid and square
-  gradients use circle and rectangle extents that differ a little from LibreOffice's; 3-D scenes
+  don't draw (the renderer reads no SVG, so a frame's PNG fallback is shown); ellipsoid gradients are
+  drawn as the circle stretched to the box and square ones with rectangle extents, which differ a
+  little from LibreOffice's (and `.pptx` saves an ellipsoid as a circle); 3-D scenes
   (`dr3d:scene`) and form controls are left out; bent connectors keep their drawn path but aren't
   re-routed when a shape moves; custom shapes are written as fixed outlines (LibreOffice shows them
   but loses their handles); LibreOffice animation presets without a DeckCraft effect play as the
