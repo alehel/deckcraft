@@ -2337,3 +2337,18 @@ fn per_copy_costs_have_document_budgets() {
     assert_eq!(p.slides.len(), 1000);
     assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
 }
+
+/// Moving files between apps: a line LibreOffice draws solid (`draw:stroke="dash"` with no dash
+/// defined, as it writes one) stays solid; it was read as a dashed line and saved dashed.
+#[test]
+fn a_dash_without_a_definition_is_solid() {
+    let doc = format!(
+        r#"<office:document {NS} office:mimetype="application/vnd.oasis.opendocument.presentation"><office:automatic-styles><style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:stroke="dash" svg:stroke-width="0.05cm" svg:stroke-color="000000"/></style:style><style:style style:name="gr2" style:family="graphic"><style:graphic-properties draw:stroke="dash" draw:stroke-dash="Missing" svg:stroke-width="0.05cm"/></style:style></office:automatic-styles><office:body><office:presentation><draw:page><draw:line draw:style-name="gr1" svg:x1="1cm" svg:y1="1cm" svg:x2="10cm" svg:y2="1cm"/><draw:line draw:style-name="gr2" svg:x1="1cm" svg:y1="3cm" svg:x2="10cm" svg:y2="3cm"/></draw:page></office:presentation></office:body></office:document>"#
+    );
+    let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+    for s in shapes_of(&p) {
+        assert_eq!(s.line.as_ref().and_then(|l| l.dash.clone()), None, "{:?}", s.line);
+    }
+    let content = part(&deckcraft_odp::export(&p).unwrap(), "content.xml");
+    assert!(!content.contains(r#"draw:stroke="dash""#), "{content}");
+}

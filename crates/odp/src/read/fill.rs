@@ -162,12 +162,12 @@ impl Reader<'_> {
         let mut l = Line::solid(color, width);
         l.join = g.get("draw:stroke-linejoin").and_then(|j| vocab::read(vocab::LINE_JOINS, j));
         l.cap = g.get("svg:stroke-linecap").and_then(|c| vocab::read(vocab::LINE_CAPS, c));
-        if stroke == "dash" {
-            // A dash with no definition is LibreOffice's default dashing.
-            l.dash = Some(match g.get("draw:stroke-dash").and_then(|n| self.store.dashes.get(n)) {
-                Some(d) => dash(d, width),
-                None => Dash::Preset { name: "dash".into() },
-            });
+        // A dash it defines; one it doesn't (no `draw:stroke-dash`, or a name with no
+        // definition) LibreOffice draws solid.
+        if stroke == "dash"
+            && let Some(d) = g.get("draw:stroke-dash").and_then(|n| self.store.dashes.get(n))
+        {
+            l.dash = Some(dash(d, width));
         }
         let end = |name: Option<&String>, w: Option<&String>| -> Option<LineEnd> {
             let n = name?;
