@@ -301,8 +301,29 @@ fn read_series(c: &mut Chart, plot: &El, grid: &Grid, store: &Store, class: &str
                 series.point_fills.extend((at..at + n).map(|k| (k, f.clone())));
             }
         }
+        // What a file leaves uncoloured LibreOffice draws in its default chart colours: a varied
+        // chart's points by their place, another series by its own.
+        if varied {
+            let n = series.values.len().min(fills_left);
+            let missing: Vec<usize> = (0..n).filter(|k| !series.point_fills.iter().any(|(p, _)| p == k)).collect();
+            fills_left -= missing.len();
+            series.point_fills.extend(missing.into_iter().map(|k| (k, default_color(k))));
+            series.point_fills.sort_by_key(|(k, _)| *k);
+        } else if series.fill.is_none() {
+            series.fill = Some(default_color(i));
+        }
         c.series.push(series);
     }
+}
+
+/// LibreOffice's default chart colours, in order (what it draws a series or point the file
+/// gives no colour in).
+const DEFAULT_COLORS: [u32; 12] =
+    [0x004586, 0xff420e, 0xffd320, 0x579d1c, 0x7e0021, 0x83caff, 0x314004, 0xaecf00, 0x4b1f6f, 0xff950e, 0xc5000b, 0x0084d1];
+
+fn default_color(i: usize) -> Fill {
+    let c = DEFAULT_COLORS.get(i % DEFAULT_COLORS.len()).copied().unwrap_or(0x004586);
+    Fill::solid(ColorRef::rgb(deckcraft_color::Rgba::rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)))
 }
 
 /// (model type, ODF `chart:class`, bars run sideways (`chart:vertical`), stacked, percent).
@@ -391,6 +412,31 @@ mod tests {
         let c = read(&crate::dom::parse(x).unwrap()).unwrap();
         assert_eq!(c.kind, ChartType::Bubble);
         assert_eq!((c.series[0].values.clone(), c.series[0].sizes.len()), (vec![Some(3.0), Some(5.0)], 0));
+    }
+
+    /// Moving files between apps: what a LibreOffice chart leaves uncoloured is LibreOffice's
+    /// default chart colours (a varied pie's slices by place, a series by its own), not the
+    /// theme's accents; they were read as the accents and saved so.
+    #[test]
+    fn uncoloured_points_and_series_take_libreoffice_default_colours() {
+        let doc = |class: &str, plot: &str| {
+            format!(
+                r##"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:automatic-styles><style:style style:name="s1" style:family="chart"><style:graphic-properties draw:fill-color="#4f81bd"/></style:style><style:style style:name="pt" style:family="chart"><style:chart-properties chart:solid-type="cuboid"/></style:style></office:automatic-styles><office:body><office:chart><chart:chart chart:class="chart:{class}"><chart:plot-area>{plot}</chart:plot-area><table:table table:name="local-table"><table:table-header-rows><table:table-row><table:table-cell/><table:table-cell office:value-type="string"><text:p>S</text:p></table:table-cell></table:table-row></table:table-header-rows><table:table-rows><table:table-row><table:table-cell office:value-type="string"><text:p>a</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="1"/></table:table-row><table:table-row><table:table-cell office:value-type="string"><text:p>b</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="2"/></table:table-row></table:table-rows></table:table></chart:chart></office:chart></office:body></office:document-content>"##
+            )
+        };
+        let pie = doc(
+            "circle",
+            r#"<chart:series chart:style-name="s1" chart:values-cell-range-address="local-table.$B$2:.$B$3"><chart:data-point chart:style-name="pt" chart:repeated="2"/></chart:series>"#,
+        );
+        let c = read(&crate::dom::parse(pie.as_bytes()).unwrap()).unwrap();
+        assert!(c.vary_colors);
+        assert_eq!(c.series[0].point_fills, vec![(0, default_color(0)), (1, default_color(1))]);
+        let bars = doc(
+            "bar",
+            r#"<chart:series chart:values-cell-range-address="local-table.$B$2:.$B$3"/><chart:series chart:values-cell-range-address="local-table.$B$2:.$B$3"/>"#,
+        );
+        let c = read(&crate::dom::parse(bars.as_bytes()).unwrap()).unwrap();
+        assert_eq!((c.series[0].fill.clone(), c.series[1].fill.clone()), (Some(default_color(0)), Some(default_color(1))));
     }
 
     #[test]
