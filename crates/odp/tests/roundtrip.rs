@@ -2337,3 +2337,47 @@ fn per_copy_costs_have_document_budgets() {
     assert_eq!(p.slides.len(), 1000);
     assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
 }
+
+/// Moving files between apps: a picture LibreOffice keeps as an SVG with a PNG fallback keeps
+/// its SVG (what LibreOffice draws; only the fallback was kept, so vector detail went), and a
+/// picture replaced since drops it.
+#[test]
+fn a_pictures_svg_original_is_kept_beside_its_fallback() {
+    // A 1×1 PNG.
+    let png: Vec<u8> = vec![
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15,
+        0xc4, 0x89, 0, 0, 0, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0, 0x05, 0, 0x01, 0xff, 0x89, 0x99, 0x3d,
+        0x1d, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><path d="M0 1H2" stroke="#000"/></svg>"##;
+    let content = format!(
+        r#"<office:document-content {NS} xmlns:xlink="http://www.w3.org/1999/xlink"><office:body><office:presentation><draw:page><draw:frame svg:x="1cm" svg:y="1cm" svg:width="4cm" svg:height="4cm"><draw:image xlink:href="Pictures/lines.svg"><text:p/></draw:image><draw:image xlink:href="Pictures/lines.png"/></draw:frame></draw:page></office:presentation></office:body></office:document-content>"#
+    );
+    let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, data) in [
+        ("mimetype", b"application/vnd.oasis.opendocument.presentation".as_slice()),
+        ("content.xml", content.as_bytes()),
+        ("Pictures/lines.svg", svg),
+        ("Pictures/lines.png", &png),
+    ] {
+        z.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        z.write_all(data).unwrap();
+    }
+    let p = deckcraft_odp::import(&z.finish().unwrap().into_inner()).unwrap();
+    let ShapeKind::Picture { fill } = &shapes_of(&p)[0].kind else { panic!() };
+    let svg_id = fill.vector().expect("the SVG is kept");
+    assert_eq!(p.media(svg_id).map(|m| m.content_type.as_str()), Some("image/svg+xml"));
+    let content = part(&deckcraft_odp::export(&p).unwrap(), "content.xml");
+    let (s, r) = (content.find(r#"draw:mime-type="image/svg+xml""#).unwrap(), content.find(r#"draw:mime-type="image/png""#).unwrap());
+    assert!(s < r, "the SVG first, its fallback after");
+    // Replaced, the picture no longer has that original.
+    let mut q = p.clone();
+    let mut other_png = png.clone();
+    other_png.push(0);
+    let other = q.add_media("other.png", "image/png", other_png).unwrap();
+    let s = Arc::make_mut(&mut q.slides[0]);
+    if let ShapeKind::Picture { fill } = &mut s.shapes.iter_mut().find(|s| matches!(s.kind, ShapeKind::Picture { .. })).unwrap().kind {
+        fill.media = other;
+    }
+    assert!(!part(&deckcraft_odp::export(&q).unwrap(), "content.xml").contains("image/svg+xml"));
+}

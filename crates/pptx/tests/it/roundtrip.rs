@@ -239,6 +239,7 @@ pub fn rich_deck() -> Presentation {
     let mut pic = shape(&mut p, "Picture", 100.0, 120.0, 200.0, 150.0);
     pic.kind = ShapeKind::Picture {
         fill: PictureFill {
+            vector: None,
             media: img,
             crop: [0.1, 0.05, 0.2, 0.0],
             mode: PictureMode::Stretch { fill_rect: [0.0; 4] },
