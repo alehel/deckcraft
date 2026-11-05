@@ -16,15 +16,13 @@ use crate::{units, vocab};
 const MAX_HATCH_TILES: usize = 64;
 
 impl Reader<'_> {
-    pub(super) fn background(&mut self, page: &Props) -> Option<Background> {
-        let fill = page.get("draw:fill")?;
-        if fill == "none" {
-            return None;
+    /// A background from a page's (or background style's) own properties.
+    pub(super) fn background(&mut self, own: &Props) -> Option<Background> {
+        let props = self.store.background_fill(own)?;
+        match self.fill(&props) {
+            Fill::None => None,
+            fill => Some(Background::Fill { fill }),
         }
-        // A page style names no colour of its own: the graphic default's applies.
-        let mut props = self.store.default_of("graphic").graphic;
-        props.extend(page.iter().map(|(k, v)| (k.clone(), v.clone())));
-        Some(Background::Fill { fill: self.fill(&props) })
     }
 
     pub(super) fn fill(&mut self, g: &Props) -> Fill {
@@ -164,13 +162,7 @@ impl Reader<'_> {
             let kind = marker_kind(n, m);
             let mw = w.and_then(|v| units::length(v)).unwrap_or(0.3 * units::PT_PER_CM);
             let ratio = mw / width.max(0.75);
-            let size = if ratio <= 2.5 {
-                "sm"
-            } else if ratio <= 4.0 {
-                "med"
-            } else {
-                "lg"
-            };
+            let size = vocab::MARKER_SIZES.iter().min_by(|a, b| (a.1 - ratio).abs().total_cmp(&(b.1 - ratio).abs())).map_or("med", |m| m.0);
             Some(LineEnd { kind: kind.into(), w: size.into(), len: size.into() })
         };
         l.head = end(g.get("draw:marker-start"), g.get("draw:marker-start-width"));
@@ -377,8 +369,12 @@ pub(super) fn dash(d: &El, width: f64) -> Dash {
 }
 
 pub(super) fn marker_kind(name: &str, m: Option<&El>) -> &'static str {
-    let n = name.to_ascii_lowercase();
     let d = m.and_then(|m| attr(m, "svg:d")).unwrap_or("");
+    // Ours (and LibreOffice's of the same shape) by their path.
+    if let Some(known) = vocab::MARKERS.iter().find(|k| k.3 == d.trim()) {
+        return known.0;
+    }
+    let n = name.to_ascii_lowercase();
     if n.contains("circle") || n.contains("oval") || d.contains('c') || d.contains('C') || d.contains('a') || d.contains('A') {
         "oval"
     } else if n.contains("square") || n.contains("diamond") {

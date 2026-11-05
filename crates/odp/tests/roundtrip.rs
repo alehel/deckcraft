@@ -1733,3 +1733,63 @@ fn date_styles_and_copied_cell_text_are_bounded() {
     // The copies' budget, and each table's own first cell.
     assert!(chars <= (4 << 20) + 260 * 4000, "{chars}");
 }
+
+/// Review series 2, round 2: master pages are how slides look and page layouts where their
+/// placeholders go, so masters don't multiply through saves, their names don't grow, and every
+/// slide keeps its layout (a section header, a title slide without a subtitle). A layout with a
+/// look of its own gets a master page of its own, and that's stable too.
+#[test]
+fn masters_and_layouts_are_stable_through_saves() {
+    let layouts_of = |p: &Presentation| -> Vec<(deckcraft_model::LayoutType, String)> {
+        p.slides
+            .iter()
+            .map(|s| {
+                let l = p.masters.iter().flat_map(|m| m.layouts.iter()).find(|l| l.id == s.layout).unwrap();
+                (l.kind, l.name.clone())
+            })
+            .collect()
+    };
+    let masters_of = |p: &Presentation| p.masters.iter().map(|m| m.name.clone()).collect::<Vec<_>>();
+    let mut p = sample();
+    let first = layouts_of(&p);
+    assert!(first.iter().any(|(k, _)| *k == deckcraft_model::LayoutType::SectionHeader));
+    let mut back = p.clone();
+    for _ in 0..2 {
+        back = deckcraft_odp::import(&deckcraft_odp::export(&back).unwrap()).unwrap();
+        assert_eq!(masters_of(&back), masters_of(&p));
+        assert_eq!(layouts_of(&back), first);
+    }
+    // A layout with its own background: a master page of its own, then stable.
+    let m = Arc::make_mut(&mut p.masters[0]);
+    let id = p.slides[1].layout;
+    let l = m.layouts.iter_mut().find(|l| l.id == id).unwrap();
+    l.background = Some(deckcraft_model::Background::Fill { fill: Fill::solid(ColorRef::rgb(Rgba::rgb(10, 20, 30))) });
+    let once = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    let twice = deckcraft_odp::import(&deckcraft_odp::export(&once).unwrap()).unwrap();
+    assert_eq!(once.masters.len(), 2);
+    assert_eq!(masters_of(&twice), masters_of(&once));
+    assert_eq!(layouts_of(&twice), layouts_of(&once));
+}
+
+/// Every line end, in every size, comes back as itself (written from one table, read back by its
+/// path, the size as the nearest).
+#[test]
+fn line_ends_round_trip() {
+    use deckcraft_model::style::{Line, LineEnd};
+    let mut shapes = vec![];
+    for kind in ["triangle", "oval", "diamond", "arrow", "stealth"] {
+        for size in ["sm", "med", "lg"] {
+            let end = LineEnd { kind: kind.into(), w: size.into(), len: size.into() };
+            shapes.push(Shape {
+                xfrm: Some(Xfrm::new(20.0, 20.0 + shapes.len() as f64 * 10.0, 200.0, 0.0)),
+                geom: Geom::preset("line"),
+                line: Some(Line { width: Some(2.0), fill: Some(Fill::solid(ColorRef::rgb(Rgba::BLACK))), tail: Some(end), ..Default::default() }),
+                ..Default::default()
+            });
+        }
+    }
+    let want: Vec<_> = shapes.iter().map(|s| s.line.as_ref().and_then(|l| l.tail.clone())).collect();
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&deck_with(shapes)).unwrap()).unwrap();
+    let got: Vec<_> = shapes_of(&back).iter().map(|s| s.line.as_ref().and_then(|l| l.tail.clone())).collect();
+    assert_eq!(got, want);
+}

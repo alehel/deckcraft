@@ -28,6 +28,19 @@ pub const NUM_SCHEMES: &[(&str, &str, &str, &str)] = &[
     ("romanUcParenBoth", "I", "(", ")"),
 ];
 
+/// Line-end markers: our kind, the marker's name (LibreOffice's for the shape), view box and path.
+/// Written from here; read back by the path, else guessed from other files' names and paths.
+pub const MARKERS: &[(&str, &str, &str, &str)] = &[
+    ("triangle", "Arrow", "0 0 20 30", "M 10 0 L 20 30 L 0 30 Z"),
+    ("oval", "Circle", "0 0 20 20", "M 10 0 C 15.5 0 20 4.5 20 10 C 20 15.5 15.5 20 10 20 C 4.5 20 0 15.5 0 10 C 0 4.5 4.5 0 10 0 Z"),
+    ("diamond", "Square_20_45", "0 0 20 20", "M 10 0 L 20 10 L 10 20 L 0 10 Z"),
+    ("arrow", "Line_20_Arrow", "0 0 20 28", "M 10 0 L 20 26 L 16 28 L 10 12 L 4 28 L 0 26 Z"),
+    ("stealth", "Concave_20_Arrow", "0 0 20 30", "M 10 0 L 20 30 L 10 22 L 0 30 Z"),
+];
+
+/// Line-end sizes as a marker's width in line widths; read as the nearest.
+pub const MARKER_SIZES: &[(&str, f64)] = &[("sm", 2.0), ("med", 3.0), ("lg", 5.0)];
+
 /// PowerPoint's date and time formats (`datetime1` … `datetime13`, in order) as the parts of a
 /// number style, one letter each (other characters are literal text): `M` month, `D` day, `Y`
 /// four-digit year, `y` two-digit year, `N` month name, `b` short month name, `W` weekday, `h`

@@ -213,6 +213,53 @@ impl PageCtx {
 }
 
 /// A master page to write: a master and one of its layouts.
+/// Whether a layout looks different from its master (and so needs a master page of its own).
+fn has_own_look(l: &deckcraft_model::Layout) -> bool {
+    l.background.is_some() || !l.show_master_shapes || l.shapes.iter().any(|s| s.ph.is_none())
+}
+
+/// The page layouts written (`style:presentation-page-layout`): each layout the slides use, named
+/// after its kind (`obj`, `secHead` …, as [`deckcraft_model::LayoutType::xml`] spells it, with
+/// `_2` … for more of a kind), shown by its own name, with its placeholders' boxes.
+#[derive(Default)]
+struct PageLayouts {
+    names: HashMap<LayoutId, String>,
+    xml: String,
+}
+
+impl PageLayouts {
+    /// The page layout of `l` (on master `m`), written on first use.
+    fn name(&mut self, p: &Presentation, m: &deckcraft_model::Master, l: &deckcraft_model::Layout) -> String {
+        if let Some(n) = self.names.get(&l.id) {
+            return n.clone();
+        }
+        let base = l.kind.xml();
+        let mut name = base.to_string();
+        let mut k = 1;
+        while self.names.values().any(|n| *n == name) {
+            k += 1;
+            name = format!("{base}_{k}");
+        }
+        let ctx = Ctx::for_layout(p, m, l);
+        let _ = write!(self.xml, r#"<style:presentation-page-layout style:name="{name}" style:display-name="{}">"#, esc(&l.name));
+        for s in l.shapes.iter().filter(|s| s.ph_type().is_some_and(|k| !k.is_footer_kind())) {
+            let Some(class) = s.ph_type().and_then(|k| crate::vocab::write(crate::vocab::PRESENTATION_CLASSES, &k)) else { continue };
+            let x = resolve::xfrm(&ctx, s);
+            let _ = write!(
+                self.xml,
+                r#"<presentation:placeholder presentation:object="{class}" svg:x="{}" svg:y="{}" svg:width="{}" svg:height="{}"/>"#,
+                cm(x.x),
+                cm(x.y),
+                cm(x.w),
+                cm(x.h)
+            );
+        }
+        self.xml.push_str("</style:presentation-page-layout>");
+        self.names.insert(l.id, name.clone());
+        name
+    }
+}
+
 struct Page {
     name: String,
     /// The name people see (the style name is escaped).
@@ -245,8 +292,9 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         dirs: vec![],
     };
     w.page_names = page_names(p);
-    // Master pages: one per (master, layout) the slides use; a deck without slides keeps each
-    // master's first layout.
+    // Master pages are how slides look: one per master the slides use, and one more per layout
+    // that has a look of its own (a background, its own shapes, or the master's hidden); a deck
+    // without slides keeps the first master. Where placeholders go is the slide's page layout.
     let mut pages: Vec<Page> = vec![];
     let mut page_of: HashMap<(usize, Option<LayoutId>), String> = HashMap::new();
     let mut want = |mi: usize, layout: Option<LayoutId>, pages: &mut Vec<Page>| -> String {
@@ -270,17 +318,20 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         name
     };
     let mut slide_pages = vec![];
+    let mut layouts_written = PageLayouts::default();
+    let mut slide_layouts = vec![];
     for s in &p.slides {
         // The master and layout the slide is drawn with, as the model resolves them.
         let (mi, layout) = match p.master_for(s) {
-            Some((m, l)) => (p.masters.iter().position(|x| std::ptr::eq(x.as_ref(), m)).unwrap_or(0), l.map(|l| l.id)),
+            Some((m, l)) => (p.masters.iter().position(|x| std::ptr::eq(x.as_ref(), m)).unwrap_or(0), l),
             None => (0, None),
         };
-        slide_pages.push(want(mi, layout, &mut pages));
+        let look = layout.filter(|l| has_own_look(l)).map(|l| l.id);
+        slide_pages.push(want(mi, look, &mut pages));
+        slide_layouts.push(layout.and_then(|l| p.masters.get(mi).map(|m| layouts_written.name(p, m, l))));
     }
     if pages.is_empty() {
-        let layout = p.masters.first().and_then(|m| m.layouts.first()).map(|l| l.id);
-        want(0, layout, &mut pages);
+        want(0, None, &mut pages);
     }
 
     // styles.xml: presentation styles and master pages.
@@ -303,7 +354,8 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
     let mut body = String::new();
     for (i, s) in p.slides.iter().enumerate() {
         let master_name = slide_pages.get(i).cloned().unwrap_or_default();
-        body.push_str(&slide(&mut w, &mut cauto, s, i, &master_name));
+        let layout = slide_layouts.get(i).cloned().flatten();
+        body.push_str(&slide(&mut w, &mut cauto, s, i, &master_name, layout.as_deref()));
     }
     let mut decls = String::new();
     let hf = &p.header_footer;
@@ -345,8 +397,8 @@ pub fn export(p: &Presentation, mime: &str) -> Result<Vec<u8>, OdpError> {
         cm(p.notes_size.height.max(1.0)),
     );
     let styles = format!(
-        r##"<?xml version="1.0" encoding="UTF-8"?><office:document-styles {NS}>{fonts}<office:styles>{}<style:default-style style:family="graphic"><style:graphic-properties svg:stroke-color="#3465a4" draw:fill-color="#729fcf" fo:wrap-option="no-wrap"/><style:paragraph-properties style:writing-mode="lr-tb"/><style:text-properties fo:font-size="18pt" fo:language="en" fo:country="US"/></style:default-style><style:style style:name="standard" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0cm" svg:stroke-color="#3465a4" draw:fill="solid" draw:fill-color="#729fcf" fo:padding-top="0.125cm" fo:padding-bottom="0.125cm" fo:padding-left="0.25cm" fo:padding-right="0.25cm" draw:shadow="hidden"/></style:style>{common}</office:styles><office:automatic-styles>{page_layouts}{}</office:automatic-styles><office:master-styles>{masters}</office:master-styles></office:document-styles>"##,
-        w.named.out, sauto.out
+        r##"<?xml version="1.0" encoding="UTF-8"?><office:document-styles {NS}>{fonts}<office:styles>{}{}<style:default-style style:family="graphic"><style:graphic-properties svg:stroke-color="#3465a4" draw:fill-color="#729fcf" fo:wrap-option="no-wrap"/><style:paragraph-properties style:writing-mode="lr-tb"/><style:text-properties fo:font-size="18pt" fo:language="en" fo:country="US"/></style:default-style><style:style style:name="standard" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0cm" svg:stroke-color="#3465a4" draw:fill="solid" draw:fill-color="#729fcf" fo:padding-top="0.125cm" fo:padding-bottom="0.125cm" fo:padding-left="0.25cm" fo:padding-right="0.25cm" draw:shadow="hidden"/></style:style>{common}</office:styles><office:automatic-styles>{page_layouts}{}</office:automatic-styles><office:master-styles>{masters}</office:master-styles></office:document-styles>"##,
+        w.named.out, layouts_written.xml, sauto.out
     );
     let meta = meta_xml(p);
     let settings_xml = r#"<?xml version="1.0" encoding="UTF-8"?><office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" office:version="1.3"><office:settings/></office:document-settings>"#;
@@ -603,7 +655,7 @@ fn show_settings(p: &Presentation, names: &HashMap<u32, String>) -> String {
 }
 
 /// One `draw:page`.
-fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str) -> String {
+fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str, page_layout: Option<&str>) -> String {
     let p = w.p;
     let Some(ctx) = Ctx::for_slide(p, s) else { return String::new() };
     let mut pg = PageCtx::new(master_name, format!("pg{i}"), false, resolve::background(&ctx, Some(s)));
@@ -638,9 +690,10 @@ fn slide(w: &mut Writer, auto: &mut Auto, s: &Slide, i: usize, master_name: &str
     }
     let page_style = auto.style("drawing-page", "dp", None, &format!("<style:drawing-page-properties{pp}/>"));
     let mut out = format!(
-        r#"<draw:page draw:name="{}" draw:style-name="{page_style}" draw:master-page-name="{}" xml:id="{tag}" draw:id="{tag}""#,
+        r#"<draw:page draw:name="{}" draw:style-name="{page_style}" draw:master-page-name="{}"{} xml:id="{tag}" draw:id="{tag}""#,
         esc(w.page_names.get(&s.id.0).map(String::as_str).unwrap_or_default()),
         esc(master_name),
+        page_layout.map(|n| format!(r#" presentation:presentation-page-layout-name="{}""#, esc(n))).unwrap_or_default(),
         tag = pg.tag,
     );
     if hf.footer && has(PhType::Footer) && !hf.footer_text.is_empty() {

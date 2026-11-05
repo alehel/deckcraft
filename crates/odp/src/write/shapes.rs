@@ -593,19 +593,10 @@ pub fn line_attrs(w: &mut Writer, ctx: &Ctx, l: &Line, ph: Option<Rgba>) -> Stri
         if e.kind == "none" {
             continue;
         }
-        let (d, vb, name) = match e.kind.as_str() {
-            "oval" => ("M 10 0 C 15.5 0 20 4.5 20 10 C 20 15.5 15.5 20 10 20 C 4.5 20 0 15.5 0 10 C 0 4.5 4.5 0 10 0 Z", "0 0 20 20", "Circle"),
-            "diamond" => ("M 10 0 L 20 10 L 10 20 L 0 10 Z", "0 0 20 20", "Square_20_45"),
-            "arrow" => ("M 10 0 L 20 26 L 16 28 L 10 12 L 4 28 L 0 26 Z", "0 0 20 28", "Line_20_Arrow"),
-            "stealth" => ("M 10 0 L 20 30 L 10 22 L 0 30 Z", "0 0 20 30", "Concave_20_Arrow"),
-            _ => ("M 10 0 L 20 30 L 0 30 Z", "0 0 20 30", "Arrow"),
-        };
+        // Unknown kinds as the plain arrowhead (the first), unknown sizes as medium.
+        let Some((_, name, vb, d)) = vocab::MARKERS.iter().find(|m| m.0 == e.kind).or(vocab::MARKERS.first()) else { continue };
         let mname = w.named.def("draw:marker", name, &format!(r#"svg:viewBox="{vb}" svg:d="{d}""#), "");
-        let mul = match e.w.as_str() {
-            "sm" => 2.0,
-            "lg" => 5.0,
-            _ => 3.0,
-        };
+        let mul = vocab::MARKER_SIZES.iter().find(|m| m.0 == e.w).map_or(3.0, |m| m.1);
         let _ =
             write!(s, r#" draw:marker-{key}="{mname}" draw:marker-{key}-width="{}" draw:marker-{key}-center="false""#, cm((width.max(0.75)) * mul));
     }

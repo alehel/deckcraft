@@ -143,7 +143,8 @@ Detail in [file-format-parity.md](file-format-parity.md).
   shrink-to-fit line reduction; pattern fills read back as tiled pictures; a chart's secondary
   axis and its number formats; the notes page size; white outlined text (written hollow for
   LibreOffice) reads back unfilled; gradient-filled text reads back in its first colour; double
-  and other compound lines read back as one line; slide sections; a show range's last slide (it
+  and other compound lines read back as one line; slide sections; a layout with a look of its own (its own background or shapes) reads back as
+  a master of its own; a show range's last slide (it
   plays to the end) and kiosk mode; kerning thresholds (kerning is on or off, read back as from
   1 pt); numbering other than Arabic, Latin letters and Roman numbers with `.`, `)` or `()` (for
   example circled numbers, or other scripts) is written as `1.`; a single-colour pie that

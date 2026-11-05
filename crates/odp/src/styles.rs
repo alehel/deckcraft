@@ -131,6 +131,8 @@ pub struct Store {
     /// The PowerPoint date format (1–13) of each date and time number style that stands for one,
     /// by name; worked out once, as the style is read.
     pub date_formats: HashMap<String, u8>,
+    /// Page layouts (`style:presentation-page-layout`): where a page's placeholders go, by name.
+    pub presentation_layouts: HashMap<String, El>,
     /// Display names, for writing styles back (`Default-title` etc. are plain already).
     pub common_names: Vec<(String, String)>,
     /// Spaces the document's `text:s` elements have expanded to so far (each one asks for up to
@@ -260,6 +262,9 @@ impl Store {
                         self.date_formats.insert(name, n);
                     }
                 }
+                "style:presentation-page-layout" if self.presentation_layouts.len() < MAX_DATA_STYLES => {
+                    self.presentation_layouts.insert(name, el.clone());
+                }
                 "style:page-layout" => {
                     let props = kid(el, "style:page-layout-properties").map(read_props).unwrap_or_default();
                     self.page_layouts.insert(name, props);
@@ -367,6 +372,18 @@ impl Store {
             out.merge(d);
         }
         out
+    }
+
+    /// A background's fill properties: only when they set a fill themselves (a page or background
+    /// style without one shows what's behind it), over the graphic defaults for what they leave
+    /// unset (the colour of a bare `draw:fill="solid"`).
+    pub fn background_fill(&self, own: &Props) -> Option<Props> {
+        if !own.contains_key("draw:fill") {
+            return None;
+        }
+        let mut props = self.default_of("graphic").graphic;
+        props.extend(own.iter().map(|(k, v)| (k.clone(), v.clone())));
+        Some(props)
     }
 
     /// The default style merged with the named style's chain.

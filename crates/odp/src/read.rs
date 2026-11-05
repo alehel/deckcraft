@@ -342,10 +342,7 @@ impl Reader<'_> {
         master.name = attr(m, "style:display-name").map_or_else(|| unescape_style_name(&name), str::to_string);
         let page_style = attr(m, "draw:style-name").map(|n| self.store.resolve(scope, "drawing-page", Some(n))).unwrap_or_default();
         // The page style's fill, else the master's background presentation style (older files).
-        // Its colour may come from the defaults below it, but only a fill it sets itself counts.
-        let bg_name = format!("{name}-background");
-        let sets_fill = self.store.chain(scope, "presentation", &bg_name).graphic.contains_key("draw:fill");
-        let bg_style = if sets_fill { self.store.resolve(scope, "presentation", Some(&bg_name)) } else { Default::default() };
+        let bg_style = self.store.chain(scope, "presentation", &format!("{name}-background"));
         master.background = Some(
             self.background(&page_style.page)
                 .or_else(|| self.background(&bg_style.graphic))
@@ -444,7 +441,14 @@ impl Reader<'_> {
             self.background(pp)
         };
         let bg = page_bg.as_ref().and_then(background_rgb).or(master_bg).unwrap_or(Rgba::WHITE);
-        let title_slide = page.elements().any(|e| attr(e, "presentation:class") == Some("subtitle"));
+        // The page's layout: from its page layout, else guessed from the placeholders it has.
+        let layout = attr(page, "presentation:presentation-page-layout-name")
+            .and_then(|n| self.store.presentation_layouts.get(n))
+            .map(|el| (page_layout_kind(el), attr(el, "style:display-name").map(str::to_string)));
+        let title_slide = match &layout {
+            Some((kind, _)) => *kind == LayoutType::Title,
+            None => page.elements().any(|e| attr(e, "presentation:class") == Some("subtitle")),
+        };
         let ctx = Ctx { scope: Scope::Content, master: master_name, bg, title_slide };
         // `pageN` for the Nth page is the name a writer gives a slide that has none.
         let unnamed = format!("page{}", index + 1);
@@ -518,25 +522,11 @@ impl Reader<'_> {
         }
         // Footer fields the page shows, from its master's placeholders.
         self.page_footers(mi, pp, page, decls, &mut shapes);
-        // The layout from the placeholders the page has.
-        let has = |k: PhType| shapes.iter().any(|s: &Shape| s.ph_type() == Some(k));
-        let bodies = shapes
-            .iter()
-            .filter(|s| matches!(s.ph_type(), Some(PhType::Body | PhType::Obj | PhType::Chart | PhType::Table | PhType::Picture)))
-            .count();
-        let kind = if ctx.title_slide || has(PhType::CtrTitle) {
-            LayoutType::Title
-        } else if has(PhType::Title) && bodies >= 2 {
-            LayoutType::TwoContent
-        } else if has(PhType::Title) && bodies == 1 {
-            LayoutType::TitleAndContent
-        } else if has(PhType::Title) {
-            LayoutType::TitleOnly
-        } else {
-            LayoutType::Blank
-        };
+        let (kind, layout_name) = layout.unwrap_or_else(|| (guess_layout(shapes.iter().filter_map(Shape::ph_type)), None));
         let master = self.p.masters.get(mi)?;
-        slide.layout = master.layouts.iter().find(|l| l.kind == kind).or(master.layouts.first()).map(|l| l.id).unwrap_or_default();
+        // The master's layout of that name and kind, else of that kind.
+        let named = master.layouts.iter().find(|l| l.kind == kind && layout_name.as_deref().is_some_and(|n| l.name == n));
+        slide.layout = named.or_else(|| master.layouts.iter().find(|l| l.kind == kind)).or(master.layouts.first()).map(|l| l.id).unwrap_or_default();
         slide.shapes = shapes;
         Some(slide)
     }
@@ -1220,6 +1210,39 @@ fn line_xfrm(e: &El) -> Xfrm {
     x.flip_h = b.x < a.x;
     x.flip_v = b.y < a.y;
     x
+}
+
+/// A page layout's kind: by its name, as we write it (`obj`, `secHead_2` …), else guessed from
+/// its placeholders.
+fn page_layout_kind(el: &El) -> LayoutType {
+    let token = attr(el, "style:name").unwrap_or_default().split('_').next().unwrap_or_default();
+    let kind = LayoutType::from_xml(token);
+    if kind.xml() == token {
+        kind
+    } else {
+        guess_layout(kids(el, "presentation:placeholder").filter_map(|p| attr(p, "presentation:object")).filter_map(ph_kind))
+    }
+}
+
+/// The layout a page's placeholders suggest: a subtitle makes a title slide, then the content
+/// placeholders beside a title count.
+fn guess_layout(placeholders: impl Iterator<Item = PhType>) -> LayoutType {
+    let (mut title, mut subtitle, mut bodies) = (false, false, 0);
+    for k in placeholders {
+        match k {
+            PhType::CtrTitle | PhType::SubTitle => subtitle = true,
+            PhType::Title => title = true,
+            PhType::Body | PhType::Obj | PhType::Chart | PhType::Table | PhType::Picture => bodies += 1,
+            _ => {}
+        }
+    }
+    match (subtitle, title, bodies) {
+        (true, ..) => LayoutType::Title,
+        (_, true, 2..) => LayoutType::TwoContent,
+        (_, true, 1) => LayoutType::TitleAndContent,
+        (_, true, 0) => LayoutType::TitleOnly,
+        _ => LayoutType::Blank,
+    }
 }
 
 fn ph_kind(class: &str) -> Option<PhType> {
