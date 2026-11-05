@@ -275,7 +275,9 @@ pub(super) fn gradient(gr: &El, paint: Paint) -> Gradient {
     }
     // How it blends: straight in sRGB, as LibreOffice draws it; unless it's our writing of a
     // two-colour gradient on PowerPoint's curve (its ramp's stops), which is that again.
-    let blend = if powerpoint_ramp(&stops) {
+    // (Only as we write them: no border, and not axial, whose stops it reshapes.)
+    let ours = border == 0.0 && matches!(style, "linear" | "radial" | "rectangular");
+    let blend = if ours && powerpoint_ramp(&stops) {
         stops = vec![stops[0], stops[stops.len() - 1]];
         GradientBlend::PowerPoint
     } else {

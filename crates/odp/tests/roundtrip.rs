@@ -2107,3 +2107,71 @@ fn two_colour_gradients_and_layouts_past_the_budget() {
     let l = p.masters[0].layouts.iter().find(|l| l.id == p.slides[0].layout);
     assert_eq!(l.map(|l| l.kind), Some(deckcraft_model::LayoutType::Title));
 }
+
+/// Review series 2, round 5 (correctness): a master our file names no layouts for has none (it got
+/// the eleven defaults back), a page keeps its own master when its layout names another, saving
+/// thousands of layouts takes no time to name them, and a ramp with a border keeps its stops.
+#[test]
+fn layouts_masters_and_ramps_as_written() {
+    use deckcraft_model::style::GradientBlend;
+    // Every layout with a look of its own: each reads back on a master of its own (a known
+    // loss), and no defaults come back.
+    let mut p = sample();
+    let m = Arc::make_mut(&mut p.masters[0]);
+    for l in &mut m.layouts {
+        l.background = Some(deckcraft_model::Background::Fill { fill: Fill::solid(ColorRef::rgb(Rgba::rgb(9, 9, 9))) });
+    }
+    let count = |p: &Presentation| p.masters.iter().map(|m| m.layouts.len()).sum::<usize>();
+    let back = deckcraft_odp::import(&deckcraft_odp::export(&p).unwrap()).unwrap();
+    assert_eq!(count(&back), count(&p));
+    // A page on another master than its layout names keeps its master.
+    let mut p = sample();
+    let mut second = (*p.masters[0]).clone();
+    second.id = deckcraft_model::MasterId(70_001);
+    second.name = "Second".into();
+    for (j, l) in second.layouts.iter_mut().enumerate() {
+        l.id = deckcraft_model::LayoutId(70_100 + j as u32);
+    }
+    p.masters.push(Arc::new(second));
+    let bytes = deckcraft_odp::export(&p).unwrap();
+    let content = part(&bytes, "content.xml").replacen(r#"draw:master-page-name="DeckCraft""#, r#"draw:master-page-name="Second""#, 1);
+    let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let mut src = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    for i in 0..src.len() {
+        let mut f = src.by_index(i).unwrap();
+        let name = f.name().to_string();
+        let mut data = vec![];
+        std::io::Read::read_to_end(&mut f, &mut data).unwrap();
+        z.start_file(name.as_str(), zip::write::SimpleFileOptions::default()).unwrap();
+        z.write_all(if name == "content.xml" { content.as_bytes() } else { &data }).unwrap();
+    }
+    let back = deckcraft_odp::import(&z.finish().unwrap().into_inner()).unwrap();
+    let on = back.masters.iter().position(|m| m.layouts.iter().any(|l| l.id == back.slides[0].layout));
+    assert_eq!(on.map(|i| back.masters[i].name.as_str()), Some("Second"));
+    // Thousands of layouts of one kind are named at once.
+    let mut p = sample();
+    let m = Arc::make_mut(&mut p.masters[0]);
+    let only = m.layouts[5].clone();
+    for k in 0..3000 {
+        let mut l = only.clone();
+        l.id = deckcraft_model::LayoutId(200_000 + k);
+        m.layouts.push(l);
+    }
+    let started = std::time::Instant::now();
+    deckcraft_odp::export(&p).unwrap();
+    assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
+    // Our ramp of PowerPoint's curve, with a border: not ours as written, so its stops are kept.
+    let ramp = deckcraft_render::gradient_ramp(&[(0.0, Rgba::BLACK), (1.0, Rgba::WHITE)], GradientBlend::PowerPoint);
+    let stops: String = ramp
+        .iter()
+        .map(|(p, c)| {
+            format!(r##"<loext:gradient-stop svg:offset="{p}" loext:color-type="rgb" loext:color-value="#{:02x}{:02x}{:02x}"/>"##, c.r, c.g, c.b)
+        })
+        .collect();
+    let doc = format!(
+        r##"<office:document {NS} xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" office:mimetype="application/vnd.oasis.opendocument.presentation"><office:styles><draw:gradient draw:name="G" draw:style="linear" draw:start-color="#000000" draw:end-color="#ffffff" draw:border="50%">{stops}</draw:gradient></office:styles><office:automatic-styles><style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="gradient" draw:fill-gradient-name="G"/></style:style></office:automatic-styles><office:body><office:presentation><draw:page><draw:custom-shape draw:style-name="gr1" svg:x="1cm" svg:y="1cm" svg:width="4cm" svg:height="2cm"><draw:enhanced-geometry svg:viewBox="0 0 21600 21600" draw:type="rectangle"/></draw:custom-shape></draw:page></office:presentation></office:body></office:document>"##
+    );
+    let p = deckcraft_odp::import(doc.as_bytes()).unwrap();
+    let Some(Fill::Gradient(g)) = &shapes_of(&p)[0].fill else { panic!() };
+    assert!(g.stops.len() > ramp.len() && g.blend == GradientBlend::Srgb, "{} stops, {:?}", g.stops.len(), g.blend);
+}

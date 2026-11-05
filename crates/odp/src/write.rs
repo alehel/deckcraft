@@ -225,6 +225,8 @@ fn has_own_look(l: &deckcraft_model::Layout) -> bool {
 #[derive(Default)]
 struct PageLayouts {
     names: HashMap<LayoutId, String>,
+    /// Layouts named so far per kind and page.
+    counts: HashMap<String, usize>,
     xml: String,
 }
 
@@ -234,13 +236,11 @@ impl PageLayouts {
         if self.names.contains_key(&l.id) {
             return;
         }
+        // The next number of its kind on its page (names are unique per kind and page).
         let base = l.kind.xml();
-        let mut name = format!("{base}.{page}");
-        let mut k = 1;
-        while self.names.values().any(|n| *n == name) {
-            k += 1;
-            name = format!("{base}-{k}.{page}");
-        }
+        let k = self.counts.entry(format!("{base}.{page}")).or_insert(0);
+        *k += 1;
+        let name = if *k == 1 { format!("{base}.{page}") } else { format!("{base}-{k}.{page}") };
         let ctx = Ctx::for_layout(p, m, l);
         let _ = write!(self.xml, r#"<style:presentation-page-layout style:name="{name}" style:display-name="{}">"#, esc(&l.name));
         for s in l.shapes.iter().filter(|s| s.ph_type().is_some_and(|k| !k.is_footer_kind())) {

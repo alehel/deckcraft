@@ -219,8 +219,8 @@ struct Reader<'a> {
     layouts_read: HashMap<(usize, String), LayoutId>,
     /// The defaults other apps' described page layouts took (each is taken once).
     layouts_claimed: std::collections::HashSet<LayoutId>,
-    /// The layout each page layout of ours became, by name (which names its master).
-    our_layouts: HashMap<String, LayoutId>,
+    /// The layout each page layout of ours became, and on which master, by name.
+    our_layouts: HashMap<String, (usize, LayoutId)>,
     /// Layouts made from page layouts, and the placeholders they had (against
     /// [`MAX_LAYOUTS_READ`] and [`MAX_LAYOUT_BOXES`]).
     layouts_made: usize,
@@ -466,10 +466,20 @@ impl Reader<'_> {
         // The page's layout: the one its page layout became, else the master's of the kind its
         // placeholders suggest.
         let store = std::rc::Rc::clone(&self.store);
-        // Ours were read up front (they name their master); others belong to the page's.
-        let read = attr(page, "presentation:presentation-page-layout-name").and_then(|n| match self.our_layouts.get(n) {
-            Some(id) => Some(*id),
-            None => store.presentation_layout(n).and_then(|el| self.layout_for(mi, n, el)),
+        // Ours were read up front, on the master they name: the page's, as we write them (named
+        // for another, the page takes its own master's layout of that kind). Others belong to
+        // the page's master.
+        let read = attr(page, "presentation:presentation-page-layout-name").and_then(|n| {
+            let el = store.presentation_layout(n)?;
+            match self.our_layouts.get(n) {
+                Some((m, id)) if *m == mi => Some(*id),
+                Some(_) => {
+                    let kind = page_layout_kind(el);
+                    let layouts = &self.p.masters.get(mi)?.layouts;
+                    layouts.iter().find(|l| l.kind == kind).or(layouts.first()).map(|l| l.id)
+                }
+                None => self.layout_for(mi, n, el),
+            }
         });
         let layout = read.or_else(|| {
             let kind = guess_layout(page.elements().filter_map(|e| attr(e, "presentation:class")).filter_map(ph_kind));
@@ -557,8 +567,8 @@ impl Reader<'_> {
     }
 
     /// The page layouts of ours (`obj.Office`, see `write::PageLayouts`): each master they name
-    /// has them as its layouts, used or not, in file order; its built defaults only lend each
-    /// kind its placeholders. Past the budgets ([`MAX_LAYOUTS_READ`], [`MAX_LAYOUT_BOXES`]) a
+    /// has them as its layouts, used or not, in file order (and one it names none for has none);
+    /// its built defaults only lend each kind its placeholders. Past the budgets ([`MAX_LAYOUTS_READ`], [`MAX_LAYOUT_BOXES`]) a
     /// layout is its kind's default.
     fn read_our_layouts(&mut self) {
         let store = std::rc::Rc::clone(&self.store);
@@ -571,16 +581,19 @@ impl Reader<'_> {
             let shown = attr(el, "style:display-name").unwrap_or(name);
             let boxes = self.boxes_of(el);
             let Some(layout) = self.new_layout(template, kind, shown, boxes, &master) else { continue };
-            self.our_layouts.insert(name.clone(), layout.id);
+            self.our_layouts.insert(name.clone(), (mi, layout.id));
             match built.iter_mut().find(|(m, _)| *m == mi) {
                 Some((_, ls)) => ls.push(layout),
                 None => built.push((mi, vec![layout])),
             }
         }
-        for (mi, layouts) in built {
-            if let Some(m) = self.p.masters.get_mut(mi) {
-                Arc::make_mut(m).layouts = layouts;
-            }
+        // A file of ours names every layout of every master: one it names none for has none.
+        if built.is_empty() {
+            return;
+        }
+        for (mi, m) in self.p.masters.iter_mut().enumerate() {
+            let layouts = built.iter_mut().find(|(i, _)| *i == mi).map(|(_, ls)| std::mem::take(ls)).unwrap_or_default();
+            Arc::make_mut(m).layouts = layouts;
         }
     }
 
