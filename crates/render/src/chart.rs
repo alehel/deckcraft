@@ -54,12 +54,28 @@ enum Paint {
 /// The paint of fill `f` as a bar or legend key draws it; the palette's `fallback` when the file
 /// gives none (or one a bar can't show).
 fn paint_of(ctx: &Ctx, f: Option<&Fill>, fallback: Rgba) -> Paint {
+    f.and_then(|f| drawn_paint(ctx, f)).unwrap_or(Paint::Color(fallback))
+}
+
+/// The paint of fill `f` when a bar or slice can draw it as given: solid, pattern or none (not a
+/// gradient or picture).
+fn drawn_paint(ctx: &Ctx, f: &Fill) -> Option<Paint> {
     match f {
-        Some(Fill::Solid { color: cc }) => Paint::Color(ctx.color(cc, None)),
-        Some(Fill::Pattern(p)) => Paint::Pattern(p.preset.clone(), ctx.color(&p.fg, None), ctx.color(&p.bg, None)),
-        Some(Fill::None) => Paint::Nothing,
-        _ => Paint::Color(fallback),
+        Fill::Solid { color: cc } => Some(Paint::Color(ctx.color(cc, None))),
+        Fill::Pattern(p) => Some(Paint::Pattern(p.preset.clone(), ctx.color(&p.fg, None), ctx.color(&p.bg, None))),
+        Fill::None => Some(Paint::Nothing),
+        _ => None,
     }
+}
+
+/// Series `s`'s own point fills by point (the first for a point wins), so a point's is found
+/// without searching the list.
+fn point_fill_index(s: &deckcraft_model::chart::Series) -> HashMap<usize, &Fill> {
+    let mut m = HashMap::new();
+    for (k, f) in &s.point_fills {
+        m.entry(*k).or_insert(f);
+    }
+    m
 }
 
 /// Fill `r` (in the space `m` maps to the output) with `p`.
@@ -70,7 +86,19 @@ fn fill_with(ctx: &mut RenderContext, p: &Paint, r: Rect, m: Affine) {
             ctx.set_paint(color(*c, 1.0));
             ctx.fill_rect(&r);
         }
-        Paint::Pattern(name, fg, bg) => crate::pattern::fill(ctx, name, *fg, *bg, 1.0, &r.to_path(0.1), m),
+        _ => fill_path_with(ctx, p, &r.to_path(0.1), m),
+    }
+}
+
+/// Fill `path` (in the space `m` maps to the output) with `p`.
+fn fill_path_with(ctx: &mut RenderContext, p: &Paint, path: &BezPath, m: Affine) {
+    match p {
+        Paint::Color(c) => {
+            ctx.set_transform(m);
+            ctx.set_paint(color(*c, 1.0));
+            ctx.fill_path(path);
+        }
+        Paint::Pattern(name, fg, bg) => crate::pattern::fill(ctx, name, *fg, *bg, 1.0, path, m),
         Paint::Nothing => {}
     }
 }
@@ -88,13 +116,24 @@ fn bar_outline(ctx: &Ctx, s: &deckcraft_model::chart::Series) -> Option<(Rgba, f
 /// (not waterfalls, which are never read from a `<c:barChart>`). Pattern fills draw as patterns and
 /// `a:noFill` leaves the bar empty, as in PowerPoint.
 fn bar_paint(ctx: &Ctx, c: &Chart, si: usize, pi: usize, s: &deckcraft_model::chart::Series, fills: Option<&HashMap<usize, &Fill>>) -> Paint {
-    if let Some(f) = fills.and_then(|m| m.get(&pi)) {
-        return paint_of(ctx, Some(*f), series_fill(ctx, c, si, Some(s)));
+    point_paint(ctx, c, si, pi, s, fills.and_then(|m| m.get(&pi)).copied())
+}
+
+/// Paint of point `pi` of series `si` (a bar, a slice, or its legend key): its own fill (`own`)
+/// where it can be drawn, else a colour per point when the series varies them (see
+/// [`Chart::varies`]), else the series' fill.
+fn point_paint(ctx: &Ctx, c: &Chart, si: usize, pi: usize, s: &deckcraft_model::chart::Series, own: Option<&Fill>) -> Paint {
+    match own.and_then(|f| drawn_paint(ctx, f)) {
+        Some(p) => p,
+        None if c.varies(s) => Paint::Color(series_color(ctx, c, pi)),
+        None => paint_of(ctx, s.fill.as_ref(), series_color(ctx, c, si)),
     }
-    if c.vary_colors && c.series.len() == 1 && s.fill.is_none() && c.kind != ChartType::Waterfall {
-        return Paint::Color(series_color(ctx, c, pi));
-    }
-    paint_of(ctx, s.fill.as_ref(), series_color(ctx, c, si))
+}
+
+/// Slice `i`'s paint (the pie and its legend), its own fill looked up in `fills`
+/// ([`point_fill_index`]).
+fn slice_paint(ctx: &Ctx, c: &Chart, s: &deckcraft_model::chart::Series, fills: &HashMap<usize, &Fill>, i: usize) -> Paint {
+    point_paint(ctx, c, 0, i, s, fills.get(&i).copied())
 }
 
 fn polyline(pts: &[Point]) -> BezPath {
@@ -583,7 +622,13 @@ fn build_legend_items(rctx: &Ctx, c: &Chart, pie: bool, waterfall: bool) -> Vec<
         // A map draws its own colour scale.
         vec![]
     } else if pie {
-        c.categories.iter().enumerate().map(|(i, n)| (n.clone(), Paint::Color(series_color(rctx, c, i)), None)).collect()
+        let s = c.series.first();
+        let fills = s.map(point_fill_index).unwrap_or_default();
+        c.categories
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), s.map_or_else(|| Paint::Color(series_color(rctx, c, i)), |s| slice_paint(rctx, c, s, &fills, i)), None))
+            .collect()
     } else {
         c.series
             .iter()
@@ -594,12 +639,7 @@ fn build_legend_items(rctx: &Ctx, c: &Chart, pie: bool, waterfall: bool) -> Vec<
                 if line {
                     (s.name.clone(), Paint::Color(series_line(rctx, c, i, s)), None)
                 } else if k.is_bar_like() {
-                    let paint = if c.vary_colors && c.series.len() == 1 && s.fill.is_none() {
-                        Paint::Color(series_color(rctx, c, i))
-                    } else {
-                        paint_of(rctx, s.fill.as_ref(), series_color(rctx, c, i))
-                    };
-                    (s.name.clone(), paint, bar_outline(rctx, s))
+                    (s.name.clone(), point_paint(rctx, c, i, i, s, None), bar_outline(rctx, s))
                 } else {
                     (s.name.clone(), Paint::Color(series_fill(rctx, c, i, Some(s))), None)
                 }
@@ -975,16 +1015,7 @@ fn draw_bars(ctx: &mut RenderContext, draw: &BarDrawing<'_, '_>) -> Vec<(f64, f6
         // Error bars need each series' mean and spread: worked out once, not per point.
         let stats: Vec<deckcraft_model::chart::SeriesStats> = bars.iter().map(|(_, s)| deckcraft_model::chart::SeriesStats::of(&s.values)).collect();
         // Each series' per-point fills by point (the first for a point wins), not searched per bar.
-        let point_fills: Vec<HashMap<usize, &Fill>> = bars
-            .iter()
-            .map(|(_, s)| {
-                let mut m = HashMap::new();
-                for (k, f) in &s.point_fills {
-                    m.entry(*k).or_insert(f);
-                }
-                m
-            })
-            .collect();
+        let point_fills: Vec<HashMap<usize, &Fill>> = bars.iter().map(|(_, s)| point_fill_index(s)).collect();
         // A waterfall's running bars, worked out once for all its categories.
         let waterfall_bars = if waterfall { c.waterfall_bars() } else { Vec::new() };
         for i in 0..ncat {
@@ -1119,6 +1150,7 @@ fn draw_pie(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, m: Affine, area: Rec
     let r = (area.width().min(area.height()) / 2.0) * 0.95;
     let cen = area.center();
     let mut a0 = -std::f64::consts::FRAC_PI_2;
+    let fills = point_fill_index(s);
     for (i, v) in vals.iter().enumerate() {
         let sweep = v / total * std::f64::consts::TAU;
         let mut p = BezPath::new();
@@ -1127,15 +1159,9 @@ fn draw_pie(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, m: Affine, area: Rec
         p.line_to(Point::new(cen.x + r * a0.cos(), cen.y + r * a0.sin()));
         p.extend(arc.append_iter(0.1));
         p.close_path();
+        let paint = slice_paint(rctx, c, s, &fills, i);
+        fill_path_with(ctx, &paint, &p, m);
         ctx.set_transform(m);
-        let col = s
-            .point_fills
-            .iter()
-            .find(|(k, _)| *k == i)
-            .and_then(|(_, f)| if let Fill::Solid { color: cc } = f { Some(rctx.color(cc, None)) } else { None })
-            .unwrap_or_else(|| series_color(rctx, c, i));
-        ctx.set_paint(color(col, 1.0));
-        ctx.fill_path(&p);
         ctx.set_paint(color(Rgba::WHITE, 1.0));
         ctx.set_stroke(kurbo::Stroke::new(1.0));
         ctx.stroke_path(&p);
@@ -1152,8 +1178,9 @@ fn draw_pie(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, m: Affine, area: Rec
                     size: base,
                     align: Align::Center,
                     anchor: Anchor::Middle,
-                    // On the slices themselves: white, unless the chart's text was given a colour.
-                    col: if c.text_color.is_some() { text_col } else { Rgba::WHITE },
+                    // On the slices themselves: white, unless the chart's text was given a colour
+                    // or the slice is empty (white would vanish on the slide).
+                    col: if c.text_color.is_some() || paint == Paint::Nothing { text_col } else { Rgba::WHITE },
                     bold: false,
                 },
             );
@@ -1422,6 +1449,24 @@ fn draw_trendlines(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, m: Affine, la
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pie's legend keys take each slice's paint: its own fill, else the series' colour when the
+    /// pie doesn't vary its colours; they took a colour per slice whatever the slice showed.
+    #[test]
+    fn pie_legend_keys_match_their_slices() {
+        let pres = deckcraft_model::Presentation::default();
+        let rctx = Ctx::for_master(&pres, &pres.masters[0]);
+        let green = deckcraft_color::Rgba::rgb(0, 160, 0);
+        let mut c = Chart::sample(ChartType::Pie);
+        c.vary_colors = false;
+        c.series[0].fill = Some(Fill::solid(ColorRef::rgb(green)));
+        c.series[0].point_fills = vec![(1, Fill::None)];
+        let keys: Vec<Paint> = build_legend_items(&rctx, &c, true, false).into_iter().map(|(_, p, _)| p).collect();
+        assert_eq!(keys.len(), c.categories.len());
+        for (i, k) in keys.iter().enumerate() {
+            assert_eq!(*k, if i == 1 { Paint::Nothing } else { Paint::Color(green) }, "key {i}");
+        }
+    }
 
     const AREA: Rect = Rect::new(0.0, 0.0, 400.0, 300.0);
 
