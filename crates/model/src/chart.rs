@@ -384,9 +384,10 @@ pub struct Chart {
     /// The category axis runs backwards (`c:orientation val="maxMin"`): right to left, or on a
     /// horizontal bar chart top to bottom (the default puts the first category at the bottom).
     pub cat_reversed: bool,
-    /// The category (x) and value (y) axes' tick marks.
+    /// The category (x) axis' tick marks (a scatter chart's horizontal value axis).
     #[serde(skip_serializing_if = "AxisTicks::is_none")]
     pub x_ticks: AxisTicks,
+    /// The primary value (y) axis' tick marks.
     #[serde(skip_serializing_if = "AxisTicks::is_none")]
     pub y_ticks: AxisTicks,
     /// A combo chart's secondary value axis: bounds, major unit and number format.
