@@ -1,7 +1,7 @@
 //! Every [`MediaId`] the model can reference, found by type rather than by scanning JSON keys.
 //!
 //! One walker, written once ([`walkers!`]) and expanded twice: [`visit`] reads ids, [`visit_mut`]
-//! rewrites them in place. It covers pictures (and their artistic-effect originals), picture fills
+//! rewrites them in place. It covers pictures (their artistic-effect originals and SVG originals), picture fills
 //! wherever a fill can sit (shapes, lines, text runs, table cells and styles, chart series and
 //! points, backgrounds, theme format schemes), media clips and their posters, 3-D models, OLE and
 //! SmartArt previews and kept parts, SmartArt node pictures, picture bullets, hyperlink, transition and
@@ -30,6 +30,12 @@ macro_rules! walkers {
             f(&$($m)? p.media);
             if let Some(a) = &$($m)? p.artistic {
                 f(&$($m)? a.original);
+            }
+            // Both ids, applicable or not: remapped together with `media`, a kept vector can
+            // never come to name another deck's picture.
+            if let Some(v) = &$($m)? p.vector {
+                f(&$($m)? v.raster);
+                f(&$($m)? v.svg);
             }
         }
 

@@ -1,6 +1,6 @@
 # Where DeckCraft falls short of PowerPoint
 
-> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-11-03 · **Change:** trivial (run alternate language and reflection transforms survive saves; reused slide contents scale to the destination, picker thumbnails remain a gap; previous: trivial (locked No Fill and no-outline click-through regression coverage added; No Fill hit-testing follows resolved fill instead of the presence of a style (#1621); scores unchanged)) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-11-11 · **Change:** trivial (PPTX SVG pictures keep their SVG original through saves; scores unchanged; previous: trivial (run alternate language and reflection transforms survive saves; reused slide contents scale to the destination, picker thumbnails remain a gap; previous: trivial (locked No Fill and no-outline click-through regression coverage added; No Fill hit-testing follows resolved fill instead of the presence of a style (#1621); scores unchanged))) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 Every known shortfall, one entry each, ranked by how much it stops someone who presents with
 PowerPoint from switching. This is the work list: pick from the top. Numbers are summarized in
@@ -109,6 +109,10 @@ Detail in [file-format-parity.md](file-format-parity.md).
   pictures play their EMF+ records).
   Nothing draws SVG; PowerPoint's Insert Icons stores SVG with a PNG fallback. The `.pptx` reader
   keeps that SVG original (`PictureFill.vector`) and writes it back while the picture is unchanged.
+  A picture whose raster is later replaced by compression, Remove Background or an artistic effect
+  keeps its now inapplicable SVG (removing the effect brings it back); Change Picture drops it. Either
+  way the SVG media item stays in the deck and in native saves, as a replaced raster does: nothing
+  prunes media that only an inapplicable SVG original refers to.
 - **Impact:** SVG icons show only their raster fallback, and SVG files can't be inserted.
 - **Estimate:** 4–8 h (an SVG renderer through `resvg`-style crates).
 
