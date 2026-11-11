@@ -39,6 +39,7 @@ fn reflection() -> Reflection {
 
 fn gradient(angle: f64) -> Fill {
     Fill::Gradient(Gradient {
+        blend: Default::default(),
         stops: vec![
             GradientStop { pos: 0.0, color: ColorRef::rgb(Rgba::rgb(255, 80, 0)) },
             GradientStop { pos: 1.0, color: ColorRef::scheme(SchemeSlot::Accent1) },
@@ -109,6 +110,7 @@ fn style_deck() -> Presentation {
 
     let mut path = shape(&mut p, "Path gradient", 40.0, 260.0, 140.0, 100.0);
     path.fill = Some(Fill::Gradient(Gradient {
+        blend: Default::default(),
         stops: vec![
             GradientStop { pos: 0.0, color: ColorRef::rgb(Rgba::rgb(10, 20, 30)) },
             GradientStop { pos: 0.5, color: ColorRef::scheme(SchemeSlot::Accent5) },

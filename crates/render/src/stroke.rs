@@ -159,7 +159,7 @@ fn line_gradient(rctx: &Ctx, g: &deckcraft_model::style::Gradient, ph: Option<Rg
     let bounds = path.bounding_box().inflate(lw / 2.0, lw / 2.0);
     let bounds = paint::tile_box(bounds, g.tile);
     let stops: Vec<(f64, Rgba)> = g.stops.iter().map(|s| (s.pos, rctx.color(&s.color, ph))).collect();
-    paint::gradient(&g.shape, stops, bounds, alpha)
+    paint::gradient(g, stops, bounds, alpha)
 }
 
 /// A dash pattern (on, off, on, off… lengths) for a line drawn `width` wide with `cap`. As

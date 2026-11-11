@@ -3,8 +3,8 @@
 use deckcraft_color::{ColorTransform, Rgba, SchemeSlot};
 use deckcraft_geom::{Xfrm, emu_to_pt};
 use deckcraft_model::style::{
-    ColorBase, ColorRef, Compound, Dash, Effects, Fill, Glow, Gradient, GradientFlip, GradientShape, GradientStop, Line, LineAlign, LineCap, LineEnd,
-    LineJoin, PatternFill, PictureFill, PictureMode, Reflection, Shadow,
+    ColorBase, ColorRef, Compound, Dash, Effects, Fill, Glow, Gradient, GradientBlend, GradientFlip, GradientShape, GradientStop, Line, LineAlign,
+    LineCap, LineEnd, LineJoin, PatternFill, PictureFill, PictureMode, Reflection, Shadow,
 };
 use deckcraft_model::text::{
     Action, Align, Anchor, AutoFit, BodyProps, Bullet, Caps, Hyperlink, LevelStyle, ListStyle, ParaProps, Paragraph, Run, RunKind, RunProps, Spacing,
@@ -122,6 +122,15 @@ pub fn gradient(f: &El) -> Gradient {
         })
         .unwrap_or_default();
     stops.sort_by(|a, b| a.pos.total_cmp(&b.pos));
+    // A two-colour gradient with its first stop repeated is drawn straight in sRGB (PowerPoint
+    // draws more than two stops so): a two-colour gradient that blends so, as the writer writes one.
+    let blend = match stops.as_slice() {
+        [a, b, c] if a.pos == 0.0 && a.color == b.color && deckcraft_model::style::is_two_colour(&[b.pos, c.pos]) => {
+            stops.remove(0);
+            GradientBlend::Srgb
+        }
+        _ => GradientBlend::PowerPoint,
+    };
     let shape = if let Some(l) = f.child("lin") {
         GradientShape::Linear { angle: ang(l, "ang").unwrap_or(0.0), scaled: l.bool("scaled").unwrap_or(false) }
     } else if let Some(p) = f.child("path") {
@@ -133,6 +142,7 @@ pub fn gradient(f: &El) -> Gradient {
     };
     let tile = f.child("tileRect").map(|r| [pct(r, "l"), pct(r, "t"), pct(r, "r"), pct(r, "b")].map(|v| v.unwrap_or(0.0).clamp(-10.0, 10.0)));
     Gradient {
+        blend,
         tile: tile.unwrap_or_default(),
         stops,
         shape,

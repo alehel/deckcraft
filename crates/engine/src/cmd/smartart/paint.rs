@@ -92,6 +92,7 @@ pub(super) fn paint(d: &Diagram, sh: &mut Shape, i: usize, light: bool) {
         }
         "intense" => {
             sh.fill = Some(Fill::Gradient(Gradient {
+                blend: Default::default(),
                 stops: vec![
                     GradientStop { pos: 0.0, color: tint(30) },
                     GradientStop { pos: 1.0, color: base.clone().with(ColorTransform::LumMod(75_000)) },

@@ -4,7 +4,7 @@
 
 use deckcraft_color::{ColorScheme, ColorTransform, SchemeSlot};
 use deckcraft_model::ColorRef;
-use deckcraft_model::style::{Gradient, GradientFlip, GradientShape, GradientStop, PatternFill};
+use deckcraft_model::style::{Gradient, GradientBlend, GradientFlip, GradientShape, GradientStop, PatternFill};
 use egui::{Color32, CornerRadius, Rect, Sense, Stroke, Ui, pos2, vec2};
 use serde_json::{Value, json};
 
@@ -17,6 +17,7 @@ pub fn default_gradient(base: ColorRef, angle: f64) -> Gradient {
     let mut dark = base.clone();
     dark.mods.push(ColorTransform::LumMod(60_000));
     Gradient {
+        blend: Default::default(),
         tile: [0.0; 4],
         stops: vec![GradientStop { pos: 0.0, color: base }, GradientStop { pos: 1.0, color: dark }],
         shape: GradientShape::Linear { angle, scaled: false },
@@ -29,9 +30,10 @@ pub fn default_gradient(base: ColorRef, angle: f64) -> Gradient {
 pub fn gradient_json(g: &Gradient) -> Value {
     let stops: Vec<Value> = g.stops.iter().map(|s| json!([s.pos, cref_param(&s.color)])).collect();
     let flip = g.flip.map(GradientFlip::xml);
+    let blend = if g.blend == GradientBlend::Srgb { "srgb" } else { "powerPoint" };
     match &g.shape {
         GradientShape::Linear { angle, .. } => {
-            json!({"stops": stops, "kind": "linear", "angle": angle, "rotateWithShape": g.rotate_with_shape, "flip": flip})
+            json!({"stops": stops, "kind": "linear", "angle": angle, "rotateWithShape": g.rotate_with_shape, "flip": flip, "blend": blend})
         }
         GradientShape::Path { path, focus } => {
             let kind = match path.as_str() {
@@ -39,7 +41,7 @@ pub fn gradient_json(g: &Gradient) -> Value {
                 "shape" => "path",
                 _ => "radial",
             };
-            json!({"stops": stops, "kind": kind, "focus": focus, "rotateWithShape": g.rotate_with_shape, "flip": flip})
+            json!({"stops": stops, "kind": kind, "focus": focus, "rotateWithShape": g.rotate_with_shape, "flip": flip, "blend": blend})
         }
     }
 }
@@ -142,6 +144,7 @@ pub fn gradient_editor(ui: &mut Ui, id: &str, g: &Gradient, sc: &ColorScheme) ->
                 ..default_gradient(base.clone(), 45.0)
             },
             Gradient {
+                blend: Default::default(),
                 tile: [0.0; 4],
                 stops: vec![GradientStop { pos: 0.0, color: light }, GradientStop { pos: 1.0, color: dark }],
                 shape: GradientShape::Path { path: "circle".into(), focus: [0.5, 0.5, 0.5, 0.5] },
@@ -521,6 +524,7 @@ mod tests {
     #[test]
     fn gradient_json_retains_flip_mode() {
         let gradient = Gradient {
+            blend: Default::default(),
             stops: vec![],
             shape: GradientShape::Linear { angle: 90.0, scaled: false },
             flip: Some(GradientFlip::Xy),
@@ -528,5 +532,12 @@ mod tests {
             tile: [0.0; 4],
         };
         assert_eq!(gradient_json(&gradient).get("flip"), Some(&json!("xy")));
+        assert_eq!(gradient_json(&gradient).get("blend"), Some(&json!("powerPoint")));
+        // Regression: the blend was left out, so an edit through the command reset it.
+        let radial =
+            Gradient { blend: GradientBlend::Srgb, shape: GradientShape::Path { path: "circle".into(), focus: [0.5; 4] }, ..gradient.clone() };
+        assert_eq!(gradient_json(&radial).get("blend"), Some(&json!("srgb")));
+        let linear = Gradient { blend: GradientBlend::Srgb, ..gradient };
+        assert_eq!(gradient_json(&linear).get("blend"), Some(&json!("srgb")));
     }
 }

@@ -7,9 +7,11 @@
 //! direction, on shapes and on slide backgrounds. Gradients with three or more stops, or with a
 //! stop moved off an end, blend linearly in sRGB (measured from PowerPoint's own slide export).
 //! The renderer interpolates linearly in sRGB, so a two-colour gradient is expanded into short
-//! pieces whose colours follow PowerPoint's ramp.
+//! pieces whose colours follow PowerPoint's ramp. A gradient that blends in sRGB
+//! ([`GradientBlend::Srgb`], as other apps draw gradients) is drawn as it is.
 
 use deckcraft_color::Rgba;
+use deckcraft_model::style::GradientBlend;
 
 /// The next stop's share of the linear-light mix at sixteenths of a segment (0 at the first stop,
 /// 1 at the second). Measured, then made symmetric: `w(1 - t) = 1 - w(t)`.
@@ -51,9 +53,9 @@ pub fn mix(a: Rgba, b: Rgba, t: f64) -> Rgba {
 
 /// Sorted stops (position 0..1, colour) as a renderer interpolating linearly in sRGB should get
 /// them: a two-colour gradient (two stops, at 0 and 1) expanded to follow PowerPoint's ramp,
-/// anything else unchanged.
-pub fn expand(stops: &[(f64, Rgba)]) -> Vec<(f64, Rgba)> {
-    let two_colour = matches!(stops, [(p, _), (q, _)] if *p <= 1e-6 && *q >= 1.0 - 1e-6);
+/// anything else, or any gradient blending in sRGB, unchanged.
+pub fn expand(stops: &[(f64, Rgba)], blend: GradientBlend) -> Vec<(f64, Rgba)> {
+    let two_colour = blend == GradientBlend::PowerPoint && matches!(stops, [(p, _), (q, _)] if deckcraft_model::style::is_two_colour(&[*p, *q]));
     if !two_colour {
         return stops.to_vec();
     }
@@ -113,13 +115,16 @@ mod tests {
     fn expand_keeps_stops_and_hard_edges() {
         let (r, g) = (Rgba::rgb(255, 0, 0), Rgba::rgb(0, 255, 0));
         // Three or more stops, or a stop off an end, blend linearly in sRGB: unchanged.
-        let e = expand(&[(0.0, r), (0.5, r), (0.5, g), (1.0, g)]);
+        let e = expand(&[(0.0, r), (0.5, r), (0.5, g), (1.0, g)], GradientBlend::PowerPoint);
         assert_eq!(e, vec![(0.0, r), (0.5, r), (0.5, g), (1.0, g)]);
-        assert_eq!(expand(&[(0.2, r), (1.0, g)]), vec![(0.2, r), (1.0, g)]);
-        assert_eq!(expand(&[(0.0, r), (0.5, g), (1.0, r)]).len(), 3);
+        assert_eq!(expand(&[(0.2, r), (1.0, g)], GradientBlend::PowerPoint), vec![(0.2, r), (1.0, g)]);
+        assert_eq!(expand(&[(0.0, r), (0.5, g), (1.0, r)], GradientBlend::PowerPoint).len(), 3);
         // Two equal colours add nothing.
-        assert_eq!(expand(&[(0.0, r), (1.0, r)]), vec![(0.0, r), (1.0, r)]);
-        let e = expand(&[(0.0, r), (1.0, g)]);
+        assert_eq!(expand(&[(0.0, r), (1.0, r)], GradientBlend::PowerPoint), vec![(0.0, r), (1.0, r)]);
+        // Blending in sRGB, the two colours are drawn as they are.
+        assert_eq!(expand(&[(0.0, r), (1.0, g)], GradientBlend::Srgb), vec![(0.0, r), (1.0, g)]);
+        assert_eq!(expand(&[(0.0, r), (0.5, g), (1.0, r)], GradientBlend::Srgb).len(), 3);
+        let e = expand(&[(0.0, r), (1.0, g)], GradientBlend::PowerPoint);
         assert_eq!(e.len(), PIECES + 1);
         assert_eq!(e.first(), Some(&(0.0, r)));
         assert_eq!(e.last(), Some(&(1.0, g)));

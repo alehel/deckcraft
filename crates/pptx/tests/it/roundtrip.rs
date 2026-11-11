@@ -108,6 +108,7 @@ pub fn rich_deck() -> Presentation {
     let mut a = shape(&mut p, "Gradient Star", 100.0, 120.0, 150.0, 150.0);
     a.geom = Geom::Preset { name: "star5".into(), adj: vec![20000.0] };
     a.fill = Some(Fill::Gradient(Gradient {
+        blend: Default::default(),
         tile: [0.0; 4],
         stops: vec![
             GradientStop { pos: 0.0, color: ColorRef::scheme(SchemeSlot::Accent1) },

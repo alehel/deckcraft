@@ -52,7 +52,7 @@ pub fn fill_path(
             // shape's own box (PowerPoint's "from corner" presets centre the tile on the corner).
             let tile = tile_box(bounds, g.tile);
             let stops: Vec<(f64, Rgba)> = g.stops.iter().map(|s| (s.pos, shade(rctx.color(&s.color, ph), mode))).collect();
-            ctx.set_paint(gradient(&g.shape, stops, bounds, alpha));
+            ctx.set_paint(gradient(g, stops, bounds, alpha));
 
             let mut stops: Vec<(f64, Rgba)> = g.stops.iter().map(|s| (s.pos.clamp(0.0, 1.0), shade(rctx.color(&s.color, ph), mode))).collect();
             stops.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -60,12 +60,14 @@ pub fn fill_path(
             if let GradientShape::Path { path: kind, focus } = &g.shape
                 && matches!(kind.as_str(), "rect" | "shape")
             {
-                crate::pathgrad::fill(ctx, kind, *focus, &crate::ramp::expand(&stops), bounds, path, m, alpha);
+                crate::pathgrad::fill(ctx, kind, *focus, &crate::ramp::expand(&stops, g.blend), bounds, path, m, alpha);
                 return;
             }
             // PowerPoint's ramp between stops (linear light, S-shaped), see `ramp`.
-            let stops: Vec<peniko::ColorStop> =
-                crate::ramp::expand(&stops).into_iter().map(|(o, c)| peniko::ColorStop { offset: o as f32, color: color(c, alpha).into() }).collect();
+            let stops: Vec<peniko::ColorStop> = crate::ramp::expand(&stops, g.blend)
+                .into_iter()
+                .map(|(o, c)| peniko::ColorStop { offset: o as f32, color: color(c, alpha).into() })
+                .collect();
             let grad = match &g.shape {
                 GradientShape::Linear { angle, .. } => {
                     // Angle measured clockwise from left→right; span the bounds along that direction.
@@ -136,15 +138,18 @@ pub fn tile_box(bounds: Rect, tile: [f64; 4]) -> Rect {
     if x1 - x0 <= 1e-9 || y1 - y0 <= 1e-9 { bounds } else { Rect::new(x0, y0, x1, y1) }
 }
 
-/// The paint of a gradient of `shape` with `stops` (position, colour) spanning `bounds`, faded
-/// by `alpha`, ramping between stops as PowerPoint does (see `ramp`).
-pub fn gradient(shape: &GradientShape, mut stops: Vec<(f64, Rgba)>, bounds: Rect, alpha: f64) -> peniko::Gradient {
+/// The paint of gradient `g` with `stops` (position, colour) spanning `bounds`, faded by
+/// `alpha`, ramping between stops as its blend says (see `ramp`).
+pub fn gradient(g: &deckcraft_model::style::Gradient, mut stops: Vec<(f64, Rgba)>, bounds: Rect, alpha: f64) -> peniko::Gradient {
+    let shape = &g.shape;
     for s in &mut stops {
         s.0 = s.0.clamp(0.0, 1.0);
     }
     stops.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let stops: Vec<peniko::ColorStop> =
-        crate::ramp::expand(&stops).into_iter().map(|(o, c)| peniko::ColorStop { offset: o as f32, color: color(c, alpha).into() }).collect();
+    let stops: Vec<peniko::ColorStop> = crate::ramp::expand(&stops, g.blend)
+        .into_iter()
+        .map(|(o, c)| peniko::ColorStop { offset: o as f32, color: color(c, alpha).into() })
+        .collect();
     match shape {
         GradientShape::Linear { angle, .. } => {
             // Angle measured clockwise from left→right; span the bounds along that direction.

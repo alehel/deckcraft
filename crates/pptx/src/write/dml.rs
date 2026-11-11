@@ -293,6 +293,14 @@ fn gradient(w: &mut W, g: &deckcraft_model::style::Gradient) {
         s.pos = 1.0;
         stops.push(s);
     }
+    // PowerPoint draws a two-colour gradient on its curve and more stops straight in sRGB: one
+    // blending in sRGB repeats its first stop (by position) to be drawn so.
+    if g.blend == deckcraft_model::style::GradientBlend::Srgb && g.is_two_colour() {
+        stops.sort_by(|a, b| a.pos.total_cmp(&b.pos));
+        if let Some(first) = stops.first().cloned() {
+            stops.insert(0, first);
+        }
+    }
     if !stops.is_empty() {
         w.open0("a:gsLst");
         for s in &stops {
