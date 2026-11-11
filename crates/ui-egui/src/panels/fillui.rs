@@ -55,6 +55,11 @@ fn reshaped(g: &Gradient, shape: GradientShape) -> Gradient {
     Gradient { shape, tile: [0.0; 4], ..g.clone() }
 }
 
+/// `g` turned to `angle`. A fine adjustment, unlike a preset direction: it keeps the tile.
+fn angled(g: &Gradient, angle: f64) -> Gradient {
+    Gradient { shape: GradientShape::Linear { angle: angle.rem_euclid(360.0), scaled: false }, ..g.clone() }
+}
+
 fn alpha_of(c: &ColorRef) -> f64 {
     c.mods.iter().find_map(|m| if let ColorTransform::Alpha(a) = m { Some(*a as f64 / 100_000.0) } else { None }).unwrap_or(1.0)
 }
@@ -229,7 +234,7 @@ pub fn gradient_editor(ui: &mut Ui, id: &str, g: &Gradient, sc: &ColorScheme) ->
         ui.horizontal(|ui| {
             ui.add_sized(vec2(70.0, 20.0), egui::Label::new("Angle"));
             if let Some(a) = widgets::spinner(ui, &format!("{id}-angle"), "Angle", *angle, 15.0, "°", 70.0) {
-                out = Some(Gradient { shape: GradientShape::Linear { angle: a.rem_euclid(360.0), scaled: false }, ..g.clone() });
+                out = Some(angled(g, a));
             }
         });
     }
@@ -559,6 +564,10 @@ mod tests {
         assert_eq!(linear.tile, [0.0; 4]);
         let center = reshaped(&corner, GradientShape::Path { path: "circle".into(), focus: [0.5; 4] });
         assert_eq!((center.tile, center.shape), ([0.0; 4], GradientShape::Path { path: "circle".into(), focus: [0.5; 4] }));
+        // The Angle spinner is a fine adjustment, not a preset: it keeps the tile.
+        let tiled = Gradient { tile: [-0.5, 0.0, 0.5, 0.0], ..linear };
+        let turned = angled(&tiled, 405.0);
+        assert_eq!((turned.tile, turned.shape), ([-0.5, 0.0, 0.5, 0.0], GradientShape::Linear { angle: 45.0, scaled: false }));
     }
 
     /// End to end: an edit the pane sends through `shape.fill` keeps the tile it didn't touch, and
