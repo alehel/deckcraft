@@ -37,6 +37,7 @@ pub fn gradient_json(g: &Gradient) -> Value {
             let kind = match path.as_str() {
                 "rect" => "rectangular",
                 "shape" => "path",
+                "ellipse" => "ellipse",
                 _ => "radial",
             };
             json!({"stops": stops, "kind": kind, "focus": focus, "rotateWithShape": g.rotate_with_shape, "flip": flip})
@@ -528,5 +529,18 @@ mod tests {
             tile: [0.0; 4],
         };
         assert_eq!(gradient_json(&gradient).get("flip"), Some(&json!("xy")));
+    }
+
+    /// The panel shows an ellipse as Radial; editing it (say its direction) keeps it an ellipse.
+    #[test]
+    fn gradient_json_keeps_an_ellipse() {
+        let gradient = Gradient {
+            stops: vec![],
+            shape: GradientShape::Path { path: "ellipse".into(), focus: [0.0; 4] },
+            flip: None,
+            rotate_with_shape: true,
+            tile: [0.0; 4],
+        };
+        assert_eq!(gradient_json(&gradient).get("kind"), Some(&json!("ellipse")));
     }
 }

@@ -849,4 +849,20 @@ mod tests {
         assert_eq!(write(ColorBase::System { name: "notAColor".into(), last }), r#"<a:sysClr val="windowText" lastClr="123456"/>"#);
         assert_eq!(write(ColorBase::System { name: "3dLight".into(), last }), r#"<a:sysClr val="3dLight" lastClr="123456"/>"#);
     }
+
+    /// PowerPoint has no ellipse (or any other unknown) path gradient: it saves as a circle.
+    #[test]
+    fn an_ellipse_or_unknown_path_gradient_saves_as_a_circle() {
+        use deckcraft_model::style::{Gradient, GradientShape};
+        let write = |path: &str| {
+            let mut w = W::frag();
+            let shape = GradientShape::Path { path: path.into(), focus: [0.5; 4] };
+            gradient(&mut w, &Gradient { stops: vec![], shape, rotate_with_shape: true, tile: [0.0; 4], flip: None });
+            w.s
+        };
+        for path in ["ellipse", "notAPath"] {
+            assert!(write(path).contains(r#"<a:path path="circle">"#), "{path}: {}", write(path));
+        }
+        assert!(write("rect").contains(r#"<a:path path="rect">"#));
+    }
 }
