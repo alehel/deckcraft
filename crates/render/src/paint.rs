@@ -66,6 +66,8 @@ pub fn fill_path(
             // PowerPoint's ramp between stops (linear light, S-shaped), see `ramp`.
             let stops: Vec<peniko::ColorStop> =
                 crate::ramp::expand(&stops).into_iter().map(|(o, c)| peniko::ColorStop { offset: o as f32, color: color(c, alpha).into() }).collect();
+            let (w, h) = (bounds.width(), bounds.height());
+            let mut stretch = None;
             let grad = match &g.shape {
                 GradientShape::Linear { angle, .. } => {
                     // Angle measured clockwise from left→right; span the bounds along that direction.
@@ -76,10 +78,23 @@ pub fn fill_path(
                     peniko::Gradient::new_linear(Point::new(c.x - dx * half, c.y - dy * half), Point::new(c.x + dx * half, c.y + dy * half))
                         .with_stops(stops.as_slice())
                 }
+                // An ellipse: the circle laid out in a unit square (the tile mapped into it), stretched
+                // to the box by the paint transform. A box with no width or height stays a circle.
+                GradientShape::Path { path: kind, focus } if kind == "ellipse" && w > 1e-9 && h > 1e-9 => {
+                    let unit = Rect::new((tile.x0 - bounds.x0) / w, (tile.y0 - bounds.y0) / h, (tile.x1 - bounds.x0) / w, (tile.y1 - bounds.y0) / h);
+                    stretch = Some(Affine::translate((bounds.x0, bounds.y0)) * Affine::scale_non_uniform(w, h));
+                    circle_gradient(*focus, Rect::new(0.0, 0.0, 1.0, 1.0), unit).with_stops(stops.as_slice())
+                }
                 GradientShape::Path { focus, .. } => circle_gradient(*focus, bounds, tile).with_stops(stops.as_slice()),
             };
             ctx.set_paint(grad);
+            if let Some(t) = stretch {
+                ctx.set_paint_transform(t);
+            }
             ctx.fill_path(path);
+            if stretch.is_some() {
+                ctx.reset_paint_transform();
+            }
         }
         Fill::Picture(pf) => {
             // `rotWithShape="0"`: upright on the slide, stretched over the box the turned shape

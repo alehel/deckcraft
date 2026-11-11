@@ -4321,7 +4321,7 @@ fn shape_fill_documents_each_gradient_key_and_kind() {
     let params = cmd::parse_params(find_command("shape.fill").unwrap().params).unwrap();
     let about = params.iter().find(|p| p.name == "gradient").unwrap().about;
     assert_eq!(cmd::param_keys(about).unwrap(), ["stops", "kind", "angle", "focus", "rotateWithShape"]);
-    for kind in ["linear", "radial", "rectangular", "path"] {
+    for kind in ["linear", "radial", "ellipse", "rectangular", "path"] {
         assert!(about.contains(kind), "{kind}: {about}");
         let g = cmd::shape::gradient_param(&json!({
             "stops": [[0, "#ffffff"], [1, "#000000"]],
@@ -4337,6 +4337,7 @@ fn shape_fill_documents_each_gradient_key_and_kind() {
             GradientShape::Path { path, focus } => {
                 let expected = match kind {
                     "radial" => "circle",
+                    "ellipse" => "ellipse",
                     "rectangular" => "rect",
                     _ => "shape",
                 };
