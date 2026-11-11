@@ -609,7 +609,7 @@ fn state_for(tl: &Timeline, id: ShapeId, step: usize, t: f64, plays: &[TriggerPl
 
 /// Whether starting the show takes the whole screen. Reading view and "Browsed by an individual (window)" stay in the window.
 fn show_fills_screen(reading: bool, show_type: &str) -> bool {
-    !reading && show_type != "browsed"
+    !reading && show_type != deckcraft_model::ShowSettings::BROWSED
 }
 
 #[cfg(test)]
