@@ -1,6 +1,6 @@
 # Where DeckCraft falls short of PowerPoint
 
-> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-11-03 · **Change:** trivial (run alternate language and reflection transforms survive saves; reused slide contents scale to the destination, picker thumbnails remain a gap; previous: trivial (locked No Fill and no-outline click-through regression coverage added; No Fill hit-testing follows resolved fill instead of the presence of a style (#1621); scores unchanged)) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-11-11 · **Change:** trivial (gradient pane "From corner" directions don't set PowerPoint's corner tile; previous: trivial (run alternate language and reflection transforms survive saves; reused slide contents scale to the destination, picker thumbnails remain a gap)) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 Every known shortfall, one entry each, ranked by how much it stops someone who presents with
 PowerPoint from switching. This is the work list: pick from the top. Numbers are summarized in
@@ -289,7 +289,10 @@ artistic effects (3–6 h for the other 15 of 22; 7 approximated and round-tripp
 background (6–10 h; needs a model or a classical matte), insert screenshot (2–3 h), record
 audio/screen and record slide show (8–12 h), compare presentations beyond accepting and rejecting each revision, or all (#850; per-object accept and reject, markers on the slide: 2–4 h), password protection (4–6 h, ECMA-376
 agile encryption), ink to text and math beyond Ink to Shape (6–10 h), 3-D models and stock content
-(6–10 h; Insert › Icons places a Lucide stroke set).
+(6–10 h; Insert › Icons places a Lucide stroke set), the gradient pane's "From corner" directions
+(0.5–1 h: they lay out in the shape's box, while PowerPoint's corner presets centre a tile on the
+corner, so a corner picked in the pane draws differently from one read from .pptx; only the
+top-left preset's `tileRect` is known).
 
 ## UI/UX
 
@@ -368,6 +371,7 @@ Detail in [localization-parity.md](localization-parity.md).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-11 | trivial | The gradient pane's "From corner" directions don't set PowerPoint's corner tile; scores unchanged |
 | 2026-11-02 | trivial | Run alternate-language metadata now survives native and PPTX saves; UI and proofing gaps remain; scores unchanged |
 | 2026-11-02 | trivial | PPTX reflection geometry is retained through native and PPTX resaves; no rendering parity claim |
 | 2026-11-02 | trivial | Reused slide geometry and content scale to the destination; picker thumbnails remain the reuse gap |
