@@ -88,8 +88,14 @@ fn a_gradient_without_stops_is_saved_without_stops() {
     let mut p = defaults::new_presentation(None);
     let id = ShapeId(p.alloc_id().expect("ids"));
     let first = p.slides[0].id;
-    let own =
-        Gradient { tile: [0.0; 4], stops: vec![], shape: GradientShape::Linear { angle: 45.0, scaled: true }, rotate_with_shape: true, flip: None };
+    let own = Gradient {
+        tile: [0.0; 4],
+        stops: vec![],
+        shape: GradientShape::Linear { angle: 45.0, scaled: true },
+        rotate_with_shape: true,
+        blend: Default::default(),
+        flip: None,
+    };
     p.slide_mut(first).expect("slide").shapes.push(Shape {
         id,
         name: "Styled".into(),
@@ -104,6 +110,47 @@ fn a_gradient_without_stops_is_saved_without_stops() {
     assert_eq!(s.fill, Some(Fill::Gradient(own)));
 }
 
+/// A two-colour gradient blending straight in sRGB is written with its first stop repeated (which
+/// PowerPoint draws straight), and read back as the same two-colour gradient.
+#[test]
+fn an_srgb_two_colour_gradient_round_trips() {
+    use deckcraft_model::style::{Gradient, GradientBlend, GradientShape, GradientStop};
+    let stop = |pos: f64, (r, g, b)| GradientStop { pos, color: deckcraft_model::ColorRef::rgb(deckcraft_color::Rgba::rgb(r, g, b)) };
+    let gradient = |blend| Gradient {
+        tile: [0.0; 4],
+        stops: vec![stop(0.0, (255, 0, 0)), stop(1.0, (0, 0, 255))],
+        shape: GradientShape::Linear { angle: 90.0, scaled: false },
+        rotate_with_shape: true,
+        blend,
+        flip: None,
+    };
+    for blend in [GradientBlend::Srgb, GradientBlend::PowerPoint] {
+        let mut p = defaults::new_presentation(None);
+        let id = ShapeId(p.alloc_id().expect("ids"));
+        let first = p.slides[0].id;
+        p.slide_mut(first).expect("slide").shapes.push(Shape {
+            id,
+            name: "Blended".into(),
+            xfrm: Some(Xfrm::new(10.0, 10.0, 200.0, 100.0)),
+            fill: Some(Fill::Gradient(gradient(blend))),
+            ..Default::default()
+        });
+        let bytes = deckcraft_pptx::export(&p).expect("export");
+        let mut slide = String::new();
+        zip::ZipArchive::new(Cursor::new(&bytes))
+            .expect("zip")
+            .by_name("ppt/slides/slide1.xml")
+            .expect("slide")
+            .read_to_string(&mut slide)
+            .expect("read");
+        let written = slide.split("<a:gsLst>").nth(1).and_then(|s| s.split("</a:gsLst>").next()).expect("stops");
+        assert_eq!(written.matches("<a:gs ").count(), if blend == GradientBlend::Srgb { 3 } else { 2 }, "{written}");
+        let q = deckcraft_pptx::import(&bytes).expect("import");
+        let s = q.slides[0].shapes.iter().find(|s| s.name == "Blended").expect("shape");
+        assert_eq!(s.fill, Some(Fill::Gradient(gradient(blend))));
+    }
+}
+
 #[test]
 fn a_fill_overlay_round_trips() {
     use deckcraft_model::style::{FillOverlay, Gradient, GradientShape, GradientStop};
@@ -113,6 +160,7 @@ fn a_fill_overlay_round_trips() {
     let overlay = FillOverlay {
         blend: "mult".into(),
         fill: Fill::Gradient(Gradient {
+            blend: Default::default(),
             tile: [0.0; 4],
             stops: vec![
                 GradientStop { pos: 0.0, color: deckcraft_model::ColorRef::scheme(deckcraft_color::SchemeSlot::Accent1) },
@@ -143,6 +191,7 @@ fn a_gradient_tile_rect_is_read_and_round_trips() {
     // PowerPoint's "from top-left corner" radial: focus on the corner, tile reaching a box up and
     // to the left so it centres on that corner.
     let g = Gradient {
+        blend: Default::default(),
         stops: vec![
             GradientStop { pos: 0.0, color: deckcraft_model::ColorRef::rgb(deckcraft_color::Rgba::rgb(0, 128, 255)) },
             GradientStop { pos: 1.0, color: deckcraft_model::ColorRef::rgb(deckcraft_color::Rgba::WHITE) },

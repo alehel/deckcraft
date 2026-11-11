@@ -74,6 +74,7 @@ fn a_gradient_without_stops_takes_them_from_its_style() {
     let s = &p.slides[0];
     let ctx = Ctx::for_slide(&p, s).unwrap();
     let own = style::Gradient {
+        blend: Default::default(),
         tile: [0.0; 4],
         stops: vec![],
         shape: style::GradientShape::Linear { angle: 45.0, scaled: true },

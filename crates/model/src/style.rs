@@ -117,6 +117,37 @@ pub enum GradientShape {
     Path { path: String, focus: [f64; 4] },
 }
 
+/// How a gradient mixes the colours between two stops.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GradientBlend {
+    /// PowerPoint's: a two-colour gradient mixes in linear light along an S-shaped curve; more
+    /// stops blend straight in sRGB.
+    #[default]
+    PowerPoint,
+    /// Straight in sRGB however many stops (as other apps, such as LibreOffice, draw gradients).
+    Srgb,
+}
+
+impl GradientBlend {
+    pub fn is_power_point(&self) -> bool {
+        *self == GradientBlend::PowerPoint
+    }
+}
+
+/// Whether stops at these positions make a two-colour gradient (exactly two, at 0 and 1), the one
+/// kind [`GradientBlend`] tells apart: PowerPoint draws more stops, or two elsewhere, straight.
+pub fn is_two_colour(positions: &[f64]) -> bool {
+    matches!(positions, [p, q] if *p <= 1e-6 && *q >= 1.0 - 1e-6)
+}
+
+impl Gradient {
+    /// See [`is_two_colour`].
+    pub fn is_two_colour(&self) -> bool {
+        matches!(self.stops.as_slice(), [a, b] if is_two_colour(&[a.pos, b.pos]))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Gradient {
@@ -131,6 +162,9 @@ pub struct Gradient {
     /// to centre the gradient on the corner.
     #[serde(default, skip_serializing_if = "is_zero4")]
     pub tile: [f64; 4],
+    /// How colours mix between stops; PowerPoint's unless the file says otherwise.
+    #[serde(default, skip_serializing_if = "GradientBlend::is_power_point")]
+    pub blend: GradientBlend,
 }
 
 fn is_zero4(v: &[f64; 4]) -> bool {

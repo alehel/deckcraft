@@ -4314,13 +4314,26 @@ fn a_params_doc_spells_out_each_parameter() {
     );
 }
 
+/// Regression: a gradient's blend wasn't a parameter, so editing one (the format pane re-sends the
+/// whole gradient) switched a gradient blending in sRGB to PowerPoint's blend.
+#[test]
+fn gradient_params_keep_the_blend() {
+    use deckcraft_model::style::GradientBlend;
+    let g = cmd::shape::gradient_param(&json!({"stops": [[0, "#ffffff"], [1, "#000000"]], "blend": "srgb"})).unwrap();
+    assert_eq!(g.blend, GradientBlend::Srgb);
+    let g = cmd::shape::gradient_param(&json!({"stops": [[0, "#ffffff"], [1, "#000000"]]})).unwrap();
+    assert_eq!(g.blend, GradientBlend::PowerPoint);
+    let g = cmd::shape::gradient_param(&json!({"stops": [[0, "#ffffff"], [1, "#000000"]], "blend": "powerPoint"})).unwrap();
+    assert_eq!(g.blend, GradientBlend::PowerPoint);
+}
+
 /// `shape.fill`'s params doc names each key and kind its `gradient` takes.
 #[test]
 fn shape_fill_documents_each_gradient_key_and_kind() {
     use deckcraft_model::style::GradientShape;
     let params = cmd::parse_params(find_command("shape.fill").unwrap().params).unwrap();
     let about = params.iter().find(|p| p.name == "gradient").unwrap().about;
-    assert_eq!(cmd::param_keys(about).unwrap(), ["stops", "kind", "angle", "focus", "rotateWithShape"]);
+    assert_eq!(cmd::param_keys(about).unwrap(), ["stops", "kind", "angle", "focus", "rotateWithShape", "blend"]);
     for kind in ["linear", "radial", "rectangular", "path"] {
         assert!(about.contains(kind), "{kind}: {about}");
         let g = cmd::shape::gradient_param(&json!({

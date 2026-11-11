@@ -158,7 +158,7 @@ pub fn draw_layout_with(ctx: &mut RenderContext, l: &deckcraft_text::TextLayout,
                 let scheme = deckcraft_color::ColorScheme { name: String::new(), colors: [Rgba::BLACK; 12] };
                 let stops = g.stops.iter().map(|s| (s.pos, s.color.resolve(&scheme, None))).collect();
                 let bounds = l.lines.get(li).and_then(line_bounds).unwrap_or(tr);
-                grads.push((li, paint::gradient(&g.shape, stops, bounds, run.alpha * ps.opacity)));
+                grads.push((li, paint::gradient(g, stops, bounds, run.alpha * ps.opacity)));
             }
             let fill = grads.iter().find(|(i, _)| *i == li).map(|(_, g)| (g, Affine::translate((-*x, -*y))));
             draw_glyph_with(ctx, run, *gid, at, ps.opacity, fill);
