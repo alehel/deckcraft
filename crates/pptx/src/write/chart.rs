@@ -420,8 +420,7 @@ fn axes(w: &mut W, c: &Chart, g: Group) {
             title(w, t, c);
         }
         w.empty("c:numFmt", A::new().a("formatCode", "General").a("sourceLinked", 1));
-        w.val("c:majorTickMark", "out");
-        w.val("c:minorTickMark", "none");
+        ticks(w, c.x_ticks);
         w.val("c:tickLblPos", "nextTo");
         tx_pr(w, c);
         w.val("c:crossAx", AX_VAL);
@@ -440,8 +439,7 @@ fn axes(w: &mut W, c: &Chart, g: Group) {
             title(w, t, c);
         }
         w.empty("c:numFmt", A::new().a("formatCode", "General").a("sourceLinked", 1));
-        w.val("c:majorTickMark", "none");
-        w.val("c:minorTickMark", "none");
+        ticks(w, c.x_ticks);
         w.val("c:tickLblPos", "nextTo");
         tx_pr(w, c);
         w.val("c:crossAx", AX_VAL);
@@ -481,14 +479,25 @@ fn axes(w: &mut W, c: &Chart, g: Group) {
         Some(f) => w.empty("c:numFmt", A::new().a("formatCode", f).a("sourceLinked", 0)),
         None => w.empty("c:numFmt", A::new().a("formatCode", if c.kind.percent() { "0%" } else { "General" }).a("sourceLinked", 1)),
     }
-    w.val("c:majorTickMark", "none");
-    w.val("c:minorTickMark", "none");
+    ticks(w, c.y_ticks);
     w.val("c:tickLblPos", "nextTo");
     tx_pr(w, c);
     w.val("c:crossAx", AX_CAT);
     w.val("c:crosses", "autoZero");
     w.val("c:crossBetween", if g == Group::Area || g == Group::Scatter { "midCat" } else { "between" });
     w.close("c:valAx");
+}
+
+fn ticks(w: &mut W, t: deckcraft_model::chart::AxisTicks) {
+    use deckcraft_model::chart::TickMark;
+    let v = |m: TickMark| match m {
+        TickMark::None => "none",
+        TickMark::In => "in",
+        TickMark::Out => "out",
+        TickMark::Cross => "cross",
+    };
+    w.val("c:majorTickMark", v(t.major));
+    w.val("c:minorTickMark", v(t.minor));
 }
 
 fn plot_group(w: &mut W, c: &Chart, kind: ChartType, list: &[(usize, &Series)]) {
