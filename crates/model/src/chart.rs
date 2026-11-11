@@ -4,6 +4,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::style::{ColorRef, Fill, Line};
 
+/// Where an axis draws tick marks: none, inside the plot, outside it, or across the axis.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TickMark {
+    #[default]
+    None,
+    In,
+    Out,
+    Cross,
+}
+
+/// An axis' major and minor tick marks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AxisTicks {
+    pub major: TickMark,
+    pub minor: TickMark,
+}
+
+impl AxisTicks {
+    pub fn is_none(&self) -> bool {
+        *self == AxisTicks::default()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ChartType {
@@ -359,6 +384,12 @@ pub struct Chart {
     /// The category axis runs backwards (`c:orientation val="maxMin"`): right to left, or on a
     /// horizontal bar chart top to bottom (the default puts the first category at the bottom).
     pub cat_reversed: bool,
+    /// The category (x) axis' tick marks (a scatter chart's horizontal value axis).
+    #[serde(skip_serializing_if = "AxisTicks::is_none")]
+    pub x_ticks: AxisTicks,
+    /// The primary value (y) axis' tick marks.
+    #[serde(skip_serializing_if = "AxisTicks::is_none")]
+    pub y_ticks: AxisTicks,
     /// A combo chart's secondary value axis: bounds, major unit and number format.
     pub y2_min: Option<f64>,
     pub y2_max: Option<f64>,
@@ -472,6 +503,8 @@ impl Default for Chart {
             y_format: None,
             y_hidden: false,
             cat_reversed: false,
+            x_ticks: AxisTicks::default(),
+            y_ticks: AxisTicks::default(),
             y2_min: None,
             y2_max: None,
             y2_major: None,
@@ -934,6 +967,21 @@ pub fn nice_scale(lo: f64, hi: f64) -> (f64, f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Non-default tick marks survive the native (`.deckcraft`, JSON) round trip; the default
+    /// (none) is left out, so files without ticks are unchanged.
+    #[test]
+    fn axis_ticks_survive_the_native_round_trip() {
+        let mut c = Chart::sample(ChartType::Column);
+        let plain = serde_json::to_value(&c).unwrap();
+        assert!(plain.get("xTicks").is_none() && plain.get("yTicks").is_none());
+        c.x_ticks = AxisTicks { major: TickMark::Cross, minor: TickMark::In };
+        c.y_ticks = AxisTicks { major: TickMark::Out, minor: TickMark::None };
+        let json = serde_json::to_value(&c).unwrap();
+        assert_eq!(json["xTicks"], serde_json::json!({ "major": "cross", "minor": "in" }));
+        let back: Chart = serde_json::from_value(json).unwrap();
+        assert_eq!((back.x_ticks, back.y_ticks), (c.x_ticks, c.y_ticks));
+    }
 
     #[test]
     fn tiny_data_keeps_its_own_scale() {

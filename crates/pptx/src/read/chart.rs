@@ -389,12 +389,28 @@ fn read_axes<'a>(c: &mut Chart, pa: &'a El, primary_val: &Option<String>) -> (Op
         c.y_log_base = sc.and_then(|s| s.child_val("logBase")).and_then(|v| v.parse().ok()).filter(|b: &f64| b.is_finite() && *b >= 2.0);
         c.y_format = format_code(v);
         c.y_hidden = deleted(v);
+        c.y_ticks = ticks(v);
     }
     if let Some(a) = cat_ax {
         c.cat_reversed = a.child("scaling").and_then(|s| s.child_val("orientation")).is_some_and(|o| o == "maxMin");
         c.axis_titles.0 = a.child("title").map(|t| rich_text(t).unwrap_or_else(|| "Axis Title".into()));
+        c.x_ticks = ticks(a);
     }
     (val_ax, cat_ax)
+}
+
+/// An axis' tick marks. A missing element means none; an element without `val` means `cross`,
+/// the schema's default (`CT_TickMark`).
+fn ticks(a: &El) -> deckcraft_model::chart::AxisTicks {
+    use deckcraft_model::chart::TickMark;
+    let t = |k: &str| match a.child(k).map(|e| e.attr("val")) {
+        None => TickMark::None,
+        Some(None | Some("cross")) => TickMark::Cross,
+        Some(Some("in")) => TickMark::In,
+        Some(Some("out")) => TickMark::Out,
+        Some(Some(_)) => TickMark::None,
+    };
+    deckcraft_model::chart::AxisTicks { major: t("majorTickMark"), minor: t("minorTickMark") }
 }
 
 /// Text sizes and colours as the file sets them.
@@ -589,6 +605,7 @@ fn text_size(e: Option<&El>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deckcraft_model::chart::{AxisTicks, TickMark};
 
     #[test]
     fn sparse_caches_share_one_chart_wide_budget() {
@@ -728,6 +745,92 @@ mod tests {
         assert_eq!(fmt("").as_deref(), Some("#,##0"));
         assert_eq!(fmt(r#"<c:numFmt formatCode="General" sourceLinked="1"/>"#).as_deref(), Some("#,##0"));
         assert_eq!(fmt(r#"<c:numFmt formatCode="0.0" sourceLinked="0"/>"#).as_deref(), Some("0.0"));
+    }
+
+    /// A chart space around `plot` (the children of `c:plotArea`).
+    fn chart_space(plot: &str) -> String {
+        format!(
+            r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea>{plot}</c:plotArea></c:chart></c:chartSpace>"#
+        )
+    }
+
+    /// One series with one value, as `c:val` (or `c:xVal` and `c:yVal` for a scatter chart).
+    const SER: &str = r#"<c:ser><c:idx val="0"/><c:val><c:numRef><c:numCache><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>"#;
+    const XY_SER: &str = r#"<c:ser><c:idx val="0"/><c:xVal><c:numRef><c:numCache><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:xVal><c:yVal><c:numRef><c:numCache><c:ptCount val="1"/><c:pt idx="0"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:yVal></c:ser>"#;
+
+    /// The (x, y) tick marks read from `xml`, and read again after the chart is rebuilt from the
+    /// model (`raw = None`) and written.
+    fn ticks_read_and_rewritten(xml: &str) -> ((AxisTicks, AxisTicks), (AxisTicks, AxisTicks)) {
+        let mut c = read_chart_xml(xml.as_bytes()).unwrap();
+        c.raw = None;
+        let back = read_chart_xml(&crate::write::chart::chart_xml(&c).0).unwrap();
+        ((c.x_ticks, c.y_ticks), (back.x_ticks, back.y_ticks))
+    }
+
+    fn ticks_of(major: TickMark, minor: TickMark) -> AxisTicks {
+        AxisTicks { major, minor }
+    }
+
+    /// Tick marks are read per axis, and written back from the model (a saved chart had them
+    /// fixed: none, or outside on a scatter's x axis), so they survive a rebuild from the model.
+    #[test]
+    fn axis_tick_marks_are_read_and_written() {
+        let xml = chart_space(&format!(
+            r#"<c:barChart><c:barDir val="col"/>{SER}<c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:majorTickMark val="cross"/><c:minorTickMark val="in"/></c:catAx><c:valAx><c:axId val="2"/><c:majorTickMark val="out"/></c:valAx>"#
+        ));
+        let want = (ticks_of(TickMark::Cross, TickMark::In), ticks_of(TickMark::Out, TickMark::None));
+        assert_eq!(ticks_read_and_rewritten(&xml), (want, want));
+    }
+
+    /// A horizontal bar chart's category axis is on the left and its value axis at the bottom;
+    /// the ticks still follow the axis, not its position.
+    #[test]
+    fn horizontal_bar_tick_marks_follow_their_axes() {
+        let xml = chart_space(&format!(
+            r#"<c:barChart><c:barDir val="bar"/>{SER}<c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:axPos val="l"/><c:majorTickMark val="in"/></c:catAx><c:valAx><c:axId val="2"/><c:axPos val="b"/><c:majorTickMark val="cross"/><c:minorTickMark val="out"/></c:valAx>"#
+        ));
+        let want = (ticks_of(TickMark::In, TickMark::None), ticks_of(TickMark::Cross, TickMark::Out));
+        assert_eq!(ticks_read_and_rewritten(&xml), (want, want));
+    }
+
+    /// A date axis' ticks are the x axis' (DeckCraft writes it back as a category axis).
+    #[test]
+    fn date_axis_tick_marks_are_read_and_written() {
+        let xml = chart_space(&format!(
+            r#"<c:lineChart>{SER}<c:axId val="1"/><c:axId val="2"/></c:lineChart><c:dateAx><c:axId val="1"/><c:majorTickMark val="out"/><c:minorTickMark val="in"/></c:dateAx><c:valAx><c:axId val="2"/><c:majorTickMark val="none"/></c:valAx>"#
+        ));
+        let want = (ticks_of(TickMark::Out, TickMark::In), AxisTicks::default());
+        assert_eq!(ticks_read_and_rewritten(&xml), (want, want));
+    }
+
+    /// A scatter chart's x axis is its horizontal value axis.
+    #[test]
+    fn scatter_x_axis_tick_marks_are_read_and_written() {
+        let xml = chart_space(&format!(
+            r#"<c:scatterChart>{XY_SER}<c:axId val="1"/><c:axId val="2"/></c:scatterChart><c:valAx><c:axId val="1"/><c:axPos val="b"/><c:majorTickMark val="in"/><c:minorTickMark val="cross"/></c:valAx><c:valAx><c:axId val="2"/><c:axPos val="l"/><c:majorTickMark val="out"/></c:valAx>"#
+        ));
+        let want = (ticks_of(TickMark::In, TickMark::Cross), ticks_of(TickMark::Out, TickMark::None));
+        assert_eq!(ticks_read_and_rewritten(&xml), (want, want));
+    }
+
+    /// A new scatter chart's x axis is written with the model's ticks (none), not a fixed `out`.
+    #[test]
+    fn new_scatter_chart_writes_no_tick_marks() {
+        let c = Chart::sample(ChartType::Scatter);
+        let xml = String::from_utf8(crate::write::chart::chart_xml(&c).0).unwrap();
+        assert!(!xml.contains(r#"TickMark val="out""#), "{xml}");
+        let back = read_chart_xml(xml.as_bytes()).unwrap();
+        assert_eq!((back.x_ticks, back.y_ticks), (AxisTicks::default(), AxisTicks::default()));
+    }
+
+    /// `c:majorTickMark` without `val` takes the schema's default, `cross`; a missing element is none.
+    #[test]
+    fn tick_mark_without_val_is_cross() {
+        let xml = chart_space(&format!(
+            r#"<c:barChart><c:barDir val="col"/>{SER}<c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:majorTickMark/></c:catAx><c:valAx><c:axId val="2"/><c:minorTickMark/></c:valAx>"#
+        ));
+        let want = (ticks_of(TickMark::Cross, TickMark::None), ticks_of(TickMark::None, TickMark::Cross));
+        assert_eq!(ticks_read_and_rewritten(&xml), (want, want));
     }
 
     #[test]
