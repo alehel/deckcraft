@@ -29,9 +29,12 @@ pub fn default_gradient(base: ColorRef, angle: f64) -> Gradient {
 pub fn gradient_json(g: &Gradient) -> Value {
     let stops: Vec<Value> = g.stops.iter().map(|s| json!([s.pos, cref_param(&s.color)])).collect();
     let flip = g.flip.map(GradientFlip::xml);
+    // Every field, so an edit through the command keeps what it didn't touch.
+    let mut v = json!({"stops": stops, "rotateWithShape": g.rotate_with_shape, "flip": flip, "tile": g.tile});
     match &g.shape {
         GradientShape::Linear { angle, .. } => {
-            json!({"stops": stops, "kind": "linear", "angle": angle, "rotateWithShape": g.rotate_with_shape, "flip": flip})
+            v["kind"] = json!("linear");
+            v["angle"] = json!(angle);
         }
         GradientShape::Path { path, focus } => {
             let kind = match path.as_str() {
@@ -39,9 +42,11 @@ pub fn gradient_json(g: &Gradient) -> Value {
                 "shape" => "path",
                 _ => "radial",
             };
-            json!({"stops": stops, "kind": kind, "focus": focus, "rotateWithShape": g.rotate_with_shape, "flip": flip})
+            v["kind"] = json!(kind);
+            v["focus"] = json!(focus);
         }
     }
+    v
 }
 
 fn alpha_of(c: &ColorRef) -> f64 {
@@ -528,5 +533,8 @@ mod tests {
             tile: [0.0; 4],
         };
         assert_eq!(gradient_json(&gradient).get("flip"), Some(&json!("xy")));
+        // Regression: tile was left out, so an edit reset it.
+        let corner = Gradient { tile: [-1.0, -1.0, 0.0, 0.0], ..gradient };
+        assert_eq!(gradient_json(&corner).get("tile"), Some(&json!([-1.0, -1.0, 0.0, 0.0])));
     }
 }
