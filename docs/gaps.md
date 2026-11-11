@@ -1,6 +1,6 @@
 # Where DeckCraft falls short of PowerPoint
 
-> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-11-11 · **Change:** trivial (charts: gradient and picture point fills are not drawn yet; pies follow `varyColors`; previous: trivial (run alternate language and reflection transforms survive saves; reused slide contents scale to the destination, picker thumbnails remain a gap)) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-11-11 · **Change:** trivial (charts: gradient and picture point fills are not drawn yet; pie labels stay white on light slices; unverified white outline on empty slices; pies follow `varyColors`; previous: trivial (run alternate language and reflection transforms survive saves; reused slide contents scale to the destination, picker thumbnails remain a gap)) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 Every known shortfall, one entry each, ranked by how much it stops someone who presents with
 PowerPoint from switching. This is the work list: pick from the top. Numbers are summarized in
@@ -183,6 +183,9 @@ Detail in [file-format-parity.md](file-format-parity.md).
   `Series.secondary_axis`) and is not written back when the chart is rebuilt.
   A bar's or pie slice's own gradient or picture fill (`c:dPt`) is not drawn yet: the point
   takes the colour it would have without one (solid, pattern and no-fill points are drawn).
+  Pie data labels on a filled slice are always white (unless the chart's text has a colour), so
+  they are hard to read on a white or light slice. A slice with no fill keeps its white outline
+  and so vanishes on a white slide; what PowerPoint draws there has not been checked.
   An unchanged chart's embedded workbook now survives save (#335); editing the chart still
   drops it rather than writing a stale spreadsheet. The workbook and other retained chart parts
   also survive `.deckcraft` save/reopen (`crates/engine/tests/it/chart_native.rs`), with binary
