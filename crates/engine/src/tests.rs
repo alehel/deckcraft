@@ -2185,6 +2185,95 @@ mod copy_remap {
         assert_eq!(picture_bytes(&b, &shape(&b, 0, pb)), b"deck b picture");
     }
 
+    const SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>"#;
+
+    /// A deck with one picture whose raster (`png`) keeps an SVG original beside it, as read from a
+    /// .pptx. Returns (deck, picture, raster, svg).
+    fn svg_picture_deck(png: &[u8]) -> (deckcraft_model::Presentation, ShapeId, MediaId, MediaId) {
+        let mut p = deckcraft_model::defaults::new_presentation(None);
+        let raster = p.add_media("icon.png", "image/png", png.to_vec()).expect("media");
+        let svg = p.add_media("icon.svg", "image/svg+xml", SVG.to_vec()).expect("media");
+        let id = ShapeId(p.alloc_id().expect("id"));
+        let fill = PictureFill { media: raster, vector: Some(deckcraft_model::style::PictureVector { raster, svg }), ..Default::default() };
+        Arc::make_mut(&mut p.slides[0]).shapes.push(Shape {
+            id,
+            kind: ShapeKind::Picture { fill },
+            xfrm: Some(Xfrm::new(10.0, 10.0, 50.0, 50.0)),
+            ..Default::default()
+        });
+        (p, id, raster, svg)
+    }
+
+    fn svg_bytes(doc: &deckcraft_model::Presentation, sh: &Shape) -> Option<Vec<u8>> {
+        let ShapeKind::Picture { fill } = &sh.kind else { return None };
+        doc.media(fill.vector()?).map(|m| m.data.as_ref().clone())
+    }
+
+    /// Deck b has nothing at the raster's id but another picture at the SVG's id: the pasted
+    /// picture keeps its own SVG, and b's picture stays as it was.
+    #[test]
+    fn a_pasted_picture_keeps_its_svg_original_when_its_id_is_taken() {
+        let (deck, pa, raster, svg) = svg_picture_deck(&solid_png([0, 128, 0]));
+        let mut a = Session::with_new();
+        a.doc_mut().unwrap().doc = Arc::new(deck);
+        let mut b = Session::with_new();
+        {
+            let doc = Arc::make_mut(&mut b.doc_mut().unwrap().doc);
+            assert!(doc.media(raster).is_none() && doc.media(svg).is_none());
+            doc.media.push(deckcraft_model::MediaItem {
+                id: svg,
+                name: "other.png".into(),
+                content_type: "image/png".into(),
+                data: Arc::new(b"deck b picture".to_vec()),
+                link: None,
+            });
+            doc.next_id = doc.next_id.max(svg.0);
+        }
+        select(&mut a, &[pa]);
+        a.execute("edit.copy", &json!({})).unwrap();
+        b.clipboard = a.clipboard.clone();
+        b.doc_mut().unwrap().selection.shapes.clear();
+        let r = b.execute("edit.paste", &json!({})).unwrap();
+        let new = ShapeId(r["ids"][0].as_u64().unwrap() as u32);
+        let doc = &b.doc().unwrap().doc;
+        assert_eq!(svg_bytes(doc, &shape(&b, 0, new)).as_deref(), Some(SVG));
+        assert_eq!(doc.media(svg).map(|m| m.data.as_slice() == b"deck b picture"), Some(true));
+    }
+
+    #[test]
+    fn a_reused_slide_keeps_its_pictures_svg_original() {
+        let (deck, ..) = svg_picture_deck(&solid_png([0, 128, 0]));
+        let bytes = deckcraft_format::save(&deck).expect("save");
+        let mut s = Session::with_new();
+        s.edit(|doc, _| Ok(doc.add_media("own.bin", "application/octet-stream", vec![1, 2, 3]).expect("media"))).unwrap();
+        s.execute("slide.reuse", &json!({"data": crate::cmd::base64_encode(&bytes), "name": "src.deckcraft", "slides": [0]})).unwrap();
+        let doc = &s.doc().unwrap().doc;
+        let sh = doc.slides[1].shapes.iter().find(|x| matches!(x.kind, ShapeKind::Picture { .. })).cloned().unwrap();
+        assert_eq!(svg_bytes(doc, &sh).as_deref(), Some(SVG));
+    }
+
+    #[test]
+    fn change_picture_drops_the_svg_original() {
+        let (deck, pa, ..) = svg_picture_deck(&solid_png([0, 128, 0]));
+        let mut s = Session::with_new();
+        s.doc_mut().unwrap().doc = Arc::new(deck);
+        assert_eq!(svg_bytes(&s.doc().unwrap().doc, &shape(&s, 0, pa)).as_deref(), Some(SVG));
+        let png = crate::cmd::base64_encode(&solid_png([200, 0, 0]));
+        s.execute("picture.change", &json!({"ids": [pa.0], "name": "new.png", "data": png})).unwrap();
+        let sh = shape(&s, 0, pa);
+        let ShapeKind::Picture { fill } = &sh.kind else { panic!("not a picture") };
+        assert_eq!(fill.vector, None);
+        assert_eq!(picture_bytes(&s, &sh), solid_png([200, 0, 0]));
+    }
+
+    #[test]
+    fn the_svg_original_survives_a_native_save() {
+        let (deck, pa, ..) = svg_picture_deck(&solid_png([0, 128, 0]));
+        let back = deckcraft_format::load(&deckcraft_format::save(&deck).expect("save")).expect("load");
+        let sh = back.slides[0].shapes.iter().find(|x| x.id == pa).cloned().unwrap();
+        assert_eq!(svg_bytes(&back, &sh).as_deref(), Some(SVG));
+    }
+
     /// A 4 by 4 PNG of one color.
     fn solid_png(rgb: [u8; 3]) -> Vec<u8> {
         deckcraft_render::Image { width: 4, height: 4, pixels: [rgb[0], rgb[1], rgb[2], 255].repeat(16) }.to_png()

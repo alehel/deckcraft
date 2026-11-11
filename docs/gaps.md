@@ -1,6 +1,6 @@
 # Where DeckCraft falls short of PowerPoint
 
-> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-11-03 · **Change:** trivial (run alternate language and reflection transforms survive saves; reused slide contents scale to the destination, picker thumbnails remain a gap; previous: trivial (locked No Fill and no-outline click-through regression coverage added; No Fill hit-testing follows resolved fill instead of the presence of a style (#1621); scores unchanged)) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-11-11 · **Change:** trivial (PPTX SVG pictures keep their SVG original through saves; scores unchanged; previous: trivial (run alternate language and reflection transforms survive saves; reused slide contents scale to the destination, picker thumbnails remain a gap; previous: trivial (locked No Fill and no-outline click-through regression coverage added; No Fill hit-testing follows resolved fill instead of the presence of a style (#1621); scores unchanged))) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 Every known shortfall, one entry each, ranked by how much it stops someone who presents with
 PowerPoint from switching. This is the work list: pick from the top. Numbers are summarized in
@@ -107,7 +107,14 @@ Detail in [file-format-parity.md](file-format-parity.md).
   TIFF, BMP), and EMF/WMF through `deckcraft-metafile` (ported from WordCraft: paths, fills, pens,
   pattern and hatch brushes, bitmaps and text; rectangle clip regions are applied, EMF+ only
   pictures play their EMF+ records).
-  Nothing reads SVG; PowerPoint's Insert Icons stores SVG with a PNG fallback.
+  Nothing draws SVG; PowerPoint's Insert Icons stores SVG with a PNG fallback. The `.pptx` reader
+  keeps that SVG original (`PictureFill.vector`) and writes it back while the picture is unchanged.
+  Compress Pictures moves the SVG onto the smaller raster (or drops it when cropped-away pixels are
+  cut) and prunes the full-size one. An artistic effect keeps the SVG for when the effect is reset
+  (`picture.reset` restores `artistic.original`, and the SVG applies again); Remove Background also
+  keeps it, though nothing brings it back; Change Picture drops it. In those last three cases the
+  SVG media item, like the replaced raster itself, stays in the deck and in native saves: nothing
+  prunes media that only an inapplicable SVG original refers to.
 - **Impact:** SVG icons show only their raster fallback, and SVG files can't be inserted.
 - **Estimate:** 4–8 h (an SVG renderer through `resvg`-style crates).
 
@@ -368,6 +375,7 @@ Detail in [localization-parity.md](localization-parity.md).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-11 | trivial | PPTX SVG pictures keep their SVG original (`asvg:svgBlip`) through resaves; drawing SVG is still the gap; scores unchanged |
 | 2026-11-02 | trivial | Run alternate-language metadata now survives native and PPTX saves; UI and proofing gaps remain; scores unchanged |
 | 2026-11-02 | trivial | PPTX reflection geometry is retained through native and PPTX resaves; no rendering parity claim |
 | 2026-11-02 | trivial | Reused slide geometry and content scale to the destination; picker thumbnails remain the reuse gap |

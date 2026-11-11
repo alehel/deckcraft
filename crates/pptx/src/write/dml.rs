@@ -102,6 +102,11 @@ pub fn blip_fill(w: &mut W, x: &mut Exp, o: &mut Out, tag: &str, pf: &PictureFil
     // `r:link`; `r:embed` may only reference a part inside the package.
     let linked = x.media(pf.media).is_some_and(|m| m.data.is_empty() && m.link.is_some());
     let rid = x.media_rel(o, pf.media, "image").unwrap_or_else(|| x.placeholder_rel(o));
+    // The SVG original, kept beside the raster while the picture is still that raster.
+    let svg = pf.vector().and_then(|svg| {
+        let linked = x.media(svg).is_some_and(|m| m.data.is_empty());
+        x.media_rel(o, svg, "image").map(|r| (r, linked))
+    });
     w.open(tag, A::new().a("rotWithShape", if pf.upright { "0" } else { "1" }));
     let adj = &pf.adjust;
     let has_kids = pf.alpha.is_some()
@@ -112,7 +117,8 @@ pub fn blip_fill(w: &mut W, x: &mut Exp, o: &mut Out, tag: &str, pf: &PictureFil
         || adj.clear_color.is_some()
         || adj.bilevel.is_some()
         || adj.alpha_inv
-        || pf.artistic.is_some();
+        || pf.artistic.is_some()
+        || svg.is_some();
     let a = if linked { A::new().a("r:link", &rid) } else { A::new().a("r:embed", &rid) };
     if has_kids {
         w.open("a:blip", a);
@@ -149,12 +155,16 @@ pub fn blip_fill(w: &mut W, x: &mut Exp, o: &mut Out, tag: &str, pf: &PictureFil
         }
         // Artistic effect: the blip is the processed picture; the original rides in an
         // `a14:imgLayer` with the effect's name, as PowerPoint writes it.
-        if let Some(art) = &pf.artistic
-            && art.effect.starts_with("artistic")
-            && art.effect.chars().all(|c| c.is_ascii_alphanumeric())
-            && let Some(orig) = x.media_rel(o, art.original, "image")
-        {
+        let artistic = pf
+            .artistic
+            .as_ref()
+            .filter(|art| art.effect.starts_with("artistic") && art.effect.chars().all(|c| c.is_ascii_alphanumeric()))
+            .and_then(|art| Some((art, x.media_rel(o, art.original, "image")?)));
+        if artistic.is_some() || svg.is_some() {
             w.open0("a:extLst");
+        }
+        let has_artistic = artistic.is_some();
+        if let Some((art, orig)) = artistic {
             w.open("a:ext", A::new().a("uri", "{BEBA8EAE-BF5A-486C-A8C5-ECC9F3942E4B}"));
             w.open("a14:imgProps", A::new().a("xmlns:a14", crate::opc::NS_A14));
             w.open("a14:imgLayer", A::new().a("r:embed", &orig));
@@ -164,6 +174,14 @@ pub fn blip_fill(w: &mut W, x: &mut Exp, o: &mut Out, tag: &str, pf: &PictureFil
             w.close("a14:imgLayer");
             w.close("a14:imgProps");
             w.close("a:ext");
+        }
+        if let Some((rel, linked)) = &svg {
+            w.open("a:ext", A::new().a("uri", crate::opc::EXT_SVG_BLIP));
+            let a = A::new().a("xmlns:asvg", crate::opc::NS_ASVG);
+            w.empty("asvg:svgBlip", if *linked { a.a("r:link", rel) } else { a.a("r:embed", rel) });
+            w.close("a:ext");
+        }
+        if has_artistic || svg.is_some() {
             w.close("a:extLst");
         }
         w.close("a:blip");
