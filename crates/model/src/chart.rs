@@ -15,23 +15,6 @@ pub enum TickMark {
     Cross,
 }
 
-impl TickMark {
-    /// The tick mark drawn inside the plot (`inner`), outside it (`outer`), both or neither.
-    pub fn from_sides(inner: bool, outer: bool) -> TickMark {
-        match (inner, outer) {
-            (true, true) => TickMark::Cross,
-            (true, false) => TickMark::In,
-            (false, true) => TickMark::Out,
-            (false, false) => TickMark::None,
-        }
-    }
-
-    /// Whether it is drawn (inside the plot, outside it).
-    pub fn sides(self) -> (bool, bool) {
-        (matches!(self, TickMark::In | TickMark::Cross), matches!(self, TickMark::Out | TickMark::Cross))
-    }
-}
-
 /// An axis' major and minor tick marks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -983,6 +966,21 @@ pub fn nice_scale(lo: f64, hi: f64) -> (f64, f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Non-default tick marks survive the native (`.deckcraft`, JSON) round trip; the default
+    /// (none) is left out, so files without ticks are unchanged.
+    #[test]
+    fn axis_ticks_survive_the_native_round_trip() {
+        let mut c = Chart::sample(ChartType::Column);
+        let plain = serde_json::to_value(&c).unwrap();
+        assert!(plain.get("xTicks").is_none() && plain.get("yTicks").is_none());
+        c.x_ticks = AxisTicks { major: TickMark::Cross, minor: TickMark::In };
+        c.y_ticks = AxisTicks { major: TickMark::Out, minor: TickMark::None };
+        let json = serde_json::to_value(&c).unwrap();
+        assert_eq!(json["xTicks"], serde_json::json!({ "major": "cross", "minor": "in" }));
+        let back: Chart = serde_json::from_value(json).unwrap();
+        assert_eq!((back.x_ticks, back.y_ticks), (c.x_ticks, c.y_ticks));
+    }
 
     #[test]
     fn tiny_data_keeps_its_own_scale() {
