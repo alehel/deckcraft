@@ -158,6 +158,19 @@ pub fn blip_fill(imp: &mut Imp, part: &Part, bf: &El) -> Option<PictureFill> {
     {
         pf.artistic = Some(deckcraft_model::style::Artistic { effect, original });
     }
+    // PowerPoint's SVG picture: the blip is the raster fallback, the SVG rides in an
+    // `asvg:svgBlip` extension.
+    if let Some(svg) = blip
+        .and_then(|b| b.child("extLst"))
+        .into_iter()
+        .flat_map(|x| x.elements())
+        .filter(|e| e.local() == "ext" && e.attr("uri") == Some(crate::opc::EXT_SVG_BLIP))
+        .find_map(|e| e.child("svgBlip"))
+        .and_then(|sb| media_ref(imp, part, sb))
+        .filter(|svg| *svg != media)
+    {
+        pf.vector = Some(deckcraft_model::style::PictureVector { raster: media, svg });
+    }
     if let Some(b) = blip {
         for e in b.elements() {
             match e.local() {
