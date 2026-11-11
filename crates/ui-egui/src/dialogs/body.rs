@@ -20,6 +20,7 @@ use super::theme_fonts::theme_fonts_dialog;
 use super::trim::{seconds_text_to_ms, trim_seed};
 use super::zoom::zoom_dialog;
 use super::{Dialog, SlideApp, Tokens, Ui, Value, buttons, check, field, field_of, json, num, theme, vec2};
+use deckcraft_model::ShowSettings;
 
 /// Returns true when the dialog should close.
 pub(super) fn body(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
@@ -247,9 +248,9 @@ fn dlg_setup_show(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     let ty = d.get("type", &sh.show_type);
     ui.label("Show type");
     for (l, v) in [
-        ("Presented by a speaker (full screen)", "speaker"),
-        ("Browsed by an individual (window)", "browsed"),
-        ("Browsed at a kiosk (full screen)", "kiosk"),
+        ("Presented by a speaker (full screen)", ShowSettings::SPEAKER),
+        ("Browsed by an individual (window)", ShowSettings::BROWSED),
+        ("Browsed at a kiosk (full screen)", ShowSettings::KIOSK),
     ] {
         if ui.radio(ty == v, l).clicked() {
             d.fields.insert("type".into(), v.into());
@@ -277,7 +278,7 @@ fn dlg_setup_show(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     let _ = combo.response.labelled_by(field.id);
     let (ok, cancel) = buttons(ui, "OK");
     if ok {
-        let ty = d.get("type", "speaker");
+        let ty = d.get("type", ShowSettings::SPEAKER);
         let custom = d.fields.get("custom").cloned().unwrap_or_default();
         run(app, "show.setup", json!({"type": ty, "loop": lp, "noNarration": nn, "noAnimation": na, "useTimings": ut, "custom": custom}));
         run(app, "show.keepCursor", json!({"on": kc}));

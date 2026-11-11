@@ -117,7 +117,7 @@ fn custom_indices(pres: &Presentation, name: &str) -> Option<Vec<usize>> {
 }
 
 fn looping(pres: &Presentation) -> bool {
-    pres.show.loop_until_esc || pres.show.show_type == "kiosk"
+    pres.show.loop_until_esc || pres.show.show_type == deckcraft_model::ShowSettings::KIOSK
 }
 
 impl ShowState {

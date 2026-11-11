@@ -585,7 +585,7 @@ fn setup(s: &mut Session, p: &Value) -> Result<Value> {
         let sh = &mut doc.show;
         if let Some(t) = str_param(p, "type") {
             sh.show_type = t.to_string();
-            if t == "kiosk" {
+            if t == deckcraft_model::ShowSettings::KIOSK {
                 sh.loop_until_esc = true;
             }
         }

@@ -855,7 +855,7 @@ pub struct CustomShow {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ShowSettings {
-    /// `speaker`, `browsed`, `kiosk`.
+    /// [`ShowSettings::SPEAKER`], [`ShowSettings::BROWSED`] or [`ShowSettings::KIOSK`].
     pub show_type: String,
     pub loop_until_esc: bool,
     pub without_narration: bool,
@@ -869,10 +869,19 @@ pub struct ShowSettings {
     pub show_media_controls: bool,
 }
 
+impl ShowSettings {
+    /// Presented by a speaker, full screen.
+    pub const SPEAKER: &'static str = "speaker";
+    /// Browsed by an individual, in a window.
+    pub const BROWSED: &'static str = "browsed";
+    /// Browsed at a kiosk, full screen.
+    pub const KIOSK: &'static str = "kiosk";
+}
+
 impl Default for ShowSettings {
     fn default() -> Self {
         ShowSettings {
-            show_type: "speaker".into(),
+            show_type: Self::SPEAKER.into(),
             loop_until_esc: false,
             without_narration: false,
             without_animation: false,
