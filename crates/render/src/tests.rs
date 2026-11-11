@@ -3085,23 +3085,26 @@ fn a_shape_whose_outline_is_not_finite_is_not_drawable() {
     assert!(!crate::geometry::drawable(&quad, m, 100.0, 50.0));
 }
 
-/// A pie that doesn't vary its colours draws every slice in its series' colour (PowerPoint's
+/// A pie (or doughnut) that doesn't vary its colours draws every slice in its series' colour (PowerPoint's
 /// `varyColors=0`, LibreOffice's single-colour pies), its own slices in theirs; it drew a colour
 /// per slice whatever the chart said.
 #[test]
 fn a_pie_not_varying_its_colours_is_one_colour() {
-    let draw = |vary: bool| {
-        let mut c = Chart::sample(ChartType::Pie);
-        (c.title, c.legend, c.vary_colors) = (None, None, vary);
-        c.series[0].fill = Some(Fill::solid(ColorRef::rgb(deckcraft_color::Rgba::rgb(0, 160, 0))));
-        let sh = Shape { id: ShapeId(633), xfrm: Some(Xfrm::new(0.0, 0.0, 400.0, 400.0)), kind: ShapeKind::Chart(Box::new(c)), ..Default::default() };
-        render_slide(&deck_with(vec![sh]), 0, &RenderOpts { scale: 1.0, ..Default::default() })
-    };
-    let green = |p: [u8; 4]| p[1] > 140 && p[0] < 40 && p[2] < 40;
-    let share = |img: &Image| (0..400u32).flat_map(|x| (0..400u32).map(move |y| (x, y))).filter(|(x, y)| green(img.pixel(*x, *y))).count();
-    let (single, varied) = (share(&draw(false)), share(&draw(true)));
-    assert!(single > 60_000, "every slice green: {single} green pixels");
-    assert!(varied < single / 2, "a varied pie takes a colour per slice: {varied} green pixels");
+    for kind in [ChartType::Pie, ChartType::Doughnut] {
+        let draw = |vary: bool| {
+            let mut c = Chart::sample(kind);
+            (c.title, c.legend, c.vary_colors) = (None, None, vary);
+            c.series[0].fill = Some(Fill::solid(ColorRef::rgb(deckcraft_color::Rgba::rgb(0, 160, 0))));
+            let sh =
+                Shape { id: ShapeId(633), xfrm: Some(Xfrm::new(0.0, 0.0, 400.0, 400.0)), kind: ShapeKind::Chart(Box::new(c)), ..Default::default() };
+            render_slide(&deck_with(vec![sh]), 0, &RenderOpts { scale: 1.0, ..Default::default() })
+        };
+        let green = |p: [u8; 4]| p[1] > 140 && p[0] < 40 && p[2] < 40;
+        let share = |img: &Image| (0..400u32).flat_map(|x| (0..400u32).map(move |y| (x, y))).filter(|(x, y)| green(img.pixel(*x, *y))).count();
+        let (single, varied) = (share(&draw(false)), share(&draw(true)));
+        assert!(single > 40_000, "{kind:?}: every slice green: {single} green pixels");
+        assert!(varied < single / 2, "{kind:?}: a varied pie takes a colour per slice: {varied} green pixels");
+    }
 }
 
 /// A slice's own fill draws as a bar's does: one with no fill leaves the slice empty (it took a
@@ -3123,4 +3126,64 @@ fn a_pie_slice_without_fill_is_empty() {
     let count = |img: &Image| (0..400u32).flat_map(|x| (0..400u32).map(move |y| (x, y))).filter(|(x, y)| white(img.pixel(*x, *y))).count();
     let (filled, empty) = (count(&draw(false)), count(&draw(true)));
     assert!(empty > filled + 40_000, "the first half is left white: {filled} → {empty} white pixels");
+}
+
+/// A two-slice pie (no title or legend) whose first slice, the right half, has fill `f`, with
+/// data labels when `labels`.
+fn half_pie(id: u32, f: Option<Fill>, labels: bool) -> Image {
+    let mut c = Chart::sample(ChartType::Pie);
+    (c.title, c.legend, c.data_labels) = (None, None, labels);
+    c.series[0].values = vec![Some(1.0), Some(1.0)];
+    c.categories.truncate(2);
+    c.series[0].point_fills = f.into_iter().map(|f| (0, f)).collect();
+    let sh = Shape { id: ShapeId(id), xfrm: Some(Xfrm::new(0.0, 0.0, 400.0, 400.0)), kind: ShapeKind::Chart(Box::new(c)), ..Default::default() };
+    render_slide(&deck_with(vec![sh]), 0, &RenderOpts { scale: 1.0, ..Default::default() })
+}
+
+/// Slices with gradient fills (which a slice can't draw yet) keep their colour per slice; they
+/// all took the series' one colour.
+#[test]
+fn gradient_slices_keep_a_colour_per_slice() {
+    use deckcraft_model::style::{Gradient, GradientShape, GradientStop};
+    let grad = |r, g, b| {
+        Fill::Gradient(Gradient {
+            tile: [0.0; 4],
+            stops: vec![GradientStop { pos: 0.0, color: ColorRef::rgb(deckcraft_color::Rgba::rgb(r, g, b)) }],
+            shape: GradientShape::Linear { angle: 0.0, scaled: false },
+            rotate_with_shape: true,
+            flip: None,
+        })
+    };
+    let draw = |fills: bool| {
+        let mut c = Chart::sample(ChartType::Pie);
+        (c.title, c.legend) = (None, None);
+        if fills {
+            c.series[0].point_fills = (0..c.categories.len()).map(|i| (i, grad(10 * i as u8, 0, 0))).collect();
+        }
+        let sh = Shape { id: ShapeId(635), xfrm: Some(Xfrm::new(0.0, 0.0, 400.0, 400.0)), kind: ShapeKind::Chart(Box::new(c)), ..Default::default() };
+        render_slide(&deck_with(vec![sh]), 0, &RenderOpts { scale: 1.0, ..Default::default() })
+    };
+    assert!(draw(true).pixels == draw(false).pixels, "gradient slices draw as slices without a fill of their own");
+}
+
+/// A slice with a pattern fill draws the pattern (red and blue, blended at this scale), as a bar
+/// does; only solid slice fills showed.
+#[test]
+fn a_pie_slice_draws_its_pattern() {
+    use deckcraft_model::style::PatternFill;
+    let rgb = |r, g, b| ColorRef::rgb(deckcraft_color::Rgba::rgb(r, g, b));
+    let img = half_pie(636, Some(Fill::Pattern(PatternFill { preset: "pct50".into(), fg: rgb(255, 0, 0), bg: rgb(0, 0, 255) })), false);
+    let count =
+        |want: fn([u8; 4]) -> bool| (220..380u32).flat_map(|x| (120..280u32).map(move |y| (x, y))).filter(|(x, y)| want(img.pixel(*x, *y))).count();
+    let (red, blue) = (count(|p| p[1] < 40 && p[0] > p[2] + 60), count(|p| p[1] < 40 && p[2] > p[0] + 60));
+    assert!(red > 2_000 && blue > 2_000, "the slice is red and blue: {red} red, {blue} blue pixels");
+}
+
+/// A data label on an empty slice is drawn in the chart's text colour, not white on the white
+/// slide.
+#[test]
+fn a_label_on_an_empty_slice_shows() {
+    let dark = |img: &Image| dark_in(img, 200, 400, 0, 400);
+    let (labelled, bare) = (dark(&half_pie(637, Some(Fill::None), true)), dark(&half_pie(638, Some(Fill::None), false)));
+    assert!(labelled > bare + 10, "the label shows on the empty slice: {bare} → {labelled} dark pixels");
 }
