@@ -149,6 +149,23 @@ fn an_srgb_two_colour_gradient_round_trips() {
         let s = q.slides[0].shapes.iter().find(|s| s.name == "Blended").expect("shape");
         assert_eq!(s.fill, Some(Fill::Gradient(gradient(blend))));
     }
+    // Regression: stops out of order were not seen as two-colour, so they were written as two
+    // stops, which PowerPoint draws on its curve.
+    let mut p = defaults::new_presentation(None);
+    let id = ShapeId(p.alloc_id().expect("ids"));
+    let first = p.slides[0].id;
+    let mut unsorted = gradient(GradientBlend::Srgb);
+    unsorted.stops.reverse();
+    p.slide_mut(first).expect("slide").shapes.push(Shape {
+        id,
+        name: "Blended".into(),
+        xfrm: Some(Xfrm::new(10.0, 10.0, 200.0, 100.0)),
+        fill: Some(Fill::Gradient(unsorted)),
+        ..Default::default()
+    });
+    let q = deckcraft_pptx::import(&deckcraft_pptx::export(&p).expect("export")).expect("import");
+    let s = q.slides[0].shapes.iter().find(|s| s.name == "Blended").expect("shape");
+    assert_eq!(s.fill, Some(Fill::Gradient(gradient(GradientBlend::Srgb))));
 }
 
 #[test]

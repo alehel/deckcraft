@@ -89,11 +89,40 @@ fn a_gradient_without_stops_takes_them_from_its_style() {
     let Some(Fill::Gradient(theme)) = p.masters[0].theme.format.fills.get(2).cloned() else { panic!("theme fill 3 is a gradient") };
     assert_eq!(g.stops, theme.stops);
     assert_eq!(g.shape, own.shape, "the shape's own direction");
+    assert_eq!(g.blend, theme.blend);
+    // Regression: the stops came without the style gradient's blend, so one blending in sRGB was
+    // drawn on PowerPoint's curve.
+    let mut q = Presentation::default();
+    let theme_fill = std::sync::Arc::make_mut(&mut q.masters[0]).theme.format.fills.get_mut(2);
+    let Some(Fill::Gradient(tg)) = theme_fill else { panic!("theme fill 3 is a gradient") };
+    tg.blend = style::GradientBlend::Srgb;
+    let qs = &q.slides[0];
+    let qctx = Ctx::for_slide(&q, qs).unwrap();
+    let sh = Shape { style: Some(st.clone()), fill: Some(Fill::Gradient(own.clone())), ..Default::default() };
+    let Some(Fill::Gradient(g)) = resolve::fill(&qctx, &sh).0 else { panic!("expected a gradient") };
+    assert_eq!(g.blend, style::GradientBlend::Srgb);
     assert_eq!(ph, Some(p.masters[0].theme.colors.get(SchemeSlot::Accent2)));
     // A solid style fill has no stops to give: the gradient stays empty (draws nothing).
     st.fill_ref.0 = 1;
     let sh = Shape { style: Some(st), fill: Some(Fill::Gradient(own.clone())), ..Default::default() };
     assert_eq!(resolve::fill(&ctx, &sh).0, Some(Fill::Gradient(own)));
+}
+
+#[test]
+fn a_two_colour_gradient_is_two_colour_in_either_order() {
+    let stop = |pos| style::GradientStop { pos, color: ColorRef::scheme(SchemeSlot::Accent1) };
+    let g = |stops| style::Gradient {
+        blend: Default::default(),
+        tile: [0.0; 4],
+        stops,
+        shape: style::GradientShape::Linear { angle: 0.0, scaled: false },
+        rotate_with_shape: true,
+        flip: None,
+    };
+    assert!(g(vec![stop(0.0), stop(1.0)]).is_two_colour());
+    assert!(g(vec![stop(1.0), stop(0.0)]).is_two_colour());
+    assert!(!g(vec![stop(0.2), stop(1.0)]).is_two_colour());
+    assert!(!g(vec![stop(0.0), stop(0.5), stop(1.0)]).is_two_colour());
 }
 
 #[test]

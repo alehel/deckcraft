@@ -156,13 +156,15 @@ pub fn fill(ctx: &Ctx, shape: &Shape) -> (Option<Fill>, Option<Rgba>) {
     for s in [Some(shape), lp, mp].into_iter().flatten() {
         if let Some(f) = &s.fill {
             // A gradient without stops (`a:gradFill` with no `a:gsLst`) takes them from the
-            // gradient its style refers to, keeping its own direction, as PowerPoint draws it.
+            // gradient its style refers to, and how it blends them, keeping its own direction, as
+            // PowerPoint draws it.
             if let Fill::Gradient(g) = f
                 && g.stops.is_empty()
                 && let Some((Some(Fill::Gradient(sg)), ph)) = style_fill(s)
             {
                 let mut g = g.clone();
                 g.stops = sg.stops;
+                g.blend = sg.blend;
                 return (Some(Fill::Gradient(g)), ph);
             }
             return (Some(f.clone()), None);

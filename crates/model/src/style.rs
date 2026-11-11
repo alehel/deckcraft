@@ -142,9 +142,9 @@ pub fn is_two_colour(positions: &[f64]) -> bool {
 }
 
 impl Gradient {
-    /// See [`is_two_colour`].
+    /// See [`is_two_colour`]; the stops in either order.
     pub fn is_two_colour(&self) -> bool {
-        matches!(self.stops.as_slice(), [a, b] if is_two_colour(&[a.pos, b.pos]))
+        matches!(self.stops.as_slice(), [a, b] if is_two_colour(&[a.pos.min(b.pos), a.pos.max(b.pos)]))
     }
 }
 
@@ -162,7 +162,8 @@ pub struct Gradient {
     /// to centre the gradient on the corner.
     #[serde(default, skip_serializing_if = "is_zero4")]
     pub tile: [f64; 4],
-    /// How colours mix between stops; PowerPoint's unless the file says otherwise.
+    /// How colours mix between stops; PowerPoint's unless the file says otherwise (and in a
+    /// command's `blend` param, any value but `srgb`).
     #[serde(default, skip_serializing_if = "GradientBlend::is_power_point")]
     pub blend: GradientBlend,
 }

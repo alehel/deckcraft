@@ -4323,8 +4323,10 @@ fn gradient_params_keep_the_blend() {
     assert_eq!(g.blend, GradientBlend::Srgb);
     let g = cmd::shape::gradient_param(&json!({"stops": [[0, "#ffffff"], [1, "#000000"]]})).unwrap();
     assert_eq!(g.blend, GradientBlend::PowerPoint);
-    let g = cmd::shape::gradient_param(&json!({"stops": [[0, "#ffffff"], [1, "#000000"]], "blend": "powerPoint"})).unwrap();
-    assert_eq!(g.blend, GradientBlend::PowerPoint);
+    for other in [json!("powerPoint"), json!("SRGB"), json!("linear"), json!(1)] {
+        let g = cmd::shape::gradient_param(&json!({"stops": [[0, "#ffffff"], [1, "#000000"]], "blend": other})).unwrap();
+        assert_eq!(g.blend, GradientBlend::PowerPoint, "{other}");
+    }
 }
 
 /// `shape.fill`'s params doc names each key and kind its `gradient` takes.
