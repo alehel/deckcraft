@@ -659,6 +659,31 @@ mod tests {
         assert_eq!(bytes(back.media), b"open background");
     }
 
+    /// The accepted picture keeps its own SVG original when both decks use the same ids.
+    #[test]
+    fn an_accepted_picture_keeps_its_svg_original() {
+        use std::sync::Arc;
+
+        use deckcraft_model::style::{PictureFill, PictureVector};
+        use deckcraft_model::{Shape, ShapeKind};
+
+        let deck = |tag: &str| {
+            let mut p = deckcraft_model::defaults::new_presentation(None);
+            let raster = p.add_media("icon.png", "image/png", format!("{tag} png").into_bytes()).unwrap();
+            let svg = p.add_media("icon.svg", "image/svg+xml", format!("{tag} svg").into_bytes()).unwrap();
+            let fill = PictureFill { media: raster, vector: Some(PictureVector { raster, svg }), ..Default::default() };
+            Arc::make_mut(&mut p.slides[0]).shapes.push(Shape { kind: ShapeKind::Picture { fill }, ..Default::default() });
+            p
+        };
+        let mut doc = deck("open");
+        let rev = deck("revised");
+        let sl = super::adopt(&mut doc, &rev, &rev.slides[0], None).unwrap();
+        let fill = sl.shapes.iter().find_map(|x| if let ShapeKind::Picture { fill } = &x.kind { Some(fill) } else { None }).unwrap();
+        let bytes = |id| doc.media(id).unwrap().data.as_ref().clone();
+        assert_eq!(bytes(fill.media), b"revised png");
+        assert_eq!(fill.vector().map(bytes).as_deref(), Some(&b"revised svg"[..]));
+    }
+
     /// NN6: a slide reset drops the placeholders' stored boxes; comparing it with the copy from
     /// before the reset must not call that a rotation (no stored box is rotation 0).
     #[test]

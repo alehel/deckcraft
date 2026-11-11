@@ -109,9 +109,11 @@ Detail in [file-format-parity.md](file-format-parity.md).
   pictures play their EMF+ records).
   Nothing draws SVG; PowerPoint's Insert Icons stores SVG with a PNG fallback. The `.pptx` reader
   keeps that SVG original (`PictureFill.vector`) and writes it back while the picture is unchanged.
-  A picture whose raster is later replaced by compression, Remove Background or an artistic effect
-  keeps its now inapplicable SVG (removing the effect brings it back); Change Picture drops it. Either
-  way the SVG media item stays in the deck and in native saves, as a replaced raster does: nothing
+  Compress Pictures moves the SVG onto the smaller raster (or drops it when cropped-away pixels are
+  cut) and prunes the full-size one. An artistic effect keeps the SVG for when the effect is reset
+  (`picture.reset` restores `artistic.original`, and the SVG applies again); Remove Background also
+  keeps it, though nothing brings it back; Change Picture drops it. In those last three cases the
+  SVG media item, like the replaced raster itself, stays in the deck and in native saves: nothing
   prunes media that only an inapplicable SVG original refers to.
 - **Impact:** SVG icons show only their raster fallback, and SVG files can't be inserted.
 - **Estimate:** 4–8 h (an SVG renderer through `resvg`-style crates).

@@ -202,6 +202,17 @@ fn compress(s: &mut Session, p: &Value) -> Result<Value> {
                 };
                 if let Some((id, new_crop, _)) = hit {
                     changed.push(media);
+                    // The smaller raster is still the SVG original's fallback while it shows the
+                    // same region; once cropped-away pixels are cut, the SVG no longer matches it.
+                    if let Some(v) = &mut fill.vector
+                        && v.raster == media
+                    {
+                        if new_crop == crop {
+                            v.raster = id;
+                        } else {
+                            fill.vector = None;
+                        }
+                    }
                     fill.media = id;
                     fill.crop = new_crop;
                     count += 1;
@@ -244,6 +255,60 @@ mod tests {
         assert!(pack(&png(100, 50), [0.0; 4], 72.0, 36.0, 150.0, true).is_none());
         // Not a raster we re-encode.
         assert!(pack(b"<svg xmlns='http://www.w3.org/2000/svg'/>", [0.0; 4], 72.0, 72.0, 150.0, true).is_none());
+    }
+
+    /// A 2000×1000 PNG with an SVG original, shown 1 inch wide, compressed at 96 ppi. Returns
+    /// (session, original raster bytes, svg id).
+    fn compress_svg_picture(crop: [f64; 4]) -> (Session, Vec<u8>, MediaId) {
+        let mut s = Session::with_new();
+        let original = png(2000, 1000);
+        let svg = s
+            .edit(|doc, _| {
+                let raster = doc.add_media("icon.png", "image/png", original.clone()).ok_or_else(|| bad("test", "media"))?;
+                let svg = doc
+                    .add_media("icon.svg", "image/svg+xml", b"<svg xmlns='http://www.w3.org/2000/svg'/>".to_vec())
+                    .ok_or_else(|| bad("test", "media"))?;
+                let fill =
+                    PictureFill { media: raster, crop, vector: Some(deckcraft_model::style::PictureVector { raster, svg }), ..Default::default() };
+                let slide = doc.slides.first_mut().ok_or_else(|| bad("test", "slide"))?;
+                Arc::make_mut(slide).shapes.push(Shape {
+                    id: ShapeId(70_201),
+                    xfrm: Some(deckcraft_geom::Xfrm::new(0.0, 0.0, 72.0, 36.0)),
+                    kind: ShapeKind::Picture { fill },
+                    ..Default::default()
+                });
+                Ok(svg)
+            })
+            .unwrap();
+        let r = s.execute("picture.compress", &json!({"all": true, "ppi": 96})).unwrap();
+        assert_eq!(r["pictures"], 1, "{r}");
+        (s, original, svg)
+    }
+
+    fn compressed_fill(s: &Session) -> PictureFill {
+        let doc = &s.doc().unwrap().doc;
+        let sh = doc.slides[0].shapes.iter().find(|x| x.id == ShapeId(70_201)).unwrap();
+        let ShapeKind::Picture { fill } = &sh.kind else { panic!("not a picture") };
+        fill.clone()
+    }
+
+    #[test]
+    fn compressing_keeps_the_svg_original_and_drops_the_full_size_raster() {
+        let (s, original, svg) = compress_svg_picture([0.0; 4]);
+        let fill = compressed_fill(&s);
+        assert_eq!(fill.vector(), Some(svg), "the smaller raster is still the SVG's fallback");
+        let doc = &s.doc().unwrap().doc;
+        assert!(!doc.media.iter().any(|m| m.data.as_slice() == original.as_slice()), "the full-size raster is pruned");
+        assert!(doc.media(svg).is_some());
+    }
+
+    #[test]
+    fn compressing_away_cropped_pixels_drops_the_svg_original() {
+        let (s, original, _) = compress_svg_picture([0.25, 0.0, 0.25, 0.0]);
+        let fill = compressed_fill(&s);
+        assert_eq!(fill.vector, None, "the SVG no longer matches the cut raster");
+        let doc = &s.doc().unwrap().doc;
+        assert!(!doc.media.iter().any(|m| m.data.as_slice() == original.as_slice()), "the full-size raster is pruned");
     }
 
     #[test]
