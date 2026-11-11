@@ -49,6 +49,12 @@ pub fn gradient_json(g: &Gradient) -> Value {
     v
 }
 
+/// `g` with a new kind or direction. It's laid out in the shape's box again: a tile sized for the
+/// old one (a corner preset's, say) would stretch or offset the new ramp.
+fn reshaped(g: &Gradient, shape: GradientShape) -> Gradient {
+    Gradient { shape, tile: [0.0; 4], ..g.clone() }
+}
+
 fn alpha_of(c: &ColorRef) -> f64 {
     c.mods.iter().find_map(|m| if let ColorTransform::Alpha(a) = m { Some(*a as f64 / 100_000.0) } else { None }).unwrap_or(1.0)
 }
@@ -192,7 +198,7 @@ pub fn gradient_editor(ui: &mut Ui, id: &str, g: &Gradient, sc: &ColorScheme) ->
                         "Path" => GradientShape::Path { path: "shape".into(), focus },
                         _ => GradientShape::Path { path: "circle".into(), focus },
                     };
-                    out = Some(Gradient { shape, ..g.clone() });
+                    out = Some(reshaped(g, shape));
                 }
             }
         });
@@ -205,7 +211,7 @@ pub fn gradient_editor(ui: &mut Ui, id: &str, g: &Gradient, sc: &ColorScheme) ->
                 for (l, a) in DIRECTIONS_LINEAR {
                     let on = (angle - a).abs() < 0.5;
                     if ui.selectable_label(on, l).on_hover_text(format!("{a}°")).clicked() {
-                        out = Some(Gradient { shape: GradientShape::Linear { angle: a, scaled: false }, ..g.clone() });
+                        out = Some(reshaped(g, GradientShape::Linear { angle: a, scaled: false }));
                     }
                 }
             }
@@ -213,7 +219,7 @@ pub fn gradient_editor(ui: &mut Ui, id: &str, g: &Gradient, sc: &ColorScheme) ->
                 for (l, f) in DIRECTIONS_PATH {
                     let on = focus.iter().zip(f).all(|(a, b)| (a - b).abs() < 1e-3);
                     if ui.selectable_label(on, l.trim_start_matches("From ")).on_hover_text(l).clicked() {
-                        out = Some(Gradient { shape: GradientShape::Path { path: path.clone(), focus: f }, ..g.clone() });
+                        out = Some(reshaped(g, GradientShape::Path { path: path.clone(), focus: f }));
                     }
                 }
             }
@@ -536,5 +542,51 @@ mod tests {
         // Regression: tile was left out, so an edit reset it.
         let corner = Gradient { tile: [-1.0, -1.0, 0.0, 0.0], ..gradient };
         assert_eq!(gradient_json(&corner).get("tile"), Some(&json!([-1.0, -1.0, 0.0, 0.0])));
+    }
+
+    /// A new kind or direction drops a tile sized for the old one: a radial "from the corner"
+    /// switched to linear or "from center" would otherwise ramp across a box twice the shape's size.
+    #[test]
+    fn a_new_kind_or_direction_drops_the_tile() {
+        let corner = Gradient {
+            stops: vec![],
+            shape: GradientShape::Path { path: "circle".into(), focus: [0.0, 0.0, 1.0, 1.0] },
+            flip: None,
+            rotate_with_shape: true,
+            tile: [-1.0, -1.0, 0.0, 0.0],
+        };
+        let linear = reshaped(&corner, GradientShape::Linear { angle: 90.0, scaled: false });
+        assert_eq!(linear.tile, [0.0; 4]);
+        let center = reshaped(&corner, GradientShape::Path { path: "circle".into(), focus: [0.5; 4] });
+        assert_eq!((center.tile, center.shape), ([0.0; 4], GradientShape::Path { path: "circle".into(), focus: [0.5; 4] }));
+    }
+
+    /// End to end: an edit the pane sends through `shape.fill` keeps the tile it didn't touch, and
+    /// undo and redo restore each version.
+    #[test]
+    fn a_pane_edit_through_shape_fill_keeps_the_tile() {
+        use deckcraft_engine::Session;
+        use deckcraft_model::Fill;
+        let mut s = Session::with_new();
+        s.execute("slide.new", &json!({"layout": "blank"})).unwrap();
+        s.execute("shape.insert", &json!({"preset": "rect", "rect": [40.0, 40.0, 200.0, 120.0]})).unwrap();
+        let corner = json!({"stops": [[0, "#ffffff"], [1, "#000000"]], "kind": "radial", "focus": [0, 0, 1, 1], "tile": [-1, -1, 0, 0]});
+        s.execute("shape.fill", &json!({"gradient": corner})).unwrap();
+        let fill = |s: &Session| match &s.doc().unwrap().selected_shapes()[0].fill {
+            Some(Fill::Gradient(g)) => g.clone(),
+            f => panic!("not a gradient: {f:?}"),
+        };
+        let before = fill(&s);
+        assert_eq!(before.tile, [-1.0, -1.0, 0.0, 0.0]);
+        // The pane moves a stop and re-sends the whole gradient.
+        let mut edited = before.clone();
+        edited.stops[1].pos = 0.75;
+        s.execute("shape.fill", &json!({"gradient": gradient_json(&edited)})).unwrap();
+        let after = fill(&s);
+        assert_eq!((after.tile, after.stops[1].pos), ([-1.0, -1.0, 0.0, 0.0], 0.75));
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(fill(&s), before);
+        s.execute("edit.redo", &json!({})).unwrap();
+        assert_eq!(fill(&s), after);
     }
 }
