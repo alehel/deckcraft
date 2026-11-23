@@ -222,6 +222,8 @@ Detail in [file-format-parity.md](file-format-parity.md).
   neither label. A combo chart's secondary value axis is read (`y2_*`,
   `Series.secondary_axis`) and is not written back when the chart is rebuilt.
   Axis tick marks are read and saved (`.pptx` and `.odp`) but not drawn.
+  A bar's or pie slice's own gradient or picture fill (`c:dPt`) is not drawn yet: the point
+  takes the colour it would have without one (solid, pattern and no-fill points are drawn).
   An unchanged chart's embedded workbook now survives save (#335); editing the chart still
   drops it rather than writing a stale spreadsheet. The workbook and other retained chart parts
   also survive `.deckcraft` save/reopen (`crates/engine/tests/it/chart_native.rs`), with binary
